@@ -265,12 +265,19 @@ jobs:
         shell: bash
         run: |
           rel="src-tauri/target/${{ matrix.target }}/release"
-          # Tauri renames the binary to the product name; fall back to the
-          # cargo package name in case that changes.
-          if [ -f "$rel/ShardBrowser Launcher.exe" ]; then
-            src="$rel/ShardBrowser Launcher.exe"
-          else
-            src="$rel/shardx-launcher.exe"
+          # Tauri renames the binary to the product name when it bundles; the
+          # raw target binary keeps the cargo package name. Read that name from
+          # Cargo.toml instead of spelling it here, so renaming the package
+          # cannot silently break the portable build again.
+          pkg=$(sed -n 's/^name *= *"\(.*\)"/\1/p' src-tauri/Cargo.toml | head -1)
+          src=""
+          for cand in "$rel/ShardBrowser Launcher.exe" "$rel/$pkg.exe"; do
+            if [ -f "$cand" ]; then src="$cand"; break; fi
+          done
+          if [ -z "$src" ]; then
+            echo "no launcher binary in $rel (cargo package: $pkg); it holds:" >&2
+            ls -la "$rel" >&2
+            exit 1
           fi
           cp -v "$src" "staging/ShardBrowser-Launcher-portable-${{ matrix.label }}.exe"
           ls -la staging/
@@ -278,7 +285,7 @@ jobs:
       - name: Upload to workflow artifacts (intermediate)
         uses: actions/upload-artifact@v4
         with:
-          name: shardx-launcher-${{ matrix.label }}
+          name: shardbrowser-launcher-${{ matrix.label }}
           path: staging/*
           if-no-files-found: error
 
