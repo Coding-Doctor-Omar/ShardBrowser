@@ -5,7 +5,7 @@ import { toast } from "../../../shared/model/toast";
 import { fingerprintImport } from "../../../entities/fingerprint";
 import { useT } from "../../../shared/i18n";
 
-export function FingerprintImporter({ onClose }: { onClose: () => void }) {
+export function FingerprintImporter({ open, onClose }: { open: boolean; onClose: () => void }) {
   const t = useT();
   const [text, setText] = useState("");
   const [name, setName] = useState("");
@@ -14,14 +14,14 @@ export function FingerprintImporter({ onClose }: { onClose: () => void }) {
       const e = await fingerprintImport(text, name || null);
       toast.ok(t("fingerprintImporter.imported", { name: e.label }));
       onClose();
-    } catch (e) { toast.err(String(e)); }
+    } catch (e) { toast.fail({ title: t("fingerprintImporter.failed"), detail: e }); }
   };
   return (
     <DialogModal
-      open
+      open={open}
       onClose={onClose}
       title={t("fingerprintImporter.title")}
-      maxWidthClassName="max-w-[880px]"
+      dirty={text.trim() !== "" || name.trim() !== ""}
       confirmLabel={t("fingerprintImporter.confirm")}
       onConfirm={save}
       cancelLabel={t("fingerprintImporter.cancel")}
@@ -32,7 +32,7 @@ export function FingerprintImporter({ onClose }: { onClose: () => void }) {
         <Textarea
           label={t("fingerprintImporter.jsonLabel")}
           rows={14}
-          className="mono w-[500px]"
+          className="mono w-full"
           value={text}
           onChange={(e) => setText(e.target.value)}
           placeholder='{ "name": "...", "navigator": { ... }, "webgl": { ... }, ... }'

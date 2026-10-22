@@ -135,7 +135,8 @@ Needs the default `control` feature.
 use shardx::motion::Motion;
 
 let session = sdk.session(profile, Default::default()).await?;
-let motion = Motion::new(&session.browser);
+let page = session.new_page("about:blank").await?;
+let motion = Motion::new(&page);
 
 // desktop profile
 motion.create_pointer(20.0, 20.0).await?;

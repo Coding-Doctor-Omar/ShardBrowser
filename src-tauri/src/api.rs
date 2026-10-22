@@ -1,4 +1,4 @@
-// Local automation HTTP API (axum) for ShardX Launcher.
+// Local automation HTTP API (axum) for ShardBrowser Launcher.
 // 127.0.0.1:<api_port>; every endpoint except /health requires Bearer JWT (HS256).
 
 use std::sync::{OnceLock, RwLock};
@@ -458,7 +458,10 @@ async fn edit_profile(Path(id): Path<String>, Json(body): Json<EditReq>) -> ApiR
     } else if let Some(pstr) = body.proxy.as_ref() {
         let entry = crate::proxy::parse_single(pstr)
             .ok_or_else(|| err(StatusCode::BAD_REQUEST, format!("unparseable proxy: {pstr}")))?;
-        let s = crate::proxy::upsert_dedup(entry)
+        // The profile's current proxy is passed in, so a line that differs
+        // from it only by its password updates that entry rather than
+        // leaving a dead one behind on every session change.
+        let s = crate::proxy::upsert_for_binding(entry, stored.meta.proxy_id.as_deref())
             .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
         let _ = crate::proxy::full_test(&s).await;
         stored.meta.proxy_id = Some(s.id);
@@ -613,7 +616,7 @@ struct AddProxyReq {
     notes: Option<String>,
 }
 
-/// Add proxy (deduped by endpoint); returns summary.
+/// Add proxy (an identical one already stored is reused); returns summary.
 async fn add_proxy(Json(body): Json<AddProxyReq>) -> ApiResult {
     let mut entry = if let Some(s) = body.proxy.as_ref() {
         crate::proxy::parse_single(s)
@@ -1102,7 +1105,20 @@ fn router() -> Router {
         .route("/automation/modules/:id", delete(remove_module))
         .route_layer(middleware::from_fn(auth));
 
-    Router::new().route("/health", get(health)).merge(protected)
+    Router::new()
+        .route("/health", get(health))
+        .merge(protected)
+        .layer(middleware::from_fn(unless_locked))
+}
+
+/// While the data is being moved or reset (the lock in migrate.rs), every
+/// route answers 503: nothing starts, and nothing is written into folders on
+/// their way out.
+async fn unless_locked(req: Request, next: Next) -> Response {
+    if crate::migrate::in_progress() {
+        return err(StatusCode::SERVICE_UNAVAILABLE, crate::launch::LOCKED).into_response();
+    }
+    next.run(req).await
 }
 
 #[cfg(test)]
@@ -1121,6 +1137,7 @@ mod tests {
 
     #[tokio::test]
     async fn automation_needs_a_token() {
+        let _serial = crate::migrate::serial();
         for (method, path) in [
             ("GET", "/automation/projects"),
             ("GET", "/automation/runs"),
@@ -1144,8 +1161,23 @@ mod tests {
     /// `/health` is the one route that stays open, for probing before a token.
     #[tokio::test]
     async fn health_stays_open() {
+        let _serial = crate::migrate::serial();
         let req = Request::builder().uri("/health").body(Body::empty()).unwrap();
         let res = router().oneshot(req).await.unwrap();
         assert_eq!(res.status(), StatusCode::OK);
+    }
+
+    /// I4: every route, open or not, answers 503 while the lock is held.
+    #[tokio::test]
+    async fn every_route_waits_while_the_data_lock_is_held() {
+        let _serial = crate::migrate::serial();
+        assert!(crate::migrate::hold());
+        let mut answers = Vec::new();
+        for (method, path) in [("GET", "/health"), ("GET", "/profiles"), ("POST", "/profiles/x/start")] {
+            let req = Request::builder().method(method).uri(path).body(Body::empty()).unwrap();
+            answers.push(router().oneshot(req).await.unwrap().status());
+        }
+        crate::migrate::release();
+        assert!(answers.iter().all(|s| *s == StatusCode::SERVICE_UNAVAILABLE), "{answers:?}");
     }
 }

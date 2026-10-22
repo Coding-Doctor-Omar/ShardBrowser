@@ -19,9 +19,9 @@ from typing import Callable, Optional
 import httpx
 
 PUB_BASE = "https://pub-e57a7c60f6934eb09a6600bf2fc59cdc.r2.dev"
-CHROMIUM_VERSION = "152.0.7977.65"
+CHROMIUM_VERSION = "156.0.8078.48"
 # This SDK's own version, compared against the manifest's `min_sdk_version`.
-SDK_VERSION = "2.0.3"
+SDK_VERSION = "2.1.0"
 # Version manifest (GitHub raw) — one tiny GET tells us every archive's current
 # etag, so we never poll R2/S3 (no per-archive HEAD). Updated archives are then
 # pulled from PUB_BASE only when their etag changed.
@@ -330,7 +330,15 @@ class Runtime:
         manifest = self._fetch_manifest()
         remote = manifest.get("archives") if isinstance(manifest.get("archives"), dict) else {}
         # Remember the engine version so launch can normalise profiles to it.
-        self._chromium_version = manifest.get("chromium_version") or CHROMIUM_VERSION
+        # Without the manifest, what is ALREADY installed — not the version
+        # this SDK was published with. Falling back to the constant made an
+        # offline run record 152 over an engine that is 156, and profiles then
+        # declared a version the engine does not have.
+        self._chromium_version = (
+            manifest.get("chromium_version")
+            or local.get("installed_chromium_version")
+            or CHROMIUM_VERSION
+        )
         self._grease_brand = manifest.get("grease_brand") or None
         self._grease_version = manifest.get("grease_version") or None
         remote_tls = manifest.get("tls")
@@ -354,8 +362,13 @@ class Runtime:
             # stale libs can't linger beside the new ones (that pinned the
             # detected version → endless re-download). binary_subpath[0] is the
             # engine root dir.
+            # Download BEFORE wiping. The old tree has to go — see above — but
+            # removing it first meant a download that failed left no engine at
+            # all, and nothing could launch until the network came back.
+            tmp, etag = self._download(self._spec.browser, self.root)
             shutil.rmtree(self.root / self._spec.binary_subpath[0], ignore_errors=True)
-            local["browser_etag"] = self._download_and_extract(self._spec.browser, self.root)
+            self._extract_archive(tmp, self.root)
+            local["browser_etag"] = etag
             if manifest.get("engine_build"):
                 local["installed_engine_build"] = manifest["engine_build"]
         # Widevine — only re-pull when browser changed (versions must match).
@@ -399,6 +412,12 @@ class Runtime:
             return {}
 
     def _download_and_extract(self, arch: Archive, dest: Path) -> str:
+        tmp, etag = self._download(arch, dest)
+        self._extract_archive(tmp, dest)
+        return etag
+
+    def _download(self, arch: Archive, dest: Path) -> tuple[Path, str]:
+        """Fetch `arch` beside `dest` without touching what is installed."""
         url = f"{PUB_BASE}/{arch.key}"
         tmp = dest / f".{arch.key}.tmp"
         tmp.parent.mkdir(parents=True, exist_ok=True)
@@ -414,6 +433,10 @@ class Runtime:
                     received += len(chunk)
                     if self._progress:
                         self._progress(arch.label, received, total)
+        return tmp, etag
+
+    def _extract_archive(self, tmp: Path, dest: Path) -> None:
+        """Unpack what `_download` left behind, and remove it."""
         # Extract.  IMPORTANT: on macOS/Linux we shell out to the system
         # `unzip` instead of Python's `zipfile` because zipfile cannot
         # restore symlinks (every `Versions/Current/...` link in a `.app`
@@ -427,7 +450,6 @@ class Runtime:
         else:
             _system_unzip(tmp, dest)
         tmp.unlink(missing_ok=True)
-        return etag
 
     def _place_widevine(self) -> None:
         if not self._spec.widevine:

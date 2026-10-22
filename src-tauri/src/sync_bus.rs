@@ -471,6 +471,27 @@ impl Bus {
         }
     }
 
+    /// Brings one profile's window to the front, with the keyboard.
+    ///
+    /// Asked of the browser rather than done from here: on macOS moving or
+    /// raising another application's window needs an Accessibility grant,
+    /// and the window belongs to the browser anyway. Returns whether anything
+    /// was listening, so the caller can say so when nothing was.
+    pub fn focus(&self, profile: &str) -> bool {
+        let st = self.state.lock().unwrap();
+        let mut sent = false;
+        for members in st.groups.values() {
+            for m in members {
+                if m.profile == profile {
+                    if m.tx.send("{\"focus\":true}\n".to_string()).is_ok() {
+                        sent = true;
+                    }
+                }
+            }
+        }
+        sent
+    }
+
     pub fn set_excluded(&self, group: &str, profile: &str, excluded: bool) {
         let mut st = self.state.lock().unwrap();
         if let Some(members) = st.groups.get_mut(group) {

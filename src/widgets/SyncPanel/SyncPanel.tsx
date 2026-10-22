@@ -3,9 +3,10 @@ import {
   syncStatus, syncSetPaused, syncArrange, syncStop, syncSetExcluded,
   syncClosePanel, type SyncStatus, type SyncLayout,
 } from "../../entities/profile/model/api";
-import { PlayIcon, PauseIcon, SyncIcon, StopIcon } from "../../shared/icons";
+import { Button, Chip, IconButton, Tooltip } from "@proxyshard/shardx-ui-kit";
+import { PlayIcon, PauseIcon, StopIcon } from "../../shared/icons";
+import { FloatingPanel } from "../../shared/ui/FloatingPanel";
 import { useT } from "../../shared/i18n";
-import { dragWindowOnMouseDown } from "../../shared/lib/dragWindow";
 
 /**
  * One floating control surface for the whole group. Every window is equal —
@@ -21,11 +22,14 @@ export function SyncPanel({ group }: { group: string }) {
 
   useEffect(() => {
     let alive = true;
+    let last = "";
     const tick = async () => {
       try {
         const s = await syncStatus(group);
         if (!alive) return;
-        setStatus(s);
+        // Unchanged: nothing to draw (PERF-23).
+        const json = JSON.stringify(s);
+        if (json !== last) { last = json; setStatus(s); }
         if (s.members.length > 0) everHadMembers.current = true;
         else if (everHadMembers.current) void syncClosePanel();
       } catch { /* the group may not exist yet */ }
@@ -45,38 +49,42 @@ export function SyncPanel({ group }: { group: string }) {
   };
 
   return (
-    // The whole panel drags. Explicit startDragging, not
-    // data-tauri-drag-region — Tauri tests that on the exact element hit.
-    <div
-      onMouseDown={dragWindowOnMouseDown}
-      className="flex h-screen w-screen flex-col rounded-12 bg-bg-white-0 ring-1 ring-inset ring-stroke-soft-200"
+    <FloatingPanel
+      title={t("syncPanel.inSyncCount", { n: members.length })}
+      actions={
+        <>
+          <IconButton
+            size="3xsmall"
+            mode="stroke"
+            tooltipSide="bottom"
+            disabled={busy}
+            icon={paused ? <PlayIcon className="size-3.5 translate-x-px" /> : <PauseIcon className="size-3.5" />}
+            label={paused ? t("syncPanel.resume") : t("syncPanel.hold")}
+            onMouseDown={(e) => e.stopPropagation()}
+            onClick={() => run(() => syncSetPaused(group, !paused))}
+          />
+          <IconButton
+            size="3xsmall"
+            mode="stroke"
+            variant="error"
+            tooltipSide="bottom"
+            disabled={busy}
+            icon={<StopIcon className="size-3.5" />}
+            label={t("syncPanel.stopAll")}
+            onMouseDown={(e) => e.stopPropagation()}
+            onClick={() => run(() => syncStop(group))}
+          />
+        </>
+      }
     >
-      <div className="flex shrink-0 select-none items-center gap-2 px-3 pt-2.5 pb-1.5">
-        <SyncIcon className="size-4 shrink-0 text-primary-base" />
-        <div className="flex-1 truncate text-label-xs text-text-strong-950">
-          {t("syncPanel.inSyncCount", { n: members.length })}
-        </div>
-        <button type="button" onMouseDown={(e) => e.stopPropagation()} disabled={busy}
-                onClick={() => run(() => syncSetPaused(group, !paused))}
-                title={paused ? t("syncPanel.resume") : t("syncPanel.hold")}
-                className="flex size-6 items-center justify-center rounded-6 text-text-sub-600 ring-1 ring-inset ring-stroke-soft-200 hover:bg-bg-weak-50 disabled:opacity-50">
-          {paused ? <PlayIcon className="size-3" /> : <PauseIcon className="size-3" />}
-        </button>
-        <button type="button" onMouseDown={(e) => e.stopPropagation()} disabled={busy}
-                onClick={() => run(() => syncStop(group))}
-                title={t("syncPanel.stopAll")}
-                className="flex size-6 items-center justify-center rounded-6 text-error-base ring-1 ring-inset ring-stroke-soft-200 hover:bg-error-lighter disabled:opacity-50">
-          <StopIcon className="size-3" />
-        </button>
-      </div>
-
       <div className="flex shrink-0 gap-1 px-3 pb-2">
         {(["row", "grid", "cascade"] as SyncLayout[]).map((l) => (
-          <button key={l} type="button" disabled={busy || members.length === 0}
-                  onClick={() => run(() => syncArrange(group, l))}
-                  className="flex-1 rounded-6 py-1 text-paragraph-xs capitalize text-text-sub-600 ring-1 ring-inset ring-stroke-soft-200 hover:bg-bg-weak-50 disabled:opacity-40">
+          <Button key={l} size="3xsmall" variant="neutral" mode="stroke" className="flex-1 capitalize"
+                  disabled={busy || members.length === 0}
+                  onMouseDown={(e) => e.stopPropagation()}
+                  onClick={() => run(() => syncArrange(group, l))}>
             {l}
-          </button>
+          </Button>
         ))}
       </div>
 
@@ -84,32 +92,35 @@ export function SyncPanel({ group }: { group: string }) {
           ordinary fleet. */}
       <div className="min-h-0 flex-1 content-start overflow-auto border-t border-stroke-soft-200 px-2 py-1.5">
         {members.length === 0 ? (
-          <div className="text-paragraph-xs text-text-soft-400">{t("syncPanel.starting")}</div>
+          <div className="text-secondary text-text-soft-400">{t("syncPanel.starting")}</div>
         ) : (
           <div className="flex flex-wrap gap-1">
             {members.map((m) => (
-              <button
+              <Tooltip
                 key={m.profile}
-                type="button"
-                disabled={busy}
-                onClick={() => run(() => syncSetExcluded(group, m.profile, !m.excluded))}
-                title={`${m.profile}${m.driving ? t("syncPanel.drivingSuffix") : ""}\n${
-                  m.excluded ? t("syncPanel.chipBringBack") : t("syncPanel.chipHoldOut")}`}
-                className={`flex max-w-[9rem] items-center gap-1 rounded-6 px-1.5 py-0.5 text-paragraph-xs ring-1 ring-inset disabled:opacity-50 ${
-                  m.excluded
-                    ? "text-text-soft-400 line-through ring-stroke-soft-200"
-                    : "text-text-sub-600 ring-stroke-soft-200 hover:bg-bg-weak-50"
-                }`}
+                content={m.excluded ? t("syncPanel.chipBringBack") : t("syncPanel.chipHoldOut")}
               >
-                {/* Where the input is coming from. */}
-                <span className={`size-1.5 shrink-0 rounded-full ${
-                  m.driving && !m.excluded ? "bg-success-base" : "bg-stroke-soft-200"}`} />
-                <span className="truncate">{m.profile}</span>
-              </button>
+              <Chip
+                size="xsmall"
+                tone="neutral"
+                selected={!m.excluded}
+                disabled={busy}
+                className={`max-w-[9rem] ${m.excluded ? "line-through" : ""}`}
+                onMouseDown={(e) => e.stopPropagation()}
+                onClick={() => run(() => syncSetExcluded(group, m.profile, !m.excluded))}
+              >
+                {/* Where the input is coming from: a word, never the dot
+                    alone (Task 5f) — "— driving" is part of the visible
+                    label, not only this decorative dot. */}
+                <span aria-hidden="true" className={`size-[5px] shrink-0 rounded-full forced-content ${
+                  m.driving && !m.excluded ? "bg-success-base" : "bg-idle"}`} />
+                <span className="truncate">{m.driving && !m.excluded ? t("syncPanel.memberDriving", { name: m.profile }) : m.profile}</span>
+              </Chip>
+              </Tooltip>
             ))}
           </div>
         )}
       </div>
-    </div>
+    </FloatingPanel>
   );
 }

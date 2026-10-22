@@ -1,12 +1,13 @@
 import { useEffect, useState } from "react";
-import { openUrl } from "@tauri-apps/plugin-opener";
-import { Button, Input } from "@proxyshard/shardx-ui-kit";
+import { Button, Card, DialogModal, IconButton, Input } from "@proxyshard/shardx-ui-kit";
 import { EyeIcon, EyeOffIcon, KeyIcon } from "../../../shared/icons";
-import { DASHBOARD_URL } from "../../../shared/lib/utils";
 import { useT } from "../../../shared/i18n";
 import { PsConnectionBadge, usePsAccount } from "../../../entities/proxyshard";
 
-export function PsApiKeyCard() {
+/// The key field, Save, and the check's result under it. One way to try again
+/// ("Check again", only after a failure and while the field holds the saved
+/// key), one place for the reason (PC-127).
+export function PsApiKeyForm({ autoFocus }: { autoFocus?: boolean }) {
   const t = useT();
   const key = usePsAccount((s) => s.key);
   const status = usePsAccount((s) => s.status);
@@ -14,67 +15,74 @@ export function PsApiKeyCard() {
   const err = usePsAccount((s) => s.err);
   const saveKey = usePsAccount((s) => s.saveKey);
   const refreshMe = usePsAccount((s) => s.refreshMe);
-
   const [draft, setDraft] = useState("");
   const [showKey, setShowKey] = useState(false);
-
-  // Sync the editable draft once the saved key loads from disk.
+  // The field follows the saved key once it loads from disk.
   useEffect(() => { setDraft(key ?? ""); }, [key]);
+  const changed = draft.trim() !== (key ?? "");
 
   return (
-    <div className="mb-3.5 rounded-lg bg-bg-white-0 p-[18px] shadow-[var(--shadow-xs)] ring-1 ring-inset ring-stroke-soft-200">
-      <h3 className="m-0 mb-1 text-label-sm text-text-strong-950">{t("psApiKeyCard.title")}</h3>
-      <p className="m-0 mb-2 text-paragraph-xs text-text-soft-400">
-        {t("psApiKeyCard.hintPart1")}<strong>{t("psApiKeyCard.hintApiKey")}</strong>{t("psApiKeyCard.hintPart2")}{" "}
-        <a
-          href="#"
-          className="text-primary-base hover:underline"
-          onClick={(e) => { e.preventDefault(); openUrl(DASHBOARD_URL).catch(() => {}); }}
-        >{t("psApiKeyCard.hintDashboard")}</a>{t("psApiKeyCard.hintPart3")}<code>Authorization: Bearer …</code>{t("psApiKeyCard.hintPart4")}
-      </p>
-      <div className="mt-1 flex items-center gap-2">
+    <div data-ps-key-state={status} className="flex flex-col gap-2">
+      <div className="flex items-center gap-2">
         <div className="min-w-0 flex-1">
           <Input
-            inputSize="small"
+            inputSize="xsmall"
+            aria-label={t("psApiKeyCard.hintApiKey")}
+            secret
+            autoFocus={autoFocus}
             type={showKey ? "text" : "password"}
-            placeholder={t("psApiKeyCard.inputPlaceholder")}
-            leftIcon={<KeyIcon className="size-4" />}
+            leftIcon={<KeyIcon className="size-3.5" />}
             value={draft}
             onChange={(e) => setDraft(e.target.value)}
-            onKeyDown={(e) => { if (e.key === "Enter") saveKey(draft); }}
+            onKeyDown={(e) => { if (e.key === "Enter" && changed) void saveKey(draft); }}
             rightIcon={
-              <button
-                type="button"
-                className="pointer-events-auto flex size-6 cursor-pointer items-center justify-center rounded-6 border-0 bg-transparent text-icon-soft-400 transition-colors hover:bg-bg-weak-50 hover:text-icon-strong-950"
-                title={showKey ? t("psApiKeyCard.hideKeyTitle") : t("psApiKeyCard.showKeyTitle")}
+              <IconButton
+                size="3xsmall"
+                className="pointer-events-auto"
+                icon={showKey ? <EyeOffIcon className="size-3.5" /> : <EyeIcon className="size-3.5" />}
+                label={showKey ? t("psApiKeyCard.hideKeyTitle") : t("psApiKeyCard.showKeyTitle")}
                 onClick={() => setShowKey((v) => !v)}
-              >
-                {showKey ? <EyeOffIcon className="size-4" /> : <EyeIcon className="size-4" />}
-              </button>
+              />
             }
           />
         </div>
-        <Button
-          variant="primary"
-          mode="filled"
-          size="small"
-          onClick={() => saveKey(draft)}
-          disabled={draft.trim() === (key ?? "")}
-        >
-          {t("psApiKeyCard.saveButton")}
-        </Button>
-        <Button
-          variant="neutral"
-          mode="stroke"
-          size="small"
-          onClick={refreshMe}
-          disabled={!key || status === "checking"}
-          isLoading={status === "checking"}
-        >
-          {status === "checking" ? t("psApiKeyCard.checkingButton") : t("psApiKeyCard.testButton")}
-        </Button>
+        {status === "err" && !changed ? (
+          <Button variant="neutral" mode="stroke" size="xsmall" onClick={() => void refreshMe()}>{t("psStates.checkAgain")}</Button>
+        ) : (
+          <Button variant="primary" mode="filled" size="xsmall" disabled={!changed} isLoading={status === "checking"} onClick={() => void saveKey(draft)}>
+            {t("psApiKeyCard.saveButton")}
+          </Button>
+        )}
       </div>
       <PsConnectionBadge status={status} me={me} err={err} hasKey={!!key} />
     </div>
+  );
+}
+
+/// The page while no key works: this card is all there is (craft target).
+export function PsKeySetup() {
+  const t = useT();
+  return (
+    <Card data-ps-key-setup padding="sm" className="flex flex-col gap-3">
+      <div className="flex flex-col gap-1">
+        <h2 className="m-0 text-section-title text-text-strong-950">{t("psKey.setupTitle")}</h2>
+        <p className="m-0 text-help text-text-sub-600">{t("psKey.setupHelp")}</p>
+      </div>
+      <PsApiKeyForm />
+    </Card>
+  );
+}
+
+/// "Change API key…" from the header menu while connected. It closes with
+/// Esc or its close button; a key saved here shows its check here.
+export function PsKeyDialog({ open, onClose }: { open: boolean; onClose: () => void }) {
+  const t = useT();
+  return (
+    <DialogModal open={open} onClose={onClose} size="sm" title={t("psKey.changeTitle")} hideFooter>
+      <div className="flex flex-col gap-2 py-4">
+        <p className="m-0 text-help text-text-sub-600">{t("psKey.setupHelp")}</p>
+        <PsApiKeyForm autoFocus />
+      </div>
+    </DialogModal>
   );
 }

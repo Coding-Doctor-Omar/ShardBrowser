@@ -190,7 +190,12 @@ export class Browser {
     const cdpMarker = join(udd, "DevToolsActivePort");
     if (opts.cdp) {
       if (existsSync(cdpMarker)) rmSync(cdpMarker, { force: true });
-      argv.push("--remote-debugging-port=0", "--remote-allow-origins=*");
+      // Gates the Motion domain, which every synthesised click and keystroke
+      // goes through. Without it `Motion.createPointer` comes back as "wasn't
+      // found": the domain is absent from Schema.getDomains and
+      // /json/protocol rather than merely disabled, which is what keeps it
+      // free when nobody uses it. The launcher passes the same flag.
+      argv.push("--remote-debugging-port=0", "--remote-allow-origins=*", "--shardx-automation");
     }
     if (opts.headless) argv.push("--headless=new");
     if (opts.extraArgs) argv.push(...opts.extraArgs);

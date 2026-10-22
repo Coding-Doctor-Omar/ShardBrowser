@@ -7,7 +7,7 @@ import { useT } from "../../../shared/i18n";
 import type { PsOrder } from "../../../entities/proxyshard";
 import { psSetTag } from "../../../entities/proxyshard";
 
-export function PsTagModal({ order, onClose, onDone }: { order: PsOrder; onClose: () => void; onDone: () => void }) {
+export function PsTagModal({ open, order, onClose, onDone }: { open: boolean; order: PsOrder; onClose: () => void; onDone: () => void }) {
   const t = useT();
   const [tag, setTag] = useState(order.tag && order.tag !== "none" ? order.tag : "");
   const [busy, setBusy] = useState(false);
@@ -17,14 +17,14 @@ export function PsTagModal({ order, onClose, onDone }: { order: PsOrder; onClose
       await psSetTag(order.order_id, tag.trim() || "none");
       toast.ok(t("psTagModal.tagUpdated", { id: order.order_id }));
       onDone();
-    } catch (e) { toast.err(String(e)); }
+    } catch (e) { toast.fail({ title: t("psTagModal.failed", { id: order.order_id }), detail: e }); }
     finally { setBusy(false); }
   };
   return (
     <DialogModal
-      open
+      open={open}
       onClose={onClose}
-      icon={<EditIcon className="size-5" />}
+      icon={<EditIcon className="size-3.5" />}
       title={t("psTagModal.title")}
       subtitle={t("psTagModal.subtitle", { name: order.product_name, id: order.order_id })}
       confirmLabel={busy ? t("psTagModal.saving") : t("psTagModal.save")}

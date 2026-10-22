@@ -161,7 +161,9 @@ page — and it does not appear in `/json/protocol`, so a page cannot discover i
 import { ShardX, Motion } from "@proxyshard/shardx";
 
 const { browser, session } = await sdk.session(profile);
-const motion = await Motion.attach(browser);
+const page = await browser.newPage();
+// Motion acts on a page's widget, so it attaches to a page.
+const motion = await Motion.attach(page);
 
 // desktop profile
 await motion.createPointer(20, 20);

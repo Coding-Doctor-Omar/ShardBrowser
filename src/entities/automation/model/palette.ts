@@ -6,6 +6,85 @@
  *  one puts it through t() first; searching does the same, so a person types
  *  what they see. */
 
+import {
+  ApiIcon,
+  ArrowLeft02Icon,
+  ArrowRight02Icon,
+  StopCircleIcon,
+  ArrowReloadHorizontalIcon,
+  ArrowTurnForwardIcon,
+  Building02Icon,
+  Calculator01Icon,
+  Camera01Icon,
+  CancelCircleIcon,
+  Clock01Icon,
+  CodeIcon,
+  CodeSquareIcon,
+  ConsoleIcon,
+  Cursor01Icon,
+  CursorHold01Icon,
+  CursorPointer01Icon,
+  CursorRectangleSelection01Icon,
+  Database01Icon,
+  DatabaseIcon,
+  DatabaseLockedIcon,
+  DatabaseSearchIcon,
+  DatabaseZapIcon,
+  DicesIcon,
+  Download04Icon,
+  DragDropHorizontalIcon,
+  DragDropIcon,
+  Edit02Icon,
+  Eraser01Icon,
+  FileAddIcon,
+  FloppyDiskIcon,
+  GitBranchIcon,
+  Globe02Icon,
+  HandGripIcon,
+  HourglassIcon,
+  KeyboardIcon,
+  Link01Icon,
+  Link04Icon,
+  Loading03Icon,
+  Login01Icon,
+  Logout01Icon,
+  MousePointerClickIcon,
+  MousePointerIcon,
+  MouseRightClick01Icon,
+  MouseScroll01Icon,
+  MoveDiagonalIcon,
+  NetworkIcon,
+  ScanEyeIcon,
+  Shield01Icon,
+  SmartphoneIcon,
+  SparklesIcon,
+  SplitIcon,
+  Table01Icon,
+  TextAlignLeftIcon,
+  TextCheckIcon,
+  TextFontIcon,
+  TextNumberSignIcon,
+  TextSearchIcon,
+  TextSelectIcon,
+  Touch01Icon,
+  TouchInteraction01Icon,
+  Upload04Icon,
+  User03Icon,
+  UserAdd01Icon,
+  UserIcon,
+  UserRemove01Icon,
+  VariableIcon,
+  ViewIcon,
+  ViewOffSlashIcon,
+  WorkflowSquare03Icon,
+  PuzzleIcon,
+  Layers01Icon,
+} from "@hugeicons/core-free-icons";
+
+/** A Hugeicons stroke glyph (data, drawn by StepIcon). */
+export type StepIconData = typeof Globe02Icon;
+
+
 export type ParamKind =
   | "text"
   | "number"
@@ -25,6 +104,13 @@ export type ParamSpec = {
   kind: ParamKind;
   /** Shown when the field is empty. */
   hint?: string;
+  /** A number setting's digits after the point: 0 for px, ms and counts,
+   *  so "1,000" reads as 1000 (F11 fix round 3). Unset keeps 2, for seconds,
+   *  a scale and a module's own settings. */
+  decimals?: number;
+  /** A number setting's range, brought into when the field is left. */
+  min?: number;
+  max?: number;
   options?: string[];
   default?: string | number;
   /** For a dependent picker: the sibling param whose value it reads. */
@@ -37,21 +123,25 @@ export type ParamSpec = {
 
 export type BlockSpec = {
   kind: string;
+  /** The glyph beside the step everywhere it shows (blockIcon reads it). */
+  icon?: StepIconData;
   label: string;
   /** One line, shown under the name in the picker. */
   about: string;
   params: ParamSpec[];
 };
 
-export type Category = { id: string; label: string; blocks: BlockSpec[] };
+export type Category = { id: string; label: string; icon?: StepIconData; blocks: BlockSpec[] };
 
 export const PALETTE: Category[] = [
   {
     id: "profile",
+    icon: UserIcon,
     label: "palette.cat.profile",
     blocks: [
       {
         kind: "profile.temp",
+        icon: Clock01Icon,
         label: "palette.profileTemp.label",
         about: "palette.profileTemp.about",
         params: [
@@ -62,6 +152,7 @@ export const PALETTE: Category[] = [
       },
       {
         kind: "profile.create",
+        icon: UserAdd01Icon,
         label: "palette.profileCreate.label",
         about: "palette.profileCreate.about",
         params: [
@@ -74,28 +165,31 @@ export const PALETTE: Category[] = [
       },
       {
         kind: "proxy.swap",
+        icon: ArrowReloadHorizontalIcon,
         label: "palette.proxySwap.label",
-        about:
-          "Changes the profile's proxy without restarting the browser (through the core; keeps the WebRTC/QUIC UDP relay). Leave empty for a direct connection.",
+        about: "blockPicker.about.proxySwap",
         params: [
           { name: "proxy", label: "palette.proxySwap.proxy.label", kind: "text", hint: "palette.proxySwap.proxy.hint", secret: true },
         ],
       },
       {
         kind: "profile.use",
+        icon: UserIcon,
         label: "palette.profileUse.label",
         about: "palette.profileUse.about",
         params: [{ name: "id", label: "palette.profileUse.id.label", kind: "text", hint: "palette.profileUse.id.hint" }],
       },
       {
         kind: "profile.keep",
+        icon: FloppyDiskIcon,
         label: "palette.profileKeep.label",
         about: "palette.profileKeep.about",
         params: [{ name: "folder", label: "palette.profileKeep.folder.label", kind: "text", hint: "palette.profileKeep.folder.hint" }],
       },
       {
         kind: "profile.read",
-        label: "palette.profileRead.label",
+        icon: ViewIcon,
+        label: "blockPicker.step.profileRead",
         about: "palette.profileRead.about",
         params: [
           {
@@ -109,6 +203,7 @@ export const PALETTE: Category[] = [
       },
       {
         kind: "profile.delete",
+        icon: UserRemove01Icon,
         label: "palette.profileDelete.label",
         about: "palette.profileDelete.about",
         params: [{ name: "id", label: "palette.profileDelete.id.label", kind: "text", hint: "palette.profileDelete.id.hint" }],
@@ -117,19 +212,21 @@ export const PALETTE: Category[] = [
   },
   {
     id: "proxy",
+    icon: Shield01Icon,
     label: "palette.cat.proxy",
     blocks: [
       {
         kind: "proxy.set",
+        icon: Shield01Icon,
         label: "palette.proxySet.label",
         about: "palette.proxySet.about",
         params: [{ name: "proxy", label: "palette.proxySet.proxy.label", kind: "text", hint: "palette.proxySet.proxy.hint", secret: true }],
       },
       {
         kind: "proxy.residential",
-        label: "palette.proxyResidential.label",
-        about:
-          "Builds a ProxyShard residential session the way the generator card does, and puts it on the profile. Stops the run if the plan has no traffic left.",
+        icon: Building02Icon,
+        label: "blockPicker.step.proxyResidential",
+        about: "blockPicker.about.proxyResidential",
         params: [
           {
             name: "plan",
@@ -177,6 +274,7 @@ export const PALETTE: Category[] = [
       },
       {
         kind: "proxy.generate",
+        icon: SparklesIcon,
         label: "palette.proxyGenerate.label",
         about: "palette.proxyGenerate.about",
         params: [
@@ -189,19 +287,22 @@ export const PALETTE: Category[] = [
   },
   {
     id: "navigation",
+    icon: Globe02Icon,
     label: "palette.cat.navigation",
     blocks: [
       {
         kind: "goto",
+        icon: Globe02Icon,
         label: "palette.goto.label",
         about: "palette.goto.about",
         params: [{ name: "url", label: "palette.goto.url.label", kind: "url", hint: "palette.goto.url.hint" }],
       },
-      { kind: "back", label: "palette.back.label", about: "palette.back.about", params: [] },
-      { kind: "forward", label: "palette.forward.label", about: "palette.forward.about", params: [] },
-      { kind: "reload", label: "palette.reload.label", about: "palette.reload.about", params: [] },
+      { kind: "back", icon: ArrowLeft02Icon, label: "palette.back.label", about: "palette.back.about", params: [] },
+      { kind: "forward", icon: ArrowRight02Icon, label: "palette.forward.label", about: "palette.forward.about", params: [] },
+      { kind: "reload", icon: ArrowReloadHorizontalIcon, label: "palette.reload.label", about: "palette.reload.about", params: [] },
       {
         kind: "waitLoad",
+        icon: Loading03Icon,
         label: "palette.waitload.label",
         about: "palette.waitload.about",
         params: [{ name: "timeout", label: "palette.waitload.timeout.label", kind: "number", default: 30 }],
@@ -213,71 +314,78 @@ export const PALETTE: Category[] = [
     // handset. The ordinary Pointer steps already become touches on a phone
     // profile — these are the ones with no desktop twin at all.
     id: "touch",
+    icon: Touch01Icon,
     label: "palette.cat.touch",
     blocks: [
       {
         kind: "touch.tap",
+        icon: Touch01Icon,
         label: "palette.touchTap.label",
         about: "palette.touchTap.about",
         params: [
           { name: "selector", label: "palette.touchTap.selector.label", kind: "text", hint: "palette.touchTap.selector.hint" },
-          { name: "x", label: "palette.touchTap.x.label", kind: "number" },
-          { name: "y", label: "palette.touchTap.y.label", kind: "number" },
-          { name: "tapCount", label: "palette.touchTap.tapcount.label", kind: "number", default: 1 },
+          { name: "x", label: "palette.touchTap.x.label", kind: "number", decimals: 0 },
+          { name: "y", label: "palette.touchTap.y.label", kind: "number", decimals: 0 },
+          { name: "tapCount", label: "palette.touchTap.tapcount.label", kind: "number", decimals: 0, default: 1 },
           { name: "timeout", label: "palette.touchTap.timeout.label", kind: "number", default: 5 },
         ],
       },
       {
         kind: "touch.longPress",
+        icon: CursorHold01Icon,
         label: "palette.touchLongPress.label",
         about: "palette.touchLongPress.about",
         params: [
           { name: "selector", label: "palette.touchLongPress.selector.label", kind: "text", hint: "palette.touchLongPress.selector.hint" },
-          { name: "x", label: "palette.touchLongPress.x.label", kind: "number" },
-          { name: "y", label: "palette.touchLongPress.y.label", kind: "number" },
+          { name: "x", label: "palette.touchLongPress.x.label", kind: "number", decimals: 0 },
+          { name: "y", label: "palette.touchLongPress.y.label", kind: "number", decimals: 0 },
           { name: "timeout", label: "palette.touchLongPress.timeout.label", kind: "number", default: 5 },
         ],
       },
       {
         kind: "touch.swipe",
+        icon: TouchInteraction01Icon,
         label: "palette.touchSwipe.label",
         about: "palette.touchSwipe.about",
         params: [
           { name: "selector", label: "palette.touchSwipe.selector.label", kind: "text", hint: "palette.touchSwipe.selector.hint" },
-          { name: "dx", label: "palette.touchSwipe.dx.label", kind: "number", default: 0 },
-          { name: "dy", label: "palette.touchSwipe.dy.label", kind: "number", default: 0 },
+          { name: "dx", label: "palette.touchSwipe.dx.label", kind: "number", decimals: 0, default: 0 },
+          { name: "dy", label: "palette.touchSwipe.dy.label", kind: "number", decimals: 0, default: 0 },
           { name: "timeout", label: "palette.touchSwipe.timeout.label", kind: "number", default: 5 },
         ],
       },
       {
         kind: "touch.drag",
+        icon: DragDropIcon,
         label: "palette.touchDrag.label",
         about: "palette.touchDrag.about",
         params: [
           { name: "selector", label: "palette.touchDrag.selector.label", kind: "text", hint: "palette.touchDrag.selector.hint" },
           { name: "to", label: "palette.touchDrag.to.label", kind: "text", hint: "palette.touchDrag.to.hint" },
-          { name: "holdMs", label: "palette.touchDrag.holdms.label", kind: "number", hint: "palette.touchDrag.holdms.hint" },
+          { name: "holdMs", label: "palette.touchDrag.holdms.label", kind: "number", decimals: 0, hint: "palette.touchDrag.holdms.hint" },
           { name: "timeout", label: "palette.touchDrag.timeout.label", kind: "number", default: 5 },
         ],
       },
       {
         kind: "touch.pinch",
+        icon: MoveDiagonalIcon,
         label: "palette.touchPinch.label",
         about: "palette.touchPinch.about",
         params: [
           { name: "scale", label: "palette.touchPinch.scale.label", kind: "number", default: 2 },
           { name: "selector", label: "palette.touchPinch.selector.label", kind: "text", hint: "palette.touchPinch.selector.hint" },
-          { name: "x", label: "palette.touchPinch.x.label", kind: "number" },
-          { name: "y", label: "palette.touchPinch.y.label", kind: "number" },
+          { name: "x", label: "palette.touchPinch.x.label", kind: "number", decimals: 0 },
+          { name: "y", label: "palette.touchPinch.y.label", kind: "number", decimals: 0 },
         ],
       },
       {
         kind: "screen.rotate",
+        icon: SmartphoneIcon,
         label: "palette.screenRotate.label",
         about: "palette.screenRotate.about",
         params: [
-          { name: "angle", label: "palette.screenRotate.angle.label", kind: "number", default: 90, hint: "palette.screenRotate.angle.hint" },
-          { name: "turnMs", label: "palette.screenRotate.turnms.label", kind: "number", hint: "palette.screenRotate.turnms.hint" },
+          { name: "angle", label: "palette.screenRotate.angle.label", kind: "number", decimals: 0, default: 90, hint: "palette.screenRotate.angle.hint" },
+          { name: "turnMs", label: "palette.screenRotate.turnms.label", kind: "number", decimals: 0, hint: "palette.screenRotate.turnms.hint" },
           { name: "into", label: "palette.screenRotate.into.label", kind: "text", hint: "palette.screenRotate.into.hint" },
         ],
       },
@@ -285,10 +393,12 @@ export const PALETTE: Category[] = [
   },
   {
     id: "pointer",
+    icon: MousePointerIcon,
     label: "palette.cat.pointer",
     blocks: [
       {
         kind: "click",
+        icon: MousePointerClickIcon,
         label: "palette.click.label",
         about: "palette.click.about",
         params: [{ name: "selector", label: "palette.click.selector.label", kind: "text", hint: "palette.click.selector.hint" },
@@ -297,6 +407,7 @@ export const PALETTE: Category[] = [
       },
       {
         kind: "doubleClick",
+        icon: CursorPointer01Icon,
         label: "palette.doubleclick.label",
         about: "palette.doubleclick.about",
         params: [{ name: "selector", label: "palette.doubleclick.selector.label", kind: "text", hint: "palette.doubleclick.selector.hint" },
@@ -305,6 +416,7 @@ export const PALETTE: Category[] = [
       },
       {
         kind: "rightClick",
+        icon: MouseRightClick01Icon,
         label: "palette.rightclick.label",
         about: "palette.rightclick.about",
         params: [{ name: "selector", label: "palette.rightclick.selector.label", kind: "text", hint: "palette.rightclick.selector.hint" },
@@ -313,6 +425,7 @@ export const PALETTE: Category[] = [
       },
       {
         kind: "hover",
+        icon: Cursor01Icon,
         label: "palette.hover.label",
         about: "palette.hover.about",
         params: [{ name: "selector", label: "palette.hover.selector.label", kind: "text", hint: "palette.hover.selector.hint" },
@@ -321,7 +434,8 @@ export const PALETTE: Category[] = [
       },
       {
         kind: "drag",
-        label: "palette.drag.label",
+        icon: DragDropHorizontalIcon,
+        label: "blockPicker.step.drag",
         about: "palette.drag.about",
         params: [
           { name: "selector", label: "palette.drag.selector.label", kind: "text", hint: "palette.drag.selector.hint" },
@@ -333,19 +447,19 @@ export const PALETTE: Category[] = [
             options: ["left", "middle", "right"],
             default: "left",
           },
-          { name: "holdMs", label: "palette.select.holdms.label", kind: "number", hint: "palette.select.holdms.hint" },
+          { name: "holdMs", label: "palette.select.holdms.label", kind: "number", decimals: 0, hint: "palette.select.holdms.hint" },
           { name: "timeout", label: "palette.select.timeout.label", kind: "number", default: 5 },
         ],
       },
       {
         kind: "swipe",
-        label: "palette.swipe.label",
-        about:
-          "Presses and moves by a distance, then lets go — a slider, a canvas, a sweep that selects text. Starts in the middle of the page when no element is named.",
+        icon: HandGripIcon,
+        label: "blockPicker.step.swipe",
+        about: "blockPicker.about.swipe",
         params: [
           { name: "selector", label: "palette.swipe.selector.label", kind: "text", hint: "palette.swipe.selector.hint" },
-          { name: "dx", label: "palette.swipe.dx.label", kind: "number", default: 0 },
-          { name: "dy", label: "palette.swipe.dy.label", kind: "number", default: 0 },
+          { name: "dx", label: "palette.swipe.dx.label", kind: "number", decimals: 0, default: 0 },
+          { name: "dy", label: "palette.swipe.dy.label", kind: "number", decimals: 0, default: 0 },
           {
             name: "button",
             label: "palette.swipe.label",
@@ -358,11 +472,12 @@ export const PALETTE: Category[] = [
       },
       {
         kind: "scroll",
+        icon: MouseScroll01Icon,
         label: "palette.scroll.label",
         about: "palette.scroll.about",
         params: [
-          { name: "deltaY", label: "palette.scroll.deltay.label", kind: "number", default: 600 },
-          { name: "deltaX", label: "palette.scroll.deltax.label", kind: "number", default: 0 },
+          { name: "deltaY", label: "palette.scroll.deltay.label", kind: "number", decimals: 0, default: 600 },
+          { name: "deltaX", label: "palette.scroll.deltax.label", kind: "number", decimals: 0, default: 0 },
           { name: "timeout", label: "palette.scroll.timeout.label", kind: "number", default: 5 },
         ],
       },
@@ -370,10 +485,12 @@ export const PALETTE: Category[] = [
   },
   {
     id: "keyboard",
+    icon: KeyboardIcon,
     label: "palette.cat.keyboard",
     blocks: [
       {
         kind: "type",
+        icon: TextFontIcon,
         label: "palette.type.label",
         about: "palette.type.about",
         params: [
@@ -384,6 +501,7 @@ export const PALETTE: Category[] = [
       },
       {
         kind: "press",
+        icon: KeyboardIcon,
         label: "palette.press.label",
         about: "palette.press.about",
         params: [
@@ -393,6 +511,7 @@ export const PALETTE: Category[] = [
       },
       {
         kind: "clear",
+        icon: Eraser01Icon,
         label: "palette.clear.label",
         about: "palette.clear.about",
         params: [{ name: "selector", label: "palette.clear.selector.label", kind: "text", hint: "palette.clear.selector.hint" },
@@ -403,10 +522,12 @@ export const PALETTE: Category[] = [
   },
   {
     id: "flow",
+    icon: WorkflowSquare03Icon,
     label: "palette.cat.flow",
     blocks: [
       {
         kind: "flow.call",
+        icon: WorkflowSquare03Icon,
         label: "palette.flowCall.label",
         about: "palette.flowCall.about",
         params: [
@@ -418,6 +539,7 @@ export const PALETTE: Category[] = [
       },
       {
         kind: "flow.entry",
+        icon: Login01Icon,
         label: "palette.flowEntry.label",
         about: "palette.flowEntry.about",
         params: [
@@ -427,12 +549,14 @@ export const PALETTE: Category[] = [
       },
       {
         kind: "wait",
+        icon: HourglassIcon,
         label: "palette.wait.label",
         about: "palette.wait.about",
         params: [{ name: "seconds", label: "palette.wait.seconds.label", kind: "number", default: 2 }],
       },
       {
         kind: "waitFor",
+        icon: ScanEyeIcon,
         label: "palette.waitfor.label",
         about: "palette.waitfor.about",
         params: [
@@ -442,6 +566,7 @@ export const PALETTE: Category[] = [
       },
       {
         kind: "waitGone",
+        icon: ViewOffSlashIcon,
         label: "palette.waitgone.label",
         about: "palette.waitgone.about",
         params: [
@@ -451,6 +576,7 @@ export const PALETTE: Category[] = [
       },
       {
         kind: "waitText",
+        icon: TextSearchIcon,
         label: "palette.waittext.label",
         about: "palette.waittext.about",
         params: [
@@ -461,6 +587,7 @@ export const PALETTE: Category[] = [
       },
       {
         kind: "waitUrl",
+        icon: Link04Icon,
         label: "palette.waiturl.label",
         about: "palette.waiturl.about",
         params: [
@@ -470,15 +597,16 @@ export const PALETTE: Category[] = [
       },
       {
         kind: "ifExists",
+        icon: SplitIcon,
         label: "palette.ifexists.label",
         about: "palette.ifexists.about",
         params: [{ name: "selector", label: "palette.ifexists.selector.label", kind: "text", hint: "palette.ifexists.selector.hint" }],
       },
       {
         kind: "if.value",
-        label: "palette.ifValue.label",
-        about:
-          "Branches on two values. True → “when it works”; false → “when it fails” (your else). Set both branches in the step's panel.",
+        icon: GitBranchIcon,
+        label: "blockPicker.step.ifValue",
+        about: "blockPicker.about.ifValue",
         params: [
           { name: "a", label: "palette.ifValue.a.label", kind: "text", hint: "palette.ifValue.a.hint" },
           {
@@ -493,13 +621,15 @@ export const PALETTE: Category[] = [
       },
       {
         kind: "if.exists",
+        icon: CursorRectangleSelection01Icon,
         label: "palette.ifExists.label",
         about: "palette.ifExists.about",
         params: [{ name: "selector", label: "palette.ifExists.selector.label", kind: "text", hint: "palette.ifExists.selector.hint" }],
       },
       {
         kind: "if.text",
-        label: "palette.ifText.label",
+        icon: TextCheckIcon,
+        label: "blockPicker.step.ifText",
         about: "palette.ifText.about",
         params: [
           { name: "selector", label: "palette.ifText.selector.label", kind: "text", hint: "palette.ifText.selector.hint" },
@@ -515,7 +645,8 @@ export const PALETTE: Category[] = [
       },
       {
         kind: "if.url",
-        label: "palette.ifUrl.label",
+        icon: Link01Icon,
+        label: "blockPicker.step.ifUrl",
         about: "palette.ifUrl.about",
         params: [
           {
@@ -528,18 +659,19 @@ export const PALETTE: Category[] = [
           { name: "text", label: "palette.select.text.label", kind: "text", hint: "palette.select.text.hint" },
         ],
       },
-      { kind: "stop", label: "palette.stop.label", about: "palette.stop.about", params: [] },
+      { kind: "stop", icon: StopCircleIcon, label: "palette.stop.label", about: "palette.stop.about", params: [] },
     ],
   },
   {
     id: "requests",
+    icon: ApiIcon,
     label: "palette.cat.requests",
     blocks: [
       {
         kind: "script.run",
+        icon: ConsoleIcon,
         label: "palette.scriptRun.label",
-        about:
-          "Runs your JS in the page through the core's isolated world — no page-visible trace (not Runtime.evaluate). Pick the page's own world only when the script must read the page's own variables.",
+        about: "blockPicker.about.scriptRun",
         params: [
           { name: "source", label: "palette.scriptRun.source.label", kind: "textarea", hint: "palette.scriptRun.source.hint" },
           { name: "file", label: "palette.scriptRun.file.label", kind: "text", hint: "palette.scriptRun.file.hint" },
@@ -549,9 +681,9 @@ export const PALETTE: Category[] = [
       },
       {
         kind: "http.request",
-        label: "palette.httpRequest.label",
-        about:
-          "Sends it from the launcher, not from the page — with a chosen TLS fingerprint and, by default, through the profile's own proxy.",
+        icon: ApiIcon,
+        label: "blockPicker.step.httpRequest",
+        about: "blockPicker.about.httpRequest",
         params: [
           {
             name: "method",
@@ -606,6 +738,7 @@ export const PALETTE: Category[] = [
       },
       {
         kind: "http.endSession",
+        icon: Logout01Icon,
         label: "palette.httpEndSession.label",
         about: "palette.httpEndSession.about",
         params: [{ name: "session", label: "palette.httpEndSession.session.label", kind: "text" }],
@@ -614,20 +747,22 @@ export const PALETTE: Category[] = [
   },
   {
     id: "traffic",
+    icon: NetworkIcon,
     label: "palette.cat.traffic",
     blocks: [
       {
         kind: "traffic.observe",
+        icon: NetworkIcon,
         label: "palette.trafficObserve.label",
-        about:
-          "Starts capturing this profile's requests so you can open them in the Traffic tab and seed rules from the real response. Turn it off to stop.",
+        about: "blockPicker.about.trafficObserve",
         params: [
           { name: "enabled", label: "palette.trafficObserve.enabled.label", kind: "select", options: ["on", "off"], default: "on" },
         ],
       },
       {
         kind: "traffic.block",
-        label: "palette.trafficBlock.label",
+        icon: CancelCircleIcon,
+        label: "blockPicker.step.trafficBlock",
         about: "palette.trafficBlock.about",
         params: [
           { name: "url", label: "palette.trafficBlock.url.label", kind: "text", hint: "palette.trafficBlock.url.hint" },
@@ -644,9 +779,9 @@ export const PALETTE: Category[] = [
       },
       {
         kind: "traffic.redirect",
-        label: "palette.trafficRedirect.label",
-        about:
-          "Sends a matching request to another address, transparently — the page still sees the original URL.",
+        icon: ArrowTurnForwardIcon,
+        label: "blockPicker.step.trafficRedirect",
+        about: "blockPicker.about.trafficRedirect",
         params: [
           { name: "url", label: "palette.trafficRedirect.url.label", kind: "text", hint: "palette.trafficRedirect.url.hint" },
           { name: "to", label: "palette.trafficRedirect.to.label", kind: "url", hint: "palette.trafficRedirect.to.hint" },
@@ -662,7 +797,8 @@ export const PALETTE: Category[] = [
       },
       {
         kind: "traffic.setHeaders",
-        label: "palette.trafficSetHeaders.label",
+        icon: Edit02Icon,
+        label: "blockPicker.step.trafficSetHeaders",
         about: "palette.trafficSetHeaders.about",
         params: [
           { name: "url", label: "palette.trafficSetHeaders.url.label", kind: "text", hint: "palette.trafficSetHeaders.url.hint" },
@@ -680,11 +816,12 @@ export const PALETTE: Category[] = [
       },
       {
         kind: "traffic.editResponse",
-        label: "palette.trafficEditResponse.label",
+        icon: CodeSquareIcon,
+        label: "blockPicker.step.trafficEditResponse",
         about: "palette.trafficEditResponse.about",
         params: [
           { name: "url", label: "palette.trafficEditResponse.url.label", kind: "text", hint: "palette.trafficEditResponse.url.hint" },
-          { name: "status", label: "palette.trafficEditResponse.status.label", kind: "number", hint: "palette.trafficEditResponse.status.hint" },
+          { name: "status", label: "palette.trafficEditResponse.status.label", kind: "number", decimals: 0, min: 100, max: 599, hint: "palette.trafficEditResponse.status.hint" },
           { name: "responseHeaders", label: "palette.trafficEditResponse.responseheaders.label", kind: "textarea", hint: "palette.trafficEditResponse.responseheaders.hint" },
           { name: "responseBody", label: "palette.trafficEditResponse.responsebody.label", kind: "textarea", hint: "palette.trafficEditResponse.responsebody.hint" },
           {
@@ -698,11 +835,12 @@ export const PALETTE: Category[] = [
       },
       {
         kind: "traffic.fulfill",
-        label: "palette.trafficFulfill.label",
+        icon: FileAddIcon,
+        label: "blockPicker.step.trafficFulfill",
         about: "palette.trafficFulfill.about",
         params: [
           { name: "url", label: "palette.trafficFulfill.url.label", kind: "text", hint: "palette.trafficFulfill.url.hint" },
-          { name: "status", label: "palette.trafficFulfill.status.label", kind: "number", default: 200 },
+          { name: "status", label: "palette.trafficFulfill.status.label", kind: "number", decimals: 0, min: 100, max: 599, default: 200 },
           { name: "responseHeaders", label: "palette.trafficFulfill.responseheaders.label", kind: "textarea", hint: "palette.trafficFulfill.responseheaders.hint" },
           { name: "responseBody", label: "palette.trafficFulfill.responsebody.label", kind: "textarea" },
           {
@@ -718,16 +856,19 @@ export const PALETTE: Category[] = [
   },
   {
     id: "data",
+    icon: Table01Icon,
     label: "palette.cat.data",
     blocks: [
       {
         kind: "log",
+        icon: TextAlignLeftIcon,
         label: "palette.log.label",
         about: "palette.log.about",
         params: [{ name: "text", label: "palette.log.text.label", kind: "text", hint: "palette.log.text.hint" }],
       },
       {
         kind: "readText",
+        icon: TextSelectIcon,
         label: "palette.readtext.label",
         about: "palette.readtext.about",
         params: [
@@ -738,6 +879,7 @@ export const PALETTE: Category[] = [
       },
       {
         kind: "var.set",
+        icon: VariableIcon,
         label: "palette.varSet.label",
         about: "palette.varSet.about",
         params: [
@@ -747,6 +889,7 @@ export const PALETTE: Category[] = [
       },
       {
         kind: "var.math",
+        icon: Calculator01Icon,
         label: "palette.varMath.label",
         about: "palette.varMath.about",
         params: [
@@ -758,6 +901,7 @@ export const PALETTE: Category[] = [
       },
       {
         kind: "var.autofill",
+        icon: User03Icon,
         label: "palette.varAutofill.label",
         about: "palette.varAutofill.about",
         params: [
@@ -767,6 +911,7 @@ export const PALETTE: Category[] = [
       },
       {
         kind: "count",
+        icon: TextNumberSignIcon,
         label: "palette.count.label",
         about: "palette.count.about",
         params: [
@@ -776,6 +921,7 @@ export const PALETTE: Category[] = [
       },
       {
         kind: "readAttribute",
+        icon: CodeIcon,
         label: "palette.readattribute.label",
         about: "palette.readattribute.about",
         params: [
@@ -787,6 +933,7 @@ export const PALETTE: Category[] = [
       },
       {
         kind: "screenshot",
+        icon: Camera01Icon,
         label: "palette.screenshot.label",
         about: "palette.screenshot.about",
         params: [
@@ -795,6 +942,7 @@ export const PALETTE: Category[] = [
       },
       {
         kind: "var.random",
+        icon: DicesIcon,
         label: "palette.varRandom.label",
         about: "palette.varRandom.about",
         params: [
@@ -806,7 +954,8 @@ export const PALETTE: Category[] = [
       },
       {
         kind: "file.readLine",
-        label: "palette.fileReadLine.label",
+        icon: Download04Icon,
+        label: "blockPicker.step.fileReadLine",
         about: "palette.fileReadLine.about",
         params: [
           { name: "path", label: "palette.fileReadLine.path.label", kind: "text", hint: "palette.fileReadLine.path.hint" },
@@ -822,6 +971,7 @@ export const PALETTE: Category[] = [
       },
       {
         kind: "file.append",
+        icon: Upload04Icon,
         label: "palette.fileAppend.label",
         about: "palette.fileAppend.about",
         params: [
@@ -833,13 +983,14 @@ export const PALETTE: Category[] = [
   },
   {
     id: "database",
+    icon: Database01Icon,
     label: "palette.cat.database",
     blocks: [
       {
         kind: "db.open",
+        icon: DatabaseIcon,
         label: "palette.dbOpen.label",
-        about:
-          "Opens a database and keeps it under a name for the rest of the run. SQLite is a file (empty = in-memory); the others take a connection string.",
+        about: "blockPicker.about.dbOpen",
         params: [
           { name: "driver", label: "palette.dbOpen.driver.label", kind: "select", options: ["sqlite", "postgres", "mysql", "mariadb", "mongodb"], default: "sqlite" },
           { name: "target", label: "palette.dbOpen.target.label", kind: "text", hint: "palette.dbOpen.target.hint" },
@@ -849,6 +1000,7 @@ export const PALETTE: Category[] = [
       },
       {
         kind: "db.exec",
+        icon: DatabaseZapIcon,
         label: "palette.dbExec.label",
         about: "palette.dbExec.about",
         params: [
@@ -859,6 +1011,7 @@ export const PALETTE: Category[] = [
       },
       {
         kind: "db.query",
+        icon: DatabaseSearchIcon,
         label: "palette.dbQuery.label",
         about: "palette.dbQuery.about",
         params: [
@@ -870,6 +1023,7 @@ export const PALETTE: Category[] = [
       },
       {
         kind: "db.close",
+        icon: DatabaseLockedIcon,
         label: "palette.dbClose.label",
         about: "palette.dbClose.about",
         params: [
@@ -886,4 +1040,24 @@ export function specFor(kind: string): BlockSpec | null {
     if (b) return b;
   }
   return null;
+}
+
+const GENERIC_STEP = Layers01Icon;
+const MODULE_STEP = PuzzleIcon;
+
+/** The glyph for a step kind. A kind with no entry (a module step or an old
+ *  saved one) takes its category's glyph, then one generic step glyph. */
+export function blockIcon(kind: string, categoryId?: string): StepIconData {
+  for (const c of PALETTE) {
+    const b = c.blocks.find((x) => x.kind === kind);
+    if (b) return b.icon ?? c.icon ?? GENERIC_STEP;
+  }
+  if (kind.startsWith("module:")) return MODULE_STEP;
+  const cat = PALETTE.find((c) => c.id === categoryId);
+  return cat?.icon ?? GENERIC_STEP;
+}
+
+/** A category's glyph; a module's own group gets the puzzle piece. */
+export function categoryIcon(id: string): StepIconData {
+  return PALETTE.find((c) => c.id === id)?.icon ?? (id.startsWith("module") || id.startsWith("group:") ? MODULE_STEP : GENERIC_STEP);
 }

@@ -2,15 +2,20 @@
 gestures and turning the handset. Everything is produced inside the browser
 process; nothing is injected into the page.
 
-The domain lives on the BROWSER target and is deliberately absent from
-``/json/protocol`` and ``Schema.getDomains``, so a page that enumerates the
-protocol cannot find it.
+The domain is deliberately absent from ``/json/protocol`` and
+``Schema.getDomains``, so a page that enumerates the protocol cannot find it.
+
+Attach it to a PAGE. Everything it does happens to the page's widget, and the
+handler finds that widget through the target's own web contents — a browser
+target has none, so every command on a browser session answered "no live
+frame". It used to open one, and Motion never worked from the SDK at all.
 
 Pointer and touch are exclusive: a profile claiming a touchscreen refuses every
 pointer command, and one that does not refuses every finger command.
 
     async with sdk.session(profile) as browser:
-        motion = await Motion.attach(browser)
+        page = await browser.new_page()
+        motion = await Motion.attach(page)
         await motion.create_pointer(20, 20)
         await motion.glide_to(640, 360, target_width=220)
         await motion.tap()
@@ -28,9 +33,22 @@ class Motion:
         self._session = session
 
     @classmethod
-    async def attach(cls, browser: Any) -> "Motion":
-        """Open a browser-level CDP session for the domain."""
-        return cls(await browser.new_browser_cdp_session())
+    async def attach(cls, page: Any) -> "Motion":
+        """Open a CDP session on `page` for the domain.
+
+        A browser-level session is accepted for callers written against the
+        older signature, but it cannot work: the handler reaches the widget
+        through the target's web contents, and a browser target has none.
+        """
+        context = getattr(page, "context", None)
+        if context is not None and hasattr(context, "new_cdp_session"):
+            return cls(await context.new_cdp_session(page))
+        if hasattr(page, "new_browser_cdp_session"):
+            raise TypeError(
+                "Motion.attach needs a page, not a browser: the domain acts on "
+                "a page's widget. Pass `await browser.new_page()`."
+            )
+        return cls(await page.new_cdp_session())
 
     async def _call(self, method: str, params: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         return await self._session.send(method, params or {}) or {}

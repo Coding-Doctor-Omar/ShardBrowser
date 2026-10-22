@@ -1,182 +1,272 @@
 import { create } from "zustand";
-import { open, save as saveDialog } from "@tauri-apps/plugin-dialog";
-import { openPath } from "@tauri-apps/plugin-opener";
-import { toast } from "../../../shared/lib/toast";
+import { save as saveDialog } from "@tauri-apps/plugin-dialog";
+import { revealItemInDir } from "@tauri-apps/plugin-opener";
+import { toast } from "../../../shared/model/toast";
+import { announce } from "../../../shared/model/announce";
+import { reportLoadError } from "../../../shared/model/loadError";
 import { confirmModal } from "../../../shared/lib/confirm";
-import { clip } from "../../../shared/lib/clipboard";
-import { readTextFile } from "../../../shared/lib/utils";
+import { clip, copySecret } from "../../../shared/lib/clipboard";
+import { clipboardTooBig, FileTooBig, MB, pickTextFile } from "../../../shared/lib/pickFile";
 import { storeBus } from "../../../shared/lib/storeBus";
+import { rawError } from "../../../shared/lib/errors";
+import { markArrived as markArrivedIn } from "../../../shared/lib/arrival";
+import { eachReporting, type EachResult } from "../../../shared/lib/eachReporting";
 import { t } from "../../../shared/i18n";
-import { proxyList, type ProxyEntry } from "../../proxy";
+import { pendingProxyIds, proxyList, type ProxyEntry } from "../../proxy";
 import { fingerprintList, type FingerprintEntry } from "../../fingerprint";
+import { trashRestore } from "../../trash/model/api";
 import type { ProfileMeta, ProfileForm } from "../model/types";
 import {
   profileList, profileGet, profileSave, profileDelete, profileClone,
   profileSetPin, profileSetFolder, profileBindProxy, profileImport,
-  profileCreateFromTemplate, processList, processKill, launch, syncLaunch,
-  folderDelete, cookiesExportToFile, cookiesImport,
+  processList, processKill, launch, launchCancel, syncLaunch,
+  folderDelete, folderRename, cookiesExportToFile, cookiesImport, enrichPicksForPreset,
 } from "../model/api";
-import { defaultForm, fromStored, toStored } from "../model/form";
+import { fromStored, toStored } from "../model/form";
+import { proxyMissing } from "./listing";
+import { forgetChanged, forgetForm, peekForm, rememberForm } from "./formCache";
+import {
+  addPlaceholder, applyEdits, beginEdit, dropPlaceholder, endEdit, isArriving, isPlaceholder, keepRowKey, localView,
+  moveEdits, newPlaceholderId, resolveId, revertOf, sameJson, sameMeta, shareRows, trackCreation, type Edit,
+} from "./optimistic";
+import { useDirectStart } from "../../../shared/model/directStart";
+import { HOST_OS } from "../../../shared/lib/utils";
+import { matchesOs, osIdFor } from "../../../shared/constants";
+import { useGpuCompat, verdictsLoaded as loadGpuVerdicts } from "../../../shared/model/gpuCompat";
+import { lookOf, useFolderMeta } from "./folderMeta";
+import type { AssignPair } from "./assignment";
+import { useViews } from "./views";
+import { useTags } from "../../tag";
 
 const FOLDERS_KEY = "shardx-folders";
+/** How long a start or stop may run ahead of the poll before the poll wins. */
+const PENDING_MS = 20_000;
+/** How long a row says Cancelled after a start was cancelled. */
+const CANCELLED_MS = 3000;
+/** A Cancel this soon after the start is ignored: Start turns into Cancel in
+ *  the same place, so a double-click or a held Enter must not undo the start
+ *  it just made. */
+const CANCEL_GUARD_MS = 400;
+/** When each profile being started began (`performance.now()`, which a test's
+ *  frozen clock leaves alone), for that guard. */
+const startedAt = new Map<string, number>();
+/** The `launch` call of each profile being started, as a promise that settles
+ *  once `startStop` has finished with its result: what a cancel waits for. */
+const launching = new Map<string, Promise<void>>();
+/** The timer that ends each row's Cancelled word, so a second cancel starts its own 3 s. */
+const cancelledTimers = new Map<string, ReturnType<typeof setTimeout>>();
+
+type Set_ = (partial: Partial<ProfileStore>) => void;
+type Get_ = () => ProfileStore;
+
+/** `id` added to (or taken from) a Set, as a new Set; the same one when nothing changes. */
+function withSet(from: Set<string>, id: string, on: boolean): Set<string> {
+  if (from.has(id) === on) return from;
+  const next = new Set(from);
+  if (on) next.add(id); else next.delete(id);
+  return next;
+}
+
+function markStarted(set: Set_, get: Get_, id: string) {
+  set({
+    running: { ...get().running, [id]: Date.now() },
+    pending: { ...get().pending, [id]: { kind: "start", at: Date.now() } },
+    // A new start ends the Cancelled word of the last one.
+    cancelled: withSet(get().cancelled, id, false),
+    // A new start settles the last failed one (a start from elsewhere, one
+    // the store never saw, moves `last_launched_at` past it instead).
+    startFailed: without(get().startFailed, [id]),
+  });
+}
+
+/** `map` without `ids`: the same object when none of them is in it. */
+function without<T>(map: Record<string, T>, ids: readonly string[]): Record<string, T> {
+  let next = map;
+  for (const id of ids) {
+    if (!(id in next)) continue;
+    if (next === map) next = { ...map };
+    delete next[id];
+  }
+  return next;
+}
+
+/// Rows that just arrived (a create, an import, a clone, a restore) are
+/// marked for their one slide-in (Live layer, spec 6.2), and unmarked once it
+/// has played (shared/lib/arrival, timed from the tokens), so a row the list
+/// mounts again later never replays it.
+function markArrived(set: Set_, get: Get_, ids: readonly string[]) {
+  markArrivedIn(() => get().arrived, (arrived) => set({ arrived }), ids);
+}
+
+function markStopped(set: Set_, get: Get_, id: string) {
+  const running = { ...get().running };
+  delete running[id];
+  set({ running, pending: { ...get().pending, [id]: { kind: "stop", at: Date.now() } } });
+}
+
+function unmark(set: Set_, get: Get_, id: string) {
+  const pending = { ...get().pending };
+  delete pending[id];
+  set({ pending });
+}
 
 const loadFolderRegistry = (): string[] => {
   try { return JSON.parse(localStorage.getItem(FOLDERS_KEY) || "[]"); }
   catch { return []; }
 };
 
-export type QuickEditTarget = { kind: "proxy" | "notes"; profile: ProfileMeta };
-export type FolderModalTarget = { profileId: string | null };
+export type SaveResult = "ok" | "conflict" | "failed";
 
-/** Narrows the list beyond the folder tab and the search box. */
-export type ProfileFilters = {
-  status: "all" | "running" | "idle";
-  /** Country code of the bound proxy, or "" for any. */
-  country: string;
-  /** "bound" = has a proxy, "direct" = none. */
-  proxy: "all" | "bound" | "direct";
-};
+/** A part of a create that runs once the profile exists. */
+export type CreateStep = "fingerprint" | "folder" | "proxy";
+/** What a create did: nothing (`meta` null, with why), or the profile, with
+ *  the first part that did not land and why, if one did not. */
+export type CreateResult =
+  | { meta: null; error: unknown }
+  | { meta: ProfileMeta; failed: { step: CreateStep; error: unknown } | null };
 
-export const emptyFilters = (): ProfileFilters => ({ status: "all", country: "", proxy: "all" });
+/** Same ids with the same start times: nothing for the poll to store. */
+function sameRunning(a: Record<string, number>, b: Record<string, number>): boolean {
+  const keys = Object.keys(a);
+  if (keys.length !== Object.keys(b).length) return false;
+  return keys.every((k) => b[k] === a[k]);
+}
 
-/** Row order. "added" is the order the store returns them in — how it always was. */
-export type ProfileSort =
-  | "added"
-  | "name-asc"
-  | "name-desc"
-  | "created-desc"
-  | "created-asc"
-  | "launched-desc"
-  | "runtime-desc";
+// The list puts the keyboard back on a profile that Undo restored.
+let onRestored: ((ids: string[]) => void) | null = null;
+export function setOnRestored(fn: ((ids: string[]) => void) | null) { onRestored = fn; }
 
-const SORT_KEY = "shardx.profiles.sort";
+// A refused Start offers Assign proxies. The dialog's state lives in
+// useProfileUi, which imports this module, so it registers here.
+let onAssign: ((ids: string[]) => void) | null = null;
+export function setOnAssign(fn: ((ids: string[]) => void) | null) { onAssign = fn; }
 
-export const loadSort = (): ProfileSort => {
-  try {
-    const v = localStorage.getItem(SORT_KEY);
-    return (v as ProfileSort) || "added";
-  } catch {
-    return "added";
+// The list (and the View it shows) follows a renamed Folder before the old
+// name leaves the registry: once it is gone, the list would fall back to All
+// Profiles.
+let onFolderRenamed: ((from: string, to: string) => void) | null = null;
+export function setOnFolderRenamed(fn: ((from: string, to: string) => void) | null) { onFolderRenamed = fn; }
+
+// A proxy deleted behind an Undo toast is gone for this store until the toast
+// goes: the profiles on it read "Proxy missing" meanwhile (ruling 18).
+const livingProxies = (list: ProxyEntry[]) => list.filter((p) => !pendingProxyIds.has(p.id));
+
+// Profiles on their way to the Trash: hidden from the list at once (the
+// backend archives each one and can take a while), and skipped by a second
+// trigger (a double click) while the move runs.
+const leaving = new Set<string>();
+
+// Rows moved to the Trash in this session and where they stood: Undo shows
+// them again at once, as they were (LQ-03). The newest TRASHED_KEPT only
+// (ruling F14): an Undo only ever reaches the latest moves.
+const trashedRows = new Map<string, { meta: ProfileMeta; at: number }>();
+const TRASHED_KEPT = 500;
+function rememberTrashed(id: string, row: { meta: ProfileMeta; at: number }) {
+  trashedRows.delete(id);
+  trashedRows.set(id, row);
+  for (const old of trashedRows.keys()) {
+    if (trashedRows.size <= TRASHED_KEPT) break;
+    trashedRows.delete(old);
   }
-};
-
-const saveSort = (v: ProfileSort) => {
-  try { localStorage.setItem(SORT_KEY, v); } catch { /* private mode */ }
-};
-
-/** Missing dates sort last, whichever direction is asked for. */
-function byDate(a: string | null | undefined, b: string | null | undefined, desc: boolean) {
-  const av = a ? Date.parse(a) : NaN;
-  const bv = b ? Date.parse(b) : NaN;
-  const aBad = Number.isNaN(av);
-  const bBad = Number.isNaN(bv);
-  if (aBad && bBad) return 0;
-  if (aBad) return 1;
-  if (bBad) return -1;
-  return desc ? bv - av : av - bv;
 }
 
-export function sortProfiles(list: ProfileMeta[], sort: ProfileSort): ProfileMeta[] {
-  if (sort === "added") return list;
-  // Pinning is the operator saying "keep this one where I can see it", and an
-  // ordering that scatters pinned rows among two hundred others makes the pin
-  // button look broken. Every order sorts within the pinned rows and within
-  // the rest, and keeps the two groups apart.
-  const pinned = list.filter((p) => p.pinned);
-  const rest = list.filter((p) => !p.pinned);
-  return [...sortGroup(pinned, sort), ...sortGroup(rest, sort)];
-}
+/** A backend error as words, unwrapped the one way (`rawError`, which the
+ *  toast's detail line starts from too): what a failed start keeps. */
+const reason = (e: unknown) => rawError(e) ?? String(e);
 
-function sortGroup(list: ProfileMeta[], sort: ProfileSort): ProfileMeta[] {
-  const out = [...list];
-  switch (sort) {
-    case "name-asc":
-      out.sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true }));
-      break;
-    case "name-desc":
-      out.sort((a, b) => b.name.localeCompare(a.name, undefined, { numeric: true }));
-      break;
-    case "created-desc":
-      out.sort((a, b) => byDate(a.created_at, b.created_at, true));
-      break;
-    case "created-asc":
-      out.sort((a, b) => byDate(a.created_at, b.created_at, false));
-      break;
-    case "launched-desc":
-      out.sort((a, b) => byDate(a.last_launched_at, b.last_launched_at, true));
-      break;
-    case "runtime-desc":
-      out.sort((a, b) => (b.total_runtime_ms ?? 0) - (a.total_runtime_ms ?? 0));
-      break;
-  }
-  return out;
-}
+// The store's bus listeners are registered once, by the first `init`.
+let wired = false;
 
+/// Profile data and every call to the backend. List and editor state (search,
+/// Folder, selection, the open editor) live in `useProfileUi`.
 export type ProfileStore = {
   status: "idle" | "loading" | "ready" | "error";
   error: string | null;
 
   profiles: ProfileMeta[];
   proxies: ProxyEntry[];
+  /** Proxy id to its last seen IP, while the Proxies store has its tests (filled by src/app/wireStores.ts). */
+  proxyIps: Record<string, string>;
   fingerprints: FingerprintEntry[];
 
   /// Value = epoch ms at which the engine was first observed running. Used both
   /// as a truthy flag (any number = running) and as the anchor for the ticking
-  /// uptime display in the Status column.
+  /// uptime display.
   running: Record<string, number>;
-  /// Profiles whose `launch()` call is in-flight (pre-flight probes can be slow).
+  /// Profiles whose `launch()` call is in flight (pre-flight probes can be
+  /// slow). They already show as running; Stop waits for the call to return.
   startBusy: Set<string>;
-  selected: Set<string>;
-
-  // UI state lives in the store so feature buttons stay prop-free.
-  search: string;
-  folder: string;
-  expanded: string | null;
-  draft: ProfileForm | null;
+  /// Starts the person cancelled whose `launch` call has not returned yet:
+  /// their button says Cancelling and does nothing.
+  cancelling: Set<string>;
+  /// Starts the person cancelled a moment ago: the row says Cancelled for
+  /// 3 s, then its status before.
+  cancelled: Set<string>;
+  /// Starts and stops the poll has not caught up with yet, with when they began.
+  pending: Record<string, { kind: "start" | "stop"; at: number }>;
+  /// When a start of a profile last failed in this session (ms epoch), for
+  /// its "Failed to start" status (`profileStatus`'s `failedAt`). Gone once
+  /// the profile starts again or leaves the list; never persisted.
+  startFailed: Record<string, number>;
+  /// Why each of those starts failed (the backend's words), for the Failed
+  /// today card. Read only where `startFailed` has the profile.
+  failReasons: Record<string, string>;
+  /// Rows that just arrived (a create, an import, a clone, a restore), with
+  /// when (`performance.now()`): each row slides in once while it is here
+  /// (Live layer, spec 6.2). Each goes once it has played (`arrivalMs`).
+  arrived: Record<string, number>;
   /// Empty folders persist here until a profile lands in them.
   folderRegistry: string[];
-  folderModal: FolderModalTarget | null;
-  /// Folder name currently highlighted as a drag-and-drop target ("__all__"
-  /// for the All tab). Cleared in dragleave/drop.
-  dropTarget: string | null;
-  templatePickerOpen: boolean;
-  quickEdit: QuickEditTarget | null;
-  filters: ProfileFilters;
-  sort: ProfileSort;
-  /// Row the last plain click landed on; a shift-click selects the run from it.
-  anchorId: string | null;
+  /** Group currently being synchronised, or null. */
+  syncGroup: string | null;
 
   init: () => Promise<void>;
   reload: () => Promise<void>;
   startProcessPolling: () => () => void;
 
-  setSearch: (q: string) => void;
-  setFolder: (f: string) => void;
-  setDraft: (draft: ProfileForm | null) => void;
-  setDropTarget: (target: string | null) => void;
-  setTemplatePickerOpen: (open: boolean) => void;
-  setQuickEdit: (target: QuickEditTarget | null) => void;
-  setFolderModal: (target: FolderModalTarget | null) => void;
-  setFilters: (f: Partial<ProfileFilters>) => void;
-  setSort: (v: ProfileSort) => void;
-  clearFilters: () => void;
-
   rememberFolder: (f: string) => void;
   forgetFolder: (f: string) => void;
 
-  selectProfiles: (isChecked: boolean, profiles: ProfileMeta[]) => void;
-  toggleSelect: (id: string) => void;
-  /** Shift-click: selects every row between the anchor and `id`. */
-  selectRangeTo: (id: string) => void;
-  clearSelected: () => void;
+  /** A profile as an editor form; Peek's cache keeps it (PERF-14). */
+  loadForm: (id: string) => Promise<ProfileForm>;
+  /** Loads the forms of these profiles into Peek's cache, quietly. */
+  prefetchForms: (ids: string[]) => void;
+  /** Saves the form of an existing profile, quietly: "conflict" when the
+   *  profile changed on disk since the form's rev, "failed" for any other
+   *  error, which `opts.onFailed` gets. Nothing is shown here. */
+  saveProfile: (draft: ProfileForm, opts?: { onFailed?: (error: unknown) => void }) => Promise<SaveResult>;
+  /** Creates the profile the profile form describes (Create profile): the
+   *  backend creates it from the form, the form's values go over what the
+   *  backend rolls for a new profile, then it goes in its Folder, on its
+   *  proxy and gets its tags (`newTags` are made now); its row is in the list
+   *  on return. Once the backend has it, it is returned whatever fails after:
+   *  a retry must never make it twice. Nothing is shown here; the form says it. */
+  createProfile: (draft: { form: ProfileForm; folder: string; tagIds: string[]; newTags: string[] }) => Promise<CreateResult>;
 
-  expand: (id: string) => Promise<void>;
-  newProfile: () => void;
-  cancelEdit: () => void;
-  saveDraft: () => Promise<void>;
+  /** Renames a profile; false when it failed (the error is already shown). */
+  renameProfile: (id: string, name: string) => Promise<boolean>;
+  /** Replaces a profile's notes; false when it failed. */
+  setNotes: (id: string, notes: string) => Promise<boolean>;
+  /** Binds a proxy, or none for a direct connection; false when it failed. */
+  bindProxy: (id: string, proxyId: string | null) => Promise<boolean>;
 
-  startStop: (p: ProfileMeta) => Promise<void>;
+  /** Starts or stops a profile. Resolves to the reason it failed or was
+   *  refused (what its toast says), or null: it went ahead, or the person
+   *  chose not to. A profile whose proxy is gone is refused, with Assign a
+   *  proxy offered. Starting one with no proxy while proxies exist asks
+   *  first (O9a), unless `directChecked` says the question already ran for
+   *  this start. `quiet` reports nothing: a bulk caller reports the batch
+   *  once (IFACE-06). */
+  startStop: (p: ProfileMeta, opts?: { directChecked?: boolean; quiet?: boolean }) => Promise<string | null>;
+  /** Cancels a start that is still launching. The backend's `launch_cancel`
+   *  (B49) ends the launch; without it (the command is missing, or fails) the
+   *  launch is left to return, and whatever it started is stopped then. Either
+   *  way no failure is reported, and the row says Cancelled for 3 s. A profile
+   *  that is not launching is left alone. */
+  cancelStart: (id: string) => Promise<void>;
+  /** Moves one profile to the Trash, with an Undo toast. */
   remove: (id: string) => Promise<void>;
+  /** Copies a profile: the copy shows at once, and its toast offers Open. */
   cloneProfile: (id: string) => Promise<void>;
   togglePin: (p: ProfileMeta) => Promise<void>;
   exportCookies: (p: ProfileMeta) => Promise<void>;
@@ -184,18 +274,329 @@ export type ProfileStore = {
 
   setProfileFolder: (id: string, f: string) => Promise<void>;
   deleteFolder: (f: string) => Promise<void>;
-  createFromTemplate: (tplId: string) => Promise<void>;
+  /** Renames a Folder, its profiles and its look; refuses a name in use.
+   *  False when it did not happen (the reason is already shown). */
+  renameFolder: (from: string, to: string) => Promise<boolean>;
 
-  bulkLaunch: () => Promise<void>;
-  /** Launches the selection as one synchronised group. */
-  bulkLaunchSynced: () => Promise<void>;
-  /** Group currently being synchronised, or null. */
-  syncGroup: string | null;
-  bulkStop: () => Promise<void>;
-  bulkDelete: () => Promise<void>;
-  bulkExport: () => Promise<void>;
-  bulkImport: () => Promise<void>;
+  /** Starts the profiles one by one; returns the ids that did not start. */
+  launchMany: (ids: string[]) => Promise<string[]>;
+  /** Launches the profiles as one synchronised group; false when it failed. */
+  launchSynced: (ids: string[]) => Promise<boolean>;
+  /** Stops the running ones; returns the ids that did not stop. */
+  stopMany: (ids: string[]) => Promise<string[]>;
+  /** Moves the profiles to the Trash at once and shows one Undo toast for
+   *  them; the ids that actually moved (empty when none did), so a caller can
+   *  drop just those from the selection. */
+  deleteMany: (ids: string[]) => Promise<string[]>;
+  /** Brings profiles back from the Trash (Undo): at once, where they were. */
+  restoreMany: (ids: string[]) => Promise<void>;
+  /** Copies the profiles' JSON to the clipboard. */
+  exportMany: (ids: string[]) => Promise<void>;
+  /** Moves the profiles into a Folder ("" = out of any), at once; says so
+   *  with Undo when rows leave the list (not when `quiet`). False when any failed. */
+  moveMany: (ids: string[], folder: string, opts?: { quiet?: boolean }) => Promise<boolean>;
+  /** Puts each profile back in the Folder it had (a move's Undo). */
+  restoreFolders: (folders: Map<string, string>) => Promise<void>;
+  /** One proxy (or No proxy) for the given profiles; a spread goes through
+   *  `planAssignment` and `assignPairs`. False when any bind failed. */
+  assignProxies: (ids: string[], proxyIds: (string | null)[]) => Promise<boolean>;
+  /** Binds each pair of an assignment plan, every row at once, and reports
+   *  by toast; the selection is left as it is (R26 a). False when any bind
+   *  failed (the error is already shown). */
+  assignPairs: (pairs: AssignPair[]) => Promise<boolean>;
+  /** Asks first, then gives each idle profile another library fingerprint of
+   *  its OS. Returns how many changed. */
+  regenerateFingerprints: (ids: string[]) => Promise<number>;
+  /** Creates profiles from JSON on the clipboard. */
+  importFromClipboard: () => Promise<void>;
 };
+
+/** Edits a stored profile field by round-tripping the whole profile JSON, so
+ *  every other field stays as it is. Returns the row as the backend saved it. */
+async function patchStored(id: string, patch: (stored: { name: string; notes: string }) => void): Promise<ProfileMeta> {
+  const stored = await profileGet(id);
+  patch(stored);
+  return profileSave(stored);
+}
+
+const formSaved = new Set<(form: ProfileForm) => void>();
+/** Calls `fn` with each form a save stored (Peek's, a card's fix): what the
+ *  list row does not carry, such as the timezone, is read from it. */
+export function onFormSaved(fn: (form: ProfileForm) => void): () => void {
+  formSaved.add(fn);
+  return () => formSaved.delete(fn);
+}
+
+/** Forms being read ahead for the rows beside Peek's. */
+const prefetching = new Set<string>();
+
+/** Lays pending edits and placeholder rows over the list as it stands. */
+function showLocal(set: Set_, get: Get_) {
+  set({ profiles: shareRows(get().profiles, localView(get().profiles, leaving), sameMeta) });
+}
+
+/** Replaces rows with what the backend returned for them; pending edits stay on top. */
+function putRows(set: Set_, get: Get_, rows: ProfileMeta[]) {
+  if (rows.length === 0) return;
+  const byId = new Map(rows.map((r) => [r.id, r]));
+  set({ profiles: shareRows(get().profiles, applyEdits(get().profiles.map((p) => byId.get(p.id) ?? p)), sameMeta) });
+}
+
+/** A failed edit: its fields go back to what the row had before it, unless a
+ *  newer edit of the same field is still on its way (`revertOf`). */
+function putBack(set: Set_, get: Get_, edit: Edit) {
+  const row = get().profiles.find((p) => p.id === edit.id);
+  const revert = revertOf(edit, row);
+  if (row && Object.keys(revert).length > 0) set({ profiles: get().profiles.map((p) => (p === row ? { ...p, ...revert } : p)) });
+}
+
+const isMeta = (v: unknown): v is ProfileMeta =>
+  !!v && typeof v === "object" && "id" in v && "name" in v && "folder" in v;
+
+/// One row changed at once (PERF-13): the edit shows now; the call runs with
+/// the row's backend id (a row still being created waits for it); a failure
+/// puts back what this edit set, unless a later edit changed it, and says
+/// what failed. `call` may return the row as the backend now has it. True
+/// when it went through.
+async function patchRow(
+  set: Set_, get: Get_, id: string, patch: Partial<ProfileMeta>,
+  call: (realId: string) => Promise<unknown>,
+  failed: (name: string) => string,
+): Promise<boolean> {
+  const before = get().profiles.find((p) => p.id === id);
+  if (!before) return false;
+  const edit = beginEdit(id, patch, before);
+  showLocal(set, get);
+  try {
+    const real = await resolveId(id);
+    // Its create failed: the row is already gone.
+    if (!real) { endEdit(edit); return false; }
+    const answer = await call(real);
+    endEdit(edit);
+    if (isMeta(answer)) putRows(set, get, [answer]);
+    return true;
+  } catch (e) {
+    endEdit(edit);
+    putBack(set, get, edit);
+    toast.fail({ title: failed(before.name), detail: e });
+    return false;
+  }
+}
+
+/// Several rows changed at once, each by its own call (a move, an assign):
+/// every edit shows now (`shown` runs right after); the calls run one by one
+/// past failures, and a row whose call failed gets back what it had. The
+/// caller words the outcome.
+async function patchRows(
+  set: Set_, get: Get_, ids: string[],
+  // A Partial<ProfileMeta>, spelled so check:i18n does not take "=> Partial" for JSX text.
+  patchOf: (p: ProfileMeta, k: number) => Edit["patch"],
+  call: (realId: string, k: number) => Promise<unknown>,
+  shown?: () => void,
+): Promise<EachResult> {
+  const before = new Map(get().profiles.map((p) => [p.id, p]));
+  const edits = new Map<string, Edit>();
+  ids.forEach((id, k) => {
+    const p = before.get(id);
+    if (p) edits.set(id, beginEdit(id, patchOf(p, k), p));
+  });
+  showLocal(set, get);
+  shown?.();
+  // A row whose create failed is gone: neither done nor failed.
+  const gone = new Set<string>();
+  const result = await eachReporting(ids, async (id, k) => {
+    const real = await resolveId(edits.get(id)?.id ?? id);
+    if (real) await call(real, k);
+    else gone.add(id);
+  });
+  if (gone.size > 0) result.done = result.done.filter((id) => !gone.has(id));
+  const failed = new Set(result.failed);
+  for (const [id, edit] of edits) {
+    endEdit(edit);
+    if (failed.has(id)) putBack(set, get, edit);
+  }
+  return result;
+}
+
+/// The backend ids of `ids`: a row the backend does not have yet (being
+/// created, or put back by Undo) waits for it (`resolveId`, the one path every
+/// store action takes); a row whose create or restore failed is left out (its
+/// failure is already shown).
+async function realIds(ids: string[]): Promise<string[]> {
+  if (!ids.some(isArriving)) return ids;
+  return (await Promise.all(ids.map(resolveId))).filter((id): id is string => id !== null);
+}
+
+/** Rows the backend just returned (a create, a restore), put in the list
+ *  without reading it again. */
+function insertRows(set: Set_, get: Get_, rows: ProfileMeta[], at: number) {
+  const have = new Set(get().profiles.map((p) => p.id));
+  // A row already on its way to the Trash again stays out.
+  const add = rows.filter((r) => !have.has(r.id) && !leaving.has(r.id));
+  if (add.length === 0) return;
+  const next = [...get().profiles];
+  next.splice(Math.min(at, next.length), 0, ...add);
+  set({ profiles: applyEdits(next) });
+}
+
+/** Rows back from the Trash, as the backend returned them, in one update:
+ *  each replaces its placeholder (or, not shown yet, goes in where a new
+ *  profile goes, in order, and slides in); `lost`, whose restore failed,
+ *  leave the list. */
+function putRestored(set: Set_, get: Get_, back: ProfileMeta[], lost: string[]) {
+  for (const m of back) dropPlaceholder(m.id);
+  for (const id of lost) dropPlaceholder(id);
+  if (back.length === 0 && lost.length === 0) return;
+  const gone = new Set(lost);
+  let list = gone.size > 0 ? get().profiles.filter((p) => !gone.has(p.id)) : get().profiles;
+  const have = new Set(list.map((p) => p.id));
+  const shown = new Map(back.filter((m) => have.has(m.id)).map((m) => [m.id, m]));
+  // A row already on its way to the Trash again stays out.
+  const fresh = back.filter((m) => !have.has(m.id) && !leaving.has(m.id));
+  if (shown.size > 0) list = list.map((p) => shown.get(p.id) ?? p);
+  if (fresh.length > 0) {
+    const at = list.filter((p) => p.pinned).length;
+    list = [...list];
+    list.splice(Math.min(at, list.length), 0, ...fresh);
+  }
+  set({ profiles: shareRows(get().profiles, applyEdits(list), sameMeta) });
+  if (fresh.length > 0) markArrived(set, get, fresh.map((m) => m.id));
+}
+
+/** Where the backend lists a new profile: newest first, after the pinned rows. */
+const newRowIndex = (get: Get_) => get().profiles.filter((p) => p.pinned).length;
+
+/** Moves profiles to the Trash the way Move to Trash does: hidden at once, a
+ *  running one stopped first (the Trash archives its folder), one by one past
+ *  failures (shown). No toast: the caller says what happened. */
+async function moveToTrash(set: Set_, get: Get_, ids: string[]): Promise<{ moved: string[]; names: Map<string, string> }> {
+  const names = new Map(get().profiles.map((p) => [p.id, p.name]));
+  const todo = ids.filter((id) => !leaving.has(id));
+  if (todo.length === 0) return { moved: [], names };
+  const going = new Set(todo);
+  get().profiles.forEach((p, at) => { if (going.has(p.id)) rememberTrashed(p.id, { meta: p, at }); });
+  for (const id of todo) leaving.add(id);
+  set({ profiles: get().profiles.filter((p) => !leaving.has(p.id)), startFailed: without(get().startFailed, todo) });
+  const moved: string[] = [];
+  // A row still being created leaves under its real id (`settle` moves it in `leaving`).
+  const resolved: string[] = [];
+  try {
+    const { failed, firstError } = await eachReporting(todo, async (id) => {
+      const real = await resolveId(id);
+      // Its create failed: nothing to move.
+      if (!real) { trashedRows.delete(id); return; }
+      resolved.push(real);
+      if (real !== id) {
+        names.set(real, names.get(id) ?? "");
+        const r = trashedRows.get(id);
+        trashedRows.delete(id);
+        if (r) rememberTrashed(real, { meta: { ...r.meta, id: real }, at: r.at });
+      }
+      // The Trash archives the browser's folder and then wipes it: a running
+      // browser must not be writing to it.
+      if (get().running[real]) {
+        markStopped(set, get, real);
+        await processKill(real);
+      }
+      await profileDelete(real);
+      moved.push(real);
+    });
+    if (failed.length > 0) {
+      toast.fail({
+        title: todo.length === 1
+          ? t("useProfile.trashFailed", { name: names.get(failed[0]) ?? "" })
+          : t("useProfile.trashSomeFailed", { failed: failed.length, total: todo.length }),
+        detail: firstError,
+      });
+    }
+  } finally {
+    for (const id of todo) leaving.delete(id);
+    for (const id of resolved) leaving.delete(id);
+  }
+  // The Trash's copy no longer holds everything it has.
+  if (moved.length > 0) storeBus.emit("trash", "profiles");
+  await get().reload();
+  return { moved, names };
+}
+
+/** O9a: before profiles without a proxy start while proxies exist, ask once.
+ *  One profile: Cancel, Assign a proxy…, Start anyway. Several: Cancel, Skip
+ *  those, Start all anyway. "start" when there is nothing to ask. Exported
+ *  (fix round 2) so LiveView's Start and Project Run can reuse this exact
+ *  question — call it with `useProfile.getState` — instead of a third copy.
+ *  `allowSkip: false` (fix round 3, Project Run only: a run can't start a
+ *  subset of its profiles) drops Skip even with several profiles, offering
+ *  Cancel / Assign a proxy… / Start anyway instead. Every other caller keeps
+ *  the default (`true`). */
+export async function confirmDirect(
+  get: Get_,
+  targets: ProfileMeta[],
+  opts?: { allowSkip?: boolean },
+): Promise<"start" | "skip" | "assign" | "cancel"> {
+  const direct = targets.filter((p) => !p.proxy_id);
+  if (direct.length === 0 || get().proxies.length === 0 || !useDirectStart.getState().ask) return "start";
+  const allowSkip = opts?.allowSkip ?? true;
+  const one = targets.length === 1;
+  const offerAssign = one || !allowSkip;
+  const choice = await confirmModal({
+    title: one
+      ? t("useProfile.directTitle", { name: targets[0].name })
+      : direct.length === 1 ? t("useProfile.directTitleManyOne") : t("useProfile.directTitleMany", { n: direct.length }),
+    message: one ? t("useProfile.directMessage") : t("useProfile.directMessageMany"),
+    buttons: offerAssign
+      ? [
+          { label: t("confirm.cancel"), value: "cancel" },
+          { label: t("useProfile.directAssign"), value: "assign" },
+          { label: one ? t("useProfile.directStart") : t("useProfile.directStartAll"), value: "start", primary: true },
+        ]
+      : [
+          { label: t("confirm.cancel"), value: "cancel" },
+          { label: t("useProfile.directSkip"), value: "skip" },
+          { label: t("useProfile.directStartAll"), value: "start", primary: true },
+        ],
+  });
+  return choice === "start" || choice === "skip" || choice === "assign" ? choice : "cancel";
+}
+
+/// What the store asks of the list's UI state. `useProfileUi` imports this
+/// module, so it registers these rather than being imported (as
+/// `setOnFolderRenamed` and `setOnAssign` do).
+export type UiBridge = {
+  /** Rows moved to another Folder (or out of one): say where, with Undo, when any left the list. */
+  moved?: (m: { ids: string[]; names: Map<string, string>; from: Map<string, string>; to: string; undo: () => void }) => void;
+  /** A row being created got its real id: everything that names it follows (Task 6). */
+  idChanged?: (from: string, to: string) => void;
+  /** A row was just created: bring it into view, or say that the list hides it (Task 6). */
+  created?: (id: string) => void;
+  /** Profiles that just arrived (an import): select them and show the first (Task 6). */
+  arrived?: (ids: string[]) => void;
+  /** Open a profile in Peek with its name ready to type (Task 7). */
+  open?: (id: string) => void;
+  /** Select exactly these profiles: a bulk Start's "Select failed" (C25). */
+  select?: (ids: string[]) => void | boolean;
+};
+const uiBridge: UiBridge = {};
+export function setUiBridge(part: UiBridge) { Object.assign(uiBridge, part); }
+
+/// A placeholder's calls are done: its row becomes the backend's row, under
+/// its real id, and everything that named it follows (Peek, the active row,
+/// the selection, a pending edit, a move to the Trash).
+function settle(set: Set_, get: Get_, tempId: string, meta: ProfileMeta) {
+  dropPlaceholder(tempId);
+  keepRowKey(tempId, meta.id);
+  moveEdits(tempId, meta.id);
+  if (leaving.has(tempId)) { leaving.delete(tempId); leaving.add(meta.id); }
+  // The UI state first, then the row: Peek never sees its profile missing.
+  uiBridge.idChanged?.(tempId, meta.id);
+  // A reload that landed meanwhile may list the real row already: one row
+  // stays, where the placeholder stood. A slide-in under way goes on.
+  const rows = get().profiles.filter((p) => p.id !== meta.id).map((p) => (p.id === tempId ? meta : p));
+  const arrived = get().arrived;
+  set({
+    profiles: shareRows(get().profiles, applyEdits(rows), sameMeta),
+    ...(tempId in arrived ? { arrived: { ...without(arrived, [tempId]), [meta.id]: arrived[tempId] } } : {}),
+  });
+}
 
 export const useProfile = create<ProfileStore>((set, get) => ({
   status: "idle",
@@ -203,55 +604,71 @@ export const useProfile = create<ProfileStore>((set, get) => ({
 
   profiles: new Array<ProfileMeta>(),
   proxies: new Array<ProxyEntry>(),
+  proxyIps: {},
   fingerprints: new Array<FingerprintEntry>(),
 
   running: {},
   startBusy: new Set<string>(),
-  selected: new Set<string>(),
-
-  search: "",
-  folder: "all",
-  expanded: null,
-  draft: null,
+  cancelling: new Set<string>(),
+  cancelled: new Set<string>(),
+  pending: {},
+  startFailed: {},
+  failReasons: {},
+  arrived: {},
   folderRegistry: loadFolderRegistry(),
-  folderModal: null,
-  dropTarget: null,
-  templatePickerOpen: false,
-  quickEdit: null,
-  filters: emptyFilters(),
-  sort: loadSort(),
-  anchorId: null,
+  syncGroup: null,
 
   init: async () => {
     if (get().status === "loading" || get().status === "ready") return;
     set({ status: "loading" });
+    // Listeners first, and once: a library that lands while the list loads
+    // (the first engine download) must not be missed; a retried load must
+    // not register them twice.
+    if (!wired) {
+      wired = true;
+      // A proxy added on the Proxies page has to reach the editor's select, and
+      // a proxy bound there — by the distribute dialog — has to reach the table.
+      // A proxy saved from a profile's select has already been read back here.
+      storeBus.on("proxies", (from) => {
+        if (from === "profiles") return;
+        void proxyList().then((proxies) => set({ proxies: shareRows(get().proxies, livingProxies(proxies), sameJson) })).catch(() => {});
+      });
+      // Its own changes are already on screen: only another store's reloads (PERF-13).
+      storeBus.on("profiles", (from) => { if (from !== "profiles") void get().reload(); });
+      // Peek tells a profile's template from one no longer in the library.
+      storeBus.on("fingerprints", () => {
+        void fingerprintList().then((fingerprints) => set({ fingerprints })).catch(() => {});
+      });
+    }
     try {
       const [profiles, proxies, fingerprints] = await Promise.all([
         profileList(), proxyList(), fingerprintList(),
       ]);
-      set({ profiles, proxies, fingerprints, status: "ready" });
-      // A proxy added on the Proxies page has to reach the editor's select, and
-      // a proxy bound there — by the distribute dialog — has to reach the table.
-      storeBus.on("proxies", () => { void get().reload(); });
-      storeBus.on("profiles", () => { void get().reload(); });
+      set({ profiles, proxies: livingProxies(proxies), fingerprints, status: "ready" });
     } catch (e) {
-      set({ status: "error", error: (e as Error).message });
-      toast.err(String(e));
+      set({ status: "error", error: String(e) });
+      reportLoadError("profiles", t("useProfile.loadFailed"), e);
     }
   },
 
   reload: async () => {
     try {
       const [profiles, proxies] = await Promise.all([profileList(), proxyList()]);
-      set({ profiles, proxies });
-    } catch (e) { toast.err(String(e)); }
+      // Pending edits, rows on their way in and rows on their way to the
+      // Trash stay as the user sees them; a row that did not change keeps its
+      // object, so its memoized row does not render again (PERF-13).
+      const nextProfiles = shareRows(get().profiles, localView(profiles, leaving), sameMeta);
+      const nextProxies = shareRows(get().proxies, livingProxies(proxies), sameJson);
+      if (nextProfiles !== get().profiles || nextProxies !== get().proxies) set({ profiles: nextProfiles, proxies: nextProxies });
+    } catch (e) { toast.fail({ title: t("useProfile.refreshFailed"), detail: e }); }
   },
 
-  // 2s poll for real child status; not optimistic UI state. Uptime is anchored
-  // to the moment the engine actually started (now - uptime_ms), preserved
-  // across polls so the displayed clock doesn't jitter. When a profile
-  // transitions running → not-running, the backend has just bumped its persisted
-  // total_runtime_ms — re-fetch so the Time column reflects the new total.
+  // 2s poll for real child status. Uptime is anchored to the moment the engine
+  // actually started (now - uptime_ms), preserved across polls so the displayed
+  // clock doesn't jitter. A start or stop the UI already shows (`pending`) wins
+  // over the poll until the poll agrees, or for PENDING_MS at most. When a
+  // profile goes from running to stopped, the backend has just bumped its
+  // persisted total_runtime_ms — re-fetch so totals are current.
   startProcessPolling: () => {
     let cancelled = false;
     const tick = async () => {
@@ -260,30 +677,43 @@ export const useProfile = create<ProfileStore>((set, get) => ({
         if (cancelled) return;
         const now = Date.now();
         const prev = get().running;
+        const prevPending = get().pending;
+        const seen = new Set(list.map((r) => r.profile_id));
         const next: Record<string, number> = {};
         for (const r of list) {
           next[r.profile_id] = prev[r.profile_id] ?? (now - r.uptime_ms);
         }
-        const justExited = Object.keys(prev).some((id) => !(id in next));
-        set({ running: next });
-        if (justExited) get().reload();
+        // Copied only when an entry goes, so an unchanged poll keeps the object.
+        let pending = prevPending;
+        // A stop the poll now confirms is an exit too: totals and "last run" moved.
+        let stopConfirmed = false;
+        for (const [id, op] of Object.entries(prevPending)) {
+          const agreed = op.kind === "start" ? seen.has(id) : !seen.has(id);
+          if (agreed && op.kind === "stop") stopConfirmed = true;
+          if (agreed || now - op.at > PENDING_MS) {
+            if (pending === prevPending) pending = { ...prevPending };
+            delete pending[id];
+            continue;
+          }
+          if (op.kind === "start") next[id] = prev[id] ?? op.at;
+          else delete next[id];
+        }
+        const justExited = Object.keys(prev).some((id) => !(id in next) && !(id in prevPending));
+        // A profile seen running has started, whoever started it (the API,
+        // another window, a launch whose own call failed after the spawn):
+        // a failed start of it is settled.
+        const startFailed = without(get().startFailed, [...seen]);
+        // Nothing changed: store nothing, so nothing that reads the maps
+        // re-renders or re-filters every 2 s (PERF-01).
+        const running = sameRunning(prev, next) ? prev : next;
+        if (running !== prev || pending !== prevPending || startFailed !== get().startFailed) set({ running, pending, startFailed });
+        if (justExited || stopConfirmed) get().reload();
       } catch {}
     };
     tick();
     const handle = setInterval(tick, 2000);
     return () => { cancelled = true; clearInterval(handle); };
   },
-
-  setSearch: (search) => set({ search }),
-  setFolder: (folder) => set({ folder }),
-  setDraft: (draft) => set({ draft }),
-  setDropTarget: (dropTarget) => set({ dropTarget }),
-  setTemplatePickerOpen: (templatePickerOpen) => set({ templatePickerOpen }),
-  setQuickEdit: (quickEdit) => set({ quickEdit }),
-  setFolderModal: (folderModal) => set({ folderModal }),
-  setFilters: (f) => set({ filters: { ...get().filters, ...f } }),
-  setSort: (v) => { saveSort(v); set({ sort: v }); },
-  clearFilters: () => set({ filters: emptyFilters() }),
 
   rememberFolder: (f) => {
     const next = get().folderRegistry.includes(f)
@@ -298,172 +728,259 @@ export const useProfile = create<ProfileStore>((set, get) => ({
     set({ folderRegistry: next });
   },
 
-  selectProfiles: (isChecked, profiles) => {
-    const next = new Set(get().selected);
-    if (isChecked) {
-      for (const p of profiles) next.add(p.id);
-    } else {
-      for (const p of profiles) next.delete(p.id);
-    }
-    set({ selected: next });
+  loadForm: async (id) => {
+    const form = fromStored(await profileGet(id));
+    rememberForm(form);
+    return form;
   },
-  toggleSelect: (id) => {
-    const next = new Set(get().selected);
-    if (next.has(id)) next.delete(id); else next.add(id);
-    set({ selected: next, anchorId: id });
-  },
-  // Ordered as the table paints it. The clicked row decides the direction: a
-  // ticked one clears the run, an unticked one selects it.
-  selectRangeTo: (id) => {
-    const order = visibleIds(get());
-    const to = order.indexOf(id);
-    if (to < 0) return;
-    const anchor = get().anchorId;
-    // Only a still-ticked anchor has a run to extend; spanning back over a
-    // cleared one would put its tick straight back.
-    const from = anchor && get().selected.has(anchor) ? order.indexOf(anchor) : -1;
-    if (from < 0) { get().toggleSelect(id); return; }
-    const [lo, hi] = from <= to ? [from, to] : [to, from];
-    const removing = get().selected.has(id);
-    const next = new Set(get().selected);
-    for (let i = lo; i <= hi; i++) {
-      if (removing) next.delete(order[i]); else next.add(order[i]);
-    }
-    set({ selected: next });
-  },
-  clearSelected: () => set({ selected: new Set<string>(), anchorId: null }),
 
-  expand: async (id) => {
-    if (get().expanded === id) { set({ expanded: null, draft: null }); return; }
-    const stored = await profileGet(id);
-    set({ draft: fromStored(stored), expanded: id });
+  // A read still on its way is not asked for again (Pair 18 review, M11).
+  // Peek's own read on arrival still goes: it must follow any save of that
+  // profile, which a read started earlier may not.
+  prefetchForms: (ids) => {
+    for (const id of ids) {
+      if (isPlaceholder(id) || peekForm(id) || prefetching.has(id)) continue;
+      prefetching.add(id);
+      void get().loadForm(id).catch(() => {}).finally(() => prefetching.delete(id));
+    }
   },
-  newProfile: () => set({ draft: defaultForm(), expanded: "__new__" }),
-  cancelEdit: () => set({ expanded: null, draft: null }),
 
-  saveDraft: async () => {
-    const { draft, fingerprints, folder } = get();
-    if (!draft) return;
+  saveProfile: async (draft, opts) => {
+    const { fingerprints } = get();
+    const before = get().profiles.find((p) => p.id === draft.id);
+    // The list shows Peek's name, notes, proxy and color as the save starts (PERF-13).
+    const edit = before
+      ? beginEdit(draft.id, { name: draft.name, notes: draft.notes, proxy_id: draft.proxy_id, color: draft.color || null }, before)
+      : null;
+    if (edit) showLocal(set, get);
     try {
       const fp = fingerprints.find((g) => g.id === draft.gpu_preset_id) ?? null;
-      const saved = await profileSave(toStored(draft, fp));
-      await profileBindProxy(saved.id, draft.proxy_id);
-      // A profile created while a folder tab is active should land in that
-      // folder (otherwise it pops into "All" and the user has to drag it back).
-      // `!draft.id` scopes this to creations only — edits keep their folder.
-      if (!draft.id && folder && folder !== "all") {
-        try { await profileSetFolder(saved.id, folder); }
-        catch (e) { console.warn("auto-assign folder failed:", e); }
-      }
-      // Cookies picked in the editor: the profile has to exist first, so the
-      // import happens here rather than on the form.
-      if (draft.cookies_file) {
-        try {
-          // Chromium keeps its cookie database open and writes it back on
-          // exit, so anything put there under a running browser is either
-          // lost or corrupts the file.
-          if (get().running[saved.id]) {
-            throw new Error(t("useProfile.cookiesNeedStop"));
-          }
-          const text = await readTextFile(draft.cookies_file);
-          const cookies = JSON.parse(text);
-          if (!Array.isArray(cookies)) throw new Error(t("useProfile.draftCookiesNotArray"));
-          const n = await cookiesImport(saved.id, cookies);
-          toast.ok(n === 1
-            ? t("useProfile.draftCookieImportedOne")
-            : t("useProfile.draftCookiesImportedMany", { n }));
-        } catch (e) {
-          toast.err(t("useProfile.draftCookiesLoadFailed", { e: String(e) }));
-        }
-      }
-      set({ expanded: null, draft: null });
-      get().reload();
-      storeBus.emit("profiles");
-      toast.ok(draft.id
-        ? t("useProfile.profileSaved")
-        : t("useProfile.profileCreated", { name: saved.name }));
-    } catch (e) { toast.err(String(e)); }
+      // Built on the profile as stored, so what the form doesn't show survives.
+      const prev = await profileGet(draft.id);
+      const saved = await profileSave(toStored(draft, fp, prev));
+      if (edit) endEdit(edit);
+      // Only this profile changed: its row takes the saved one, no list read.
+      putRows(set, get, [saved]);
+      for (const fn of formSaved) fn(draft);
+      return "ok";
+    } catch (e) {
+      if (edit) { endEdit(edit); putBack(set, get, edit); }
+      const msg = String(e);
+      if (/changed after you opened it/.test(msg)) return "conflict";
+      // No toast: the caller shows the failure where the edit was made (Peek's
+      // line under its header, the form's line by Save; WRITE-15, F1).
+      opts?.onFailed?.(e);
+      return "failed";
+    }
   },
 
-  // Block the Start button until launch() returns. The launch includes
-  // pre-flight steps that can take real time (UDP probe, geo, Widevine
-  // pre-warm); surfacing the busy state is what the user reads as "did it work?".
-  startStop: async (p) => {
-    if (get().running[p.id]) {
-      try { await processKill(p.id); }
-      catch (e) { toast.err(String(e)); }
-      return;
+  renameProfile: (id, name) =>
+    patchRow(set, get, id, { name }, (real) => patchStored(real, (s) => { s.name = name; }),
+      (was) => t("useProfile.renameFailed", { name: was })),
+  setNotes: (id, notes) =>
+    patchRow(set, get, id, { notes }, (real) => patchStored(real, (s) => { s.notes = notes; }),
+      (was) => t("useProfile.notesFailed", { name: was })),
+  bindProxy: (id, proxyId) =>
+    patchRow(set, get, id, { proxy_id: proxyId }, (real) => profileBindProxy(real, proxyId),
+      (was) => t("useProfile.bindFailed", { name: was })),
+
+  // Optimistic: the row shows the new state at once and the poll confirms it.
+  // A failed call puts the old state back and says why.
+  startStop: async (given, opts) => {
+    // A profile still being created, or still coming back from the Trash,
+    // starts once the backend has it.
+    let p = given;
+    if (isArriving(p.id)) {
+      const real = await resolveId(p.id);
+      const found = real ? get().profiles.find((x) => x.id === real) : undefined;
+      if (!found) return null;
+      p = found;
     }
-    if (get().startBusy.has(p.id)) return;
-    set({ startBusy: new Set([...get().startBusy, p.id]) });
+    if (get().running[p.id]) {
+      if (get().startBusy.has(p.id)) return null; // the launch is still starting it
+      const since = get().running[p.id];
+      markStopped(set, get, p.id);
+      try {
+        await processKill(p.id);
+        // The row's status word changes without focus moving: say it
+        // (A11Y-22). Many at once say it in their own toast.
+        if (!opts?.quiet) announce(t("useProfile.stoppedAnnounce", { name: p.name }));
+        return null;
+      } catch (e) {
+        unmark(set, get, p.id);
+        set({ running: { ...get().running, [p.id]: since } });
+        // Names the profile; the backend's words are the detail (WRITE-01).
+        if (!opts?.quiet) toast.fail({ title: t("useProfile.stopFailed", { name: p.name }), detail: e, subject: p.name });
+        return reason(e);
+      }
+    }
+    if (get().startBusy.has(p.id)) return null;
+    const current = get().profiles.find((x) => x.id === p.id) ?? p;
+    // Its proxy is gone: the backend would start it on this computer's own IP
+    // (IFACE-01, backend B1). Refuse, and offer the fix.
+    if (proxyMissing(current, get().proxies)) {
+      const refused = t("useProfile.proxyMissingStart", { name: current.name });
+      if (!opts?.quiet) {
+        toast.err(refused, {
+          action: { label: t("useProfile.assignProxy"), run: () => onAssign?.([current.id]) },
+        });
+      }
+      return refused;
+    }
+    // Cancel and Assign a proxy are choices, not failures: nothing to report.
+    if (!opts?.directChecked) {
+      const choice = await confirmDirect(get, [p]);
+      if (choice === "assign") { onAssign?.([p.id]); return null; }
+      if (choice !== "start") return null;
+    }
+    markStarted(set, get, p.id);
+    startedAt.set(p.id, performance.now());
+    set({ startBusy: withSet(get().startBusy, p.id, true) });
+    // What a cancel waits for: the launch has returned and this has settled it.
+    let settled!: () => void;
+    launching.set(p.id, new Promise<void>((done) => { settled = done; }));
     try {
       await launch(p.id);
-      // Don't optimistically flip `running`; the 2s poll picks up the new child.
+      // A launch longer than the poll's patience (`PENDING_MS`) was dropped
+      // from `running` meanwhile; it is running now, and a cancel stops it.
+      if (get().running[p.id] === undefined) markStarted(set, get, p.id);
+      // Cancelled while it launched: it went through anyway, and `cancelStart`
+      // stops it; not a start to announce.
+      if (!opts?.quiet && !get().cancelling.has(p.id)) announce(t("useProfile.startedAnnounce", { name: current.name }));
+      return null;
     } catch (e) {
-      toast.err(String(e));
+      if (get().cancelling.has(p.id)) {
+        // The person cancelled it, and the launch ended (the backend's
+        // "cancelled" error, or a failure on its way): a choice, not a
+        // failure. Nothing runs, and nothing says it failed.
+        set({ pending: without(get().pending, [p.id]), running: without(get().running, [p.id]) });
+        return null;
+      }
+      // One write: a watcher never sees the start confirmed (pending gone,
+      // running still marked) on its way to failed (the star ask counts it).
+      set({ pending: without(get().pending, [p.id]), running: without(get().running, [p.id]), startFailed: { ...get().startFailed, [p.id]: Date.now() }, failReasons: { ...get().failReasons, [p.id]: reason(e) } });
+      // Names the profile and closes on its own (8 s); the row keeps Failed
+      // and its why line. The backend's words are the detail (WRITE-01, PC-037).
+      if (!opts?.quiet) toast.fail({ title: t("useProfile.startFailed", { name: current.name }), detail: e, subject: current.name });
+      return reason(e);
     } finally {
-      const n = new Set(get().startBusy);
-      n.delete(p.id);
-      set({ startBusy: n });
+      set({ startBusy: withSet(get().startBusy, p.id, false) });
+      startedAt.delete(p.id);
+      launching.delete(p.id);
+      settled();
     }
   },
 
-  remove: async (id) => {
-    if ((await confirmModal({
-      title: t("useProfile.deleteProfileTitle"),
-      message: t("useProfile.deleteProfileMessage"),
-      danger: true,
-    })) !== true) return;
+  cancelStart: async (id) => {
+    // Not launching (or already cancelled): nothing to cancel.
+    if (!get().startBusy.has(id) || get().cancelling.has(id)) return;
+    // The click that started it may be the one pressing this (a double-click).
+    if (performance.now() - (startedAt.get(id) ?? -Infinity) < CANCEL_GUARD_MS) return;
+    const returned = launching.get(id);
+    set({ cancelling: withSet(get().cancelling, id, true) });
+    const name = get().profiles.find((p) => p.id === id)?.name ?? "";
     try {
-      await profileDelete(id);
-      get().reload();
-      storeBus.emit("profiles");
-    } catch (e) { toast.err(String(e)); }
+      // B49: the backend ends the launch itself, and the pending `launch`
+      // call returns a "cancelled" error. Without the command (Tauri rejects
+      // an unknown one) or when it fails, the launch is left to return.
+      try { await launchCancel(id); } catch { /* no launch_cancel yet, or it failed */ }
+      await returned;
+      // The launch went through anyway (no cancel, or too late): stop it.
+      if (get().running[id] !== undefined) await get().stopMany([id]);
+    } finally {
+      set({ cancelling: withSet(get().cancelling, id, false) });
+    }
+    // Stopped, as asked: the row says so for a moment. A stop that failed
+    // (already toasted) leaves the profile running, which the row must not hide.
+    if (get().running[id] !== undefined) return;
+    set({ cancelled: withSet(get().cancelled, id, true) });
+    announce(t("useProfile.cancelledAnnounce", { name }));
+    clearTimeout(cancelledTimers.get(id));
+    cancelledTimers.set(id, setTimeout(() => {
+      cancelledTimers.delete(id);
+      set({ cancelled: withSet(get().cancelled, id, false) });
+    }, CANCELLED_MS));
   },
 
+  remove: async (id) => { await get().deleteMany([id]); },
+
   cloneProfile: async (id) => {
-    try { await profileClone(id); get().reload(); }
-    catch (e) { toast.err(String(e)); }
+    const src = get().profiles.find((p) => p.id === id);
+    if (!src) return;
+    // The copy shows at once where the backend lists new profiles, named as
+    // the backend names it (`clone_profile`); its call runs behind it (LQ-03).
+    const row: ProfileMeta = {
+      ...src, id: newPlaceholderId(), name: `${src.name} (copy)`, pinned: false,
+      last_launched_at: null, created_at: new Date().toISOString(), total_runtime_ms: 0,
+    };
+    addPlaceholder(row, newRowIndex(get));
+    showLocal(set, get);
+    markArrived(set, get, [row.id]);
+    const done = (async (): Promise<string | null> => {
+      try {
+        const from = await resolveId(id);
+        if (!from) throw t("useProfile.createFailed");
+        const meta = await profileClone(from);
+        settle(set, get, row.id, meta);
+        // IFACE-14: the copy may land far from its source; the toast opens it.
+        toast.ok(t("useProfile.cloned", { name: src.name }), {
+          action: { label: t("toast.open"), run: () => uiBridge.open?.(meta.id) },
+        });
+        return meta.id;
+      } catch (e) {
+        dropPlaceholder(row.id);
+        set({ profiles: get().profiles.filter((p) => p.id !== row.id) });
+        toast.fail({ title: t("useProfile.cloneFailed", { name: src.name }), detail: e });
+        return null;
+      }
+    })();
+    trackCreation(row.id, done);
+    await done;
   },
 
   togglePin: async (p) => {
-    try { await profileSetPin(p.id, !p.pinned); get().reload(); }
-    catch (e) { toast.err(String(e)); }
+    const pinned = !p.pinned;
+    await patchRow(set, get, p.id, { pinned }, (real) => profileSetPin(real, pinned),
+      (was) => (pinned ? t("useProfile.pinFailed", { name: was }) : t("useProfile.unpinFailed", { name: was })));
   },
 
-  exportCookies: async (p) => {
+  exportCookies: async (given) => {
+    const [id] = await realIds([given.id]);
+    if (!id) return;
+    const p = get().profiles.find((x) => x.id === id) ?? given;
     try {
       const path = await saveDialog({
         defaultPath: `${(p.name || p.id).replace(/[^\w.-]+/g, "_")}-cookies.json`,
         filters: [{ name: "JSON", extensions: ["json"] }],
       });
       if (typeof path !== "string") return; // cancelled
-      const n = await cookiesExportToFile(p.id, path);
+      const n = await cookiesExportToFile(id, path);
       toast.ok(n === 1
         ? t("useProfile.cookieExportedOne")
         : t("useProfile.cookiesExportedMany", { n }));
-      // Open the containing folder so the user sees exactly where it went.
-      const dir = path.replace(/[/\\][^/\\]*$/, "");
-      try { await openPath(dir); } catch {}
-    } catch (e) { toast.err(String(e)); }
+      // Show the exported file itself in its folder. Reveal never runs a file,
+      // where open would (SEC-04).
+      try { await revealItemInDir(path); } catch {}
+    } catch (e) { toast.fail({ title: t("useProfile.cookiesExportFailed", { name: p.name }), detail: e, subject: p.name }); }
   },
 
-  importCookies: async (p) => {
-    if (get().running[p.id]) { toast.err(t("useProfile.stopBeforeCookieImport")); return; }
+  importCookies: async (given) => {
+    const [id] = await realIds([given.id]);
+    if (!id) return;
+    if (get().running[id]) { toast.err(t("useProfile.stopBeforeCookieImport")); return; }
     try {
-      const path = await open({
-        multiple: false, directory: false, title: t("useProfile.selectCookiesDialogTitle"),
-        filters: [{ name: "JSON", extensions: ["json"] }],
-      });
-      if (typeof path !== "string") return;
-      const text = await readTextFile(path);
-      const cookies = JSON.parse(text);
+      const picked = await pickTextFile({ accept: ".json,application/json", maxBytes: 20 * MB });
+      if (!picked) return;
+      const cookies = JSON.parse(picked.text);
       if (!Array.isArray(cookies)) { toast.err(t("useProfile.cookiesNotArray")); return; }
-      const n = await cookiesImport(p.id, cookies);
+      const n = await cookiesImport(id, cookies);
       toast.ok(n === 1
         ? t("useProfile.cookieImportedOne")
         : t("useProfile.cookiesImportedMany", { n }));
-    } catch (e) { toast.err(String(e)); }
+    } catch (e) {
+      const name = get().profiles.find((x) => x.id === id)?.name ?? given.name;
+      toast.fail({ title: t("useProfile.cookiesImportFailed", { name }), detail: e instanceof FileTooBig ? e.message : e, subject: name });
+    }
   },
 
   setProfileFolder: async (id, f) => {
@@ -477,186 +994,514 @@ export const useProfile = create<ProfileStore>((set, get) => ({
         : t("useProfile.notInAnyFolder", { who }));
       return;
     }
-    try {
-      await profileSetFolder(id, f);
-      if (f) get().rememberFolder(f);
-      get().reload();
-      storeBus.emit("profiles");
-    } catch (e) { toast.err(String(e)); }
+    await get().moveMany([id], f);
   },
 
+  // The current Folder falls back to All Profiles through the sidebar, which
+  // resets it whenever the Folder it names disappears.
   deleteFolder: async (f) => {
-    const count = get().profiles.filter((p) => p.folder === f).length;
-    // Three outcomes: delete profiles, unfile, cancel.
+    const inFolder = get().profiles.filter((p) => p.folder === f).map((p) => p.id);
+    const count = inFolder.length;
     const choice = await confirmModal({
       title: t("useProfile.deleteFolderTitle", { f }),
       message:
-        count > 0
-          ? count === 1
-            ? t("useProfile.deleteFolderWithOneProfile")
-            : t("useProfile.deleteFolderWithProfiles", { count })
-          : t("useProfile.deleteEmptyFolder", { f }),
+        count === 0 ? t("useProfile.deleteEmptyFolder")
+        : count === 1 ? t("useProfile.deleteFolderWithOneProfile")
+        : t("useProfile.deleteFolderWithProfiles", { count }),
       buttons:
         count > 0
           ? [
               { label: t("useProfile.deleteFolderCancel"), value: "cancel" },
               { label: t("useProfile.deleteFolderKeepProfiles"), value: "keep" },
-              { label: t("useProfile.deleteFolderDeleteProfiles"), value: "delete", danger: true },
+              { label: t("useProfile.deleteFolderDeleteProfiles"), value: "trash", danger: true },
             ]
           : [
               { label: t("useProfile.deleteEmptyFolderCancel"), value: "cancel" },
               { label: t("useProfile.deleteEmptyFolderConfirm"), value: "keep", danger: true },
             ],
     });
-    if (choice == null || choice === "cancel") return;
-    const alsoDelete = choice === "delete";
+    if (choice === "keep") {
+      try {
+        const n = await folderDelete(f, false);
+        // The Folder lives in two places: profile tags (cleared by
+        // folder_delete) and the registry of empty Folders.
+        get().forgetFolder(f);
+        useFolderMeta.getState().dropMeta(f);
+        get().reload();
+        toast.ok(
+          n === 0 ? t("useProfile.folderDeleted", { f })
+          : n === 1 ? t("useProfile.folderRemovedOneProfileKept", { f })
+          : t("useProfile.folderRemovedProfilesKept", { f, n }),
+        );
+      } catch (e) { toast.fail({ title: t("useProfile.deleteFolderFailed", { f }), detail: e }); }
+      return;
+    }
+    if (choice !== "trash") return;
+    // Its profiles go the way Move to Trash sends them: stopped first, into
+    // the Trash, one Undo that also brings the Folder back. Never
+    // folder_delete(f, true), which trashes running profiles and can delete
+    // for good (IFACE-07, backend B2).
+    const look = lookOf(f);
+    const { moved, names } = await moveToTrash(set, get, inFolder);
+    if (moved.length < inFolder.length) {
+      // Some are still in it (the failure is shown): the Folder stays.
+      if (moved.length > 0) {
+        const title = moved.length === 1
+          ? t("useProfile.movedToTrashOne", { name: names.get(moved[0]) ?? "" })
+          : t("useProfile.movedToTrash", { n: moved.length });
+        toast.undo(title, () => { void get().restoreMany(moved); });
+      }
+      return;
+    }
     try {
-      const n = await folderDelete(f, alsoDelete);
-      // The folder lives in two places: profile tags (cleared by folder_delete)
-      // and the localStorage registry of empty folders. Drop it from the
-      // registry too, otherwise the tab lingers after every profile is gone.
-      get().forgetFolder(f);
-      if (get().folder === f) set({ folder: "all" });
-      get().reload();
-      toast.ok(
-        alsoDelete
-          ? n === 1
-            ? t("useProfile.folderDeletedWithOneProfile", { f })
-            : t("useProfile.folderDeletedWithProfiles", { f, n })
-          : n === 1
-            ? t("useProfile.folderRemovedOneProfileKept", { f })
-            : t("useProfile.folderRemovedProfilesKept", { f, n }),
+      await folderDelete(f, false);
+    } catch (e) {
+      // Every profile reached the Trash, but the folder itself didn't go:
+      // keep it (now empty, still registered) instead of claiming it's
+      // gone, and reload so the sidebar's count matches the backend. No
+      // profile left carries its folder tag, so the registry is what keeps
+      // it visible now (the empty-folder mechanism `rememberFolder` already
+      // exists for). The profiles' archived folder tag already points at f,
+      // so their own Undo still lands them back in the kept folder.
+      get().rememberFolder(f);
+      toast.fail({ title: t("useProfile.folderKeptAfterTrashFailure", { f }), detail: e });
+      await get().reload();
+      toast.undo(
+        moved.length === 1
+          ? t("useProfile.movedToTrashOne", { name: names.get(moved[0]) ?? "" })
+          : t("useProfile.movedToTrash", { n: moved.length }),
+        () => { void get().restoreMany(moved); },
       );
-    } catch (e) { toast.err(String(e)); }
+      return;
+    }
+    get().forgetFolder(f);
+    useFolderMeta.getState().dropMeta(f);
+    await get().reload();
+    toast.undo(
+      moved.length === 1
+        ? t("useProfile.folderDeletedWithOneProfile", { f })
+        : t("useProfile.folderDeletedWithProfiles", { f, n: moved.length }),
+      () => {
+        get().rememberFolder(f);
+        if (look) useFolderMeta.getState().setMeta(f, look);
+        void get().restoreMany(moved);
+      },
+    );
   },
 
-  createFromTemplate: async (tplId) => {
+  renameFolder: async (from, to) => {
+    const next = to.trim();
+    if (!next || next === from) return false;
+    const taken = get().folderRegistry.includes(next) || get().profiles.some((p) => p.folder === next);
+    if (taken) { toast.err(t("useProfile.folderNameTaken", { f: next })); return false; }
     try {
-      const meta = await profileCreateFromTemplate(tplId);
-      set({ templatePickerOpen: false });
+      await folderRename(from, next);
+      // The registry of empty Folders and the look follow the name.
+      const registry = get().folderRegistry.map((x) => (x === from ? next : x));
+      if (!registry.includes(next)) registry.push(next);
+      localStorage.setItem(FOLDERS_KEY, JSON.stringify(registry));
+      // Views, and the list showing it, follow the name first.
+      useViews.getState().renameFolder(from, next);
+      onFolderRenamed?.(from, next);
+      set({ folderRegistry: registry });
+      useFolderMeta.getState().renameMeta(from, next);
       get().reload();
-      toast.ok(t("useProfile.templateProfileCreated", { name: meta.name }));
-      // Auto-open the new profile in the editor.
-      const stored = await profileGet(meta.id);
-      set({ draft: fromStored(stored), expanded: meta.id });
-    } catch (e) { toast.err(String(e)); }
+      return true;
+    } catch (e) {
+      toast.fail({ title: t("useProfile.renameFolderFailed", { f: from }), detail: e });
+      return false;
+    }
   },
 
-  syncGroup: null,
+  createProfile: async ({ form, folder, tagIds, newTags }) => {
+    const fp = get().fingerprints.find((g) => g.id === form.gpu_preset_id) ?? null;
+    let saved: ProfileMeta;
+    try {
+      // An empty id: the backend creates the profile (lib.rs `profile_save`).
+      saved = await profileSave(toStored({ ...form, id: "", rev: 0 }, fp));
+    } catch (error) {
+      return { meta: null, error };
+    }
+    // It exists from here: each part after it is tried on its own, and the
+    // first that fails is reported with the profile.
+    let failed: { step: CreateStep; error: unknown } | null = null;
+    const step = async (name: CreateStep, run: () => Promise<unknown>) => {
+      try { await run(); return true; } catch (error) { failed ??= { step: name, error }; return false; }
+    };
+    // The backend rolls new cores, memory and platform version for a profile
+    // the UI creates (lib.rs `enrich_new_config`): the form's own values go
+    // back over them, on the profile as stored, so it is what the form showed.
+    await step("fingerprint", async () => {
+      const stored = await profileGet(saved.id);
+      // A new profile's form has screen 0 ("the template's"); the backend has
+      // since fitted that screen to this display, and a 0 here would read as
+      // "As in the fingerprint" and undo the fit.
+      const screen = form.screen_w > 0 ? {} : { screen_w: stored?.screen?.width ?? 0, screen_h: stored?.screen?.height ?? 0 };
+      saved = await profileSave(toStored({ ...form, ...screen, id: saved.id, rev: stored?._meta?.rev ?? 0 }, fp, stored));
+    });
+    const inFolder = !!folder && await step("folder", () => profileSetFolder(saved.id, folder));
+    const bound = !!form.proxy_id && await step("proxy", () => profileBindProxy(saved.id, form.proxy_id));
+    // Tags live in this app, not the backend: the new ones are made now that the profile is.
+    const tags = useTags.getState();
+    const made = newTags.map((name) => tags.create(name)?.id).filter((id): id is string => !!id);
+    if (tagIds.length + made.length > 0) tags.setTags(saved.id, [...tagIds, ...made]);
+    const meta = { ...saved, folder: inFolder ? folder : saved.folder, proxy_id: bound ? form.proxy_id : saved.proxy_id };
+    // In the list at once, where the backend lists it; no reload (PERF-13).
+    insertRows(set, get, [meta], newRowIndex(get));
+    markArrived(set, get, [meta.id]);
+    // PC-060, PC-095: the new row comes into view, or the list says it hides it.
+    uiBridge.created?.(meta.id);
+    return { meta, failed };
+  },
 
-  bulkLaunchSynced: async () => {
-    const ids = [...get().selected];
-    if (ids.length < 2) return;
+  launchSynced: async (given) => {
+    const ids = await realIds(given);
+    const byId = new Map(get().profiles.map((p) => [p.id, p]));
+    const proxies = get().proxies;
+    // Fix round 1, item 1: a proxy-missing profile must never reach
+    // sync_launch — it would run on this computer's own IP alongside the
+    // rest of the fleet. Same notice and fix as launchMany, then the sync
+    // goes ahead with whoever is left.
+    const missing = ids.filter((id) => { const p = byId.get(id); return !!p && proxyMissing(p, proxies); });
+    if (missing.length > 0) {
+      toast.err(
+        missing.length === 1
+          ? t("useProfile.proxyMissingStart", { name: byId.get(missing[0])!.name })
+          : t("useProfile.proxyMissingStartMany", { n: missing.length }),
+        { action: { label: missing.length === 1 ? t("useProfile.assignProxy") : t("useProfile.assignProxies"), run: () => onAssign?.(missing) } },
+      );
+    }
+    // An id the list doesn't know can't be checked, so it doesn't go either.
+    const startable = ids
+      .map((id) => byId.get(id))
+      .filter((p): p is ProfileMeta => !!p && !missing.includes(p.id));
+    // Task 11 fix round 1, item 1 (critical): a synced launch is still a
+    // launch — a no-proxy profile joining the fleet on this computer's own
+    // IP asks first too, same rule as launchMany. Cancel (or Assign, which
+    // only fires with one profile left) drops the whole group: two fleets
+    // starting apart, one held back by the question, is not "synchronised".
+    const choice = await confirmDirect(get, startable);
+    if (choice === "assign") { onAssign?.(startable.map((p) => p.id)); return false; }
+    if (choice === "cancel") return false;
+    const ok = (choice === "skip" ? startable.filter((p) => p.proxy_id) : startable).map((p) => p.id);
+    if (ok.length < 2) return false; // nothing left to synchronise
     // Per launch, not fixed: two fleets must not share session files.
     const group = `fleet-${Date.now().toString(36)}`;
     try {
-      const name = await syncLaunch(ids, group);
+      const name = await syncLaunch(ok, group);
       set({ syncGroup: name });
-      get().clearSelected();
-      toast.ok(t("useProfile.synchronisingProfiles", { n: ids.length }));
+      toast.ok(t("useProfile.synchronisingProfiles", { n: ok.length }));
+      return true;
     } catch (e) {
-      toast.err(String(e));
+      toast.fail({ title: t("useProfile.startInSyncFailed", { n: ok.length }), detail: e });
+      return false;
     }
   },
 
-  bulkLaunch: async () => {
-    const { selected, running } = get();
-    for (const id of selected) {
-      if (running[id]) continue;
-      try { await launch(id); } catch {}
+  launchMany: async (ids) => {
+    const byId = new Map(get().profiles.map((p) => [p.id, p]));
+    const proxies = get().proxies;
+    // One notice for every profile whose proxy is gone, not one per profile.
+    const missing = ids.filter((id) => {
+      const p = byId.get(id);
+      return !!p && !get().running[id] && proxyMissing(p, proxies);
+    });
+    if (missing.length > 0) {
+      toast.err(
+        missing.length === 1
+          ? t("useProfile.proxyMissingStart", { name: byId.get(missing[0])!.name })
+          : t("useProfile.proxyMissingStartMany", { n: missing.length }),
+        { action: { label: missing.length === 1 ? t("useProfile.assignProxy") : t("useProfile.assignProxies"), run: () => onAssign?.(missing) } },
+      );
     }
-    get().clearSelected();
+    const failed = [...missing];
+    const startable = ids
+      .map((id) => byId.get(id))
+      .filter((p): p is ProfileMeta => !!p && !get().running[p.id] && !missing.includes(p.id));
+    const choice = await confirmDirect(get, startable);
+    // Task 11 fix round 1, item 2: "assign" only fires with one profile left
+    // to start (confirmDirect's single-target branch), and that one has no
+    // proxy — same call as startStop's identical branch, or the button lies.
+    if (choice === "assign") onAssign?.(startable.map((p) => p.id));
+    if (choice === "cancel" || choice === "assign") return [...failed, ...startable.map((p) => p.id)];
+    // "Start the others" leaves the ones with no proxy as they are.
+    const todo = startable.filter((p) => choice !== "skip" || !!p.proxy_id);
+    for (const p of startable) if (!todo.includes(p)) failed.push(p.id);
+    if (todo.length === 0) return failed;
+    // One toast for the whole batch instead of one per profile (IFACE-06):
+    // it counts up in place, then says how many started and which failed.
+    const total = todo.length;
+    const prog = total > 1 ? toast.progress({ title: t("useProfile.startingMany", { done: 0, total }), total }) : null;
+    const errors: { p: ProfileMeta; message: string }[] = [];
+    let done = 0;
+    // One at a time, as before: each launch probes the network first.
+    for (const p of todo) {
+      const message = await get().startStop(p, { directChecked: true, quiet: prog !== null });
+      if (message) { errors.push({ p, message }); failed.push(p.id); }
+      done++;
+      prog?.update(done, t("useProfile.startingMany", { done, total }));
+    }
+    if (!prog) return failed;
+    const started = total - errors.length;
+    prog.done({
+      title: errors.length
+        ? t("useProfile.startedManyFailed", { n: started, total, failed: errors.length })
+        : t("useProfile.startedMany", { n: started, total }),
+      // One line per failure, named: the detail keeps its line breaks.
+      detail: errors.map((f) => `${f.p.name}: ${f.message}`).join("\n") || undefined,
+      failed: errors.length,
+      // The selection stays as it was (owner fix 1); this is the person's call.
+      action: errors.length
+        ? { label: t("useProfile.selectFailed"), run: () => uiBridge.select?.(errors.map((f) => f.p.id)) }
+        : undefined,
+    });
+    return failed;
   },
 
-  bulkStop: async () => {
-    for (const id of get().selected) {
-      try { await processKill(id); } catch {}
+  stopMany: async (ids) => {
+    const byId = new Map(get().profiles.map((p) => [p.id, p]));
+    const todo = ids.map((id) => byId.get(id)).filter((p): p is ProfileMeta => !!p && !!get().running[p.id]);
+    // More than one: one toast for the failures, not one each (IFACE-06).
+    const quiet = todo.length > 1;
+    const results = await Promise.all(todo.map(async (p) => ({ p, message: await get().startStop(p, { quiet }) })));
+    const failed = results.filter((r): r is { p: ProfileMeta; message: string } => r.message !== null);
+    if (quiet && failed.length > 0) {
+      toast.fail({
+        title: t("useProfile.stopManyFailed", { n: failed.length, total: todo.length }),
+        detail: failed.map((f) => `${f.p.name}: ${f.message}`).join("\n"),
+      });
     }
-    get().clearSelected();
+    return failed.map((f) => f.p.id);
   },
 
-  bulkDelete: async () => {
-    const ids = [...get().selected];
-    if (ids.length === 0) return;
-    if ((await confirmModal({
-      title: t("useProfile.deleteProfilesTitle"),
-      message: ids.length === 1
-        ? t("useProfile.deleteProfilesMessageOne")
-        : t("useProfile.deleteProfilesMessageMany", { n: ids.length }),
-      danger: true,
-    })) !== true) return;
-    for (const id of ids) {
-      try { await profileDelete(id); } catch (e) { toast.err(String(e)); }
+  deleteMany: async (ids) => {
+    const { moved, names } = await moveToTrash(set, get, ids);
+    if (moved.length === 0) return [];
+    toast.undo(
+      moved.length === 1
+        ? t("useProfile.movedToTrashOne", { name: names.get(moved[0]) ?? "" })
+        : t("useProfile.movedToTrash", { n: moved.length }),
+      () => { void get().restoreMany(moved); },
+    );
+    return moved;
+  },
+
+  restoreMany: async (ids) => {
+    // Back in the list at once, where they were: the rows they had a moment
+    // ago (LQ-03). Until its own restore answers, anything done to a row
+    // (Start, a rename, Peek) waits for it (`resolveId`). One that fails to
+    // come back leaves again, with the reason.
+    const remembered = new Map(ids.flatMap((id) => { const r = trashedRows.get(id); return r ? [[id, r] as const] : []; }));
+    const answer = new Map<string, (real: string | null) => void>();
+    for (const [id, r] of remembered) {
+      addPlaceholder(r.meta, r.at);
+      trackCreation(id, new Promise((done) => { answer.set(id, done); }));
     }
-    get().clearSelected();
-    get().reload();
-    storeBus.emit("profiles");
-    toast.ok(t("useProfile.movedToTrash", { n: ids.length }));
+    showLocal(set, get);
+    markArrived(set, get, [...remembered.keys()]);
+    if (remembered.size > 0) onRestored?.([...remembered.keys()]);
+    const name = remembered.get(ids[0])?.meta.name ?? "";
+    const back: ProfileMeta[] = [];
+    const lost: string[] = [];
+    // One by one, in order. The rows the backend answered with go in once
+    // they have all answered, in one update and so one render (speed lane
+    // 2026-10-02: one update per row re-ran the list's work fifteen times
+    // for an Undo of fifteen). The rows already show meanwhile, and an
+    // action on one of them waits for its row (`resolveId`), answered after
+    // that update so it never meets the placeholder.
+    const { failed, firstError } = await eachReporting(ids, async (id) => {
+      // A later move to the Trash remembers the row anew: that one stays.
+      if (trashedRows.get(id) === remembered.get(id)) trashedRows.delete(id);
+      try {
+        back.push(await trashRestore(id));
+      } catch (e) {
+        lost.push(id);
+        throw e;
+      }
+    });
+    putRestored(set, get, back, lost);
+    for (const m of back) answer.get(m.id)?.(m.id);
+    for (const id of lost) answer.get(id)?.(null);
+    // Out of the Trash again (an Undo): its copy is stale.
+    storeBus.emit("trash", "profiles");
+    if (failed.length > 0) {
+      if (ids.length === 1) toast.fail({ title: t("useProfile.restoreFailed", { name }), detail: firstError });
+      else toast.fail({ title: t("useProfile.restoreSomeFailed", { failed: failed.length, total: ids.length }), detail: firstError });
+    }
+    // Rows that could not show at once get the keyboard once they are back.
+    if (remembered.size === 0 && back.length > 0) onRestored?.(back.map((m) => m.id));
   },
 
   // Dump selected profile FingerprintConfigs as a JSON array to clipboard.
-  bulkExport: async () => {
-    const ids = [...get().selected];
+  exportMany: async (given) => {
+    const ids = await realIds(given);
     if (ids.length === 0) return;
     try {
       const payloads = await Promise.all(ids.map((id) => profileGet(id)));
-      await clip.write(JSON.stringify(payloads, null, 2));
-      toast.ok(t("useProfile.copiedToClipboard", { n: payloads.length }));
-    } catch (e) { toast.err(String(e)); }
+      // A profile export can carry a temporary profile's proxy password (SEC-11).
+      await copySecret(JSON.stringify(payloads, null, 2));
+      const n = payloads.length;
+      toast.ok(n === 1 ? t("useProfile.copiedJsonOne") : t("useProfile.copiedJsonMany", { n }), { detail: t("clipboard.clearsSoon") });
+    } catch (e) { toast.fail({ title: t("useProfile.copyJsonFailed"), detail: e }); }
+  },
+
+  // Each profile on its own: one that fails (gone, locked) doesn't stop the
+  // rest, and goes back to the Folder it had.
+  moveMany: async (ids, folder, opts) => {
+    const asked = new Set(ids);
+    const was = new Map(get().profiles.filter((p) => asked.has(p.id)).map((p) => [p.id, p.folder]));
+    const todo = ids.filter((id) => was.has(id) && was.get(id) !== folder);
+    if (todo.length === 0) return true;
+    if (folder) get().rememberFolder(folder);
+    const names = new Map(get().profiles.map((p) => [p.id, p.name]));
+    const { done, failed, firstError } = await patchRows(set, get, todo, () => ({ folder }), (real) => profileSetFolder(real, folder), () => {
+      if (opts?.quiet) return;
+      // IFACE-14: rows that left the list say where they went, with Undo.
+      uiBridge.moved?.({
+        ids: todo, names, from: was, to: folder,
+        undo: () => { void get().restoreFolders(new Map(todo.map((id) => [id, was.get(id)!]))); },
+      });
+    });
+    // Counted as the backend saw them: a row whose create failed is in neither.
+    const total = done.length + failed.length;
+    if (failed.length === 1 && total === 1) toast.fail({ title: t("useProfile.moveFailed", { name: names.get(failed[0]) ?? "" }), detail: firstError });
+    else if (failed.length > 0) toast.fail({ title: t("useProfile.moveSomeFailed", { failed: failed.length, total }), detail: firstError });
+    return failed.length === 0;
+  },
+
+  restoreFolders: async (folders) => {
+    const byFolder = new Map<string, string[]>();
+    for (const [id, f] of folders) byFolder.set(f, [...(byFolder.get(f) ?? []), id]);
+    // Every Folder's moves start together, so every row is back at once (the
+    // list's Undo puts them back in the selection right after).
+    await Promise.all([...byFolder].map(([f, ids]) => get().moveMany(ids, f, { quiet: true })));
+  },
+
+  assignProxies: (ids, proxyIds) => get().assignPairs(ids.map((profileId) => ({ profileId, proxyId: proxyIds[0] ?? null }))),
+
+  assignPairs: async (pairs) => {
+    if (pairs.length === 0) return false;
+    const ids = pairs.map((p) => p.profileId);
+    // Each row shows its proxy at once (PERF-13); a failed bind puts the old one back.
+    const { done, failed, firstError } = await patchRows(
+      set, get, ids,
+      (_p, k) => ({ proxy_id: pairs[k].proxyId }),
+      (real, k) => profileBindProxy(real, pairs[k].proxyId),
+    );
+    if (failed.length > 0) {
+      const total = done.length + failed.length;
+      const name = get().profiles.find((x) => x.id === failed[0])?.name ?? "";
+      toast.fail({
+        title: total === 1 ? t("useProfile.bindFailed", { name }) : t("useProfile.assignSomeFailed", { failed: failed.length, total }),
+        detail: firstError,
+      });
+    }
+    if (done.length > 0) {
+      toast.ok(done.length === 1
+        ? t("useProfile.proxyAssignedOne")
+        : t("useProfile.proxiesAssigned", { n: done.length }));
+    }
+    return failed.length === 0;
+  },
+
+  regenerateFingerprints: async (ids) => {
+    if (ids.length === 0) return 0;
+    const one = ids.length === 1;
+    const oneName = one ? (get().profiles.find((p) => p.id === ids[0])?.name ?? "") : "";
+    const yes = await confirmModal({
+      title: one
+        ? t("useProfile.regenerateTitleOne", { name: oneName })
+        : t("useProfile.regenerateTitle", { n: ids.length }),
+      message: t("useProfile.regenerateMessage"),
+      buttons: [
+        { label: t("confirm.cancel"), value: false },
+        { label: one ? t("useProfile.regenerateConfirmOne") : t("useProfile.regenerateConfirm"), value: true, primary: true },
+      ],
+    });
+    if (yes !== true) return 0;
+    // An unknown verdict must not pass for "compatible": load the verdicts first.
+    await loadGpuVerdicts();
+    const todo = await realIds(ids);
+    const { fingerprints, running } = get();
+    const compat = useGpuCompat.getState().byId;
+    let changed = 0;
+    let skipped = 0;
+    let failed = 0;
+    let firstError: unknown;
+    for (const id of todo) {
+      // A running engine keeps the fingerprint it launched with; changing it
+      // under it would only take effect on the next start anyway.
+      if (running[id]) { skipped++; continue; }
+      try {
+        const form = await get().loadForm(id);
+        const current = fingerprints.find((f) => f.id === form.gpu_preset_id);
+        const os = current ? osIdFor(current.platform) : HOST_OS;
+        // Same pick rules as the editor: this OS, backed by this machine's GPU.
+        const sameOs = fingerprints.filter((f) => matchesOs(f.platform, os));
+        const base = sameOs.length > 0 ? sameOs : fingerprints;
+        const fitting = base.filter((f) => compat[f.id]?.compatible !== false);
+        let pool = fitting.length > 0 ? fitting : base;
+        if (pool.length > 1) pool = pool.filter((f) => f.id !== form.gpu_preset_id);
+        const fp = pool[Math.floor(Math.random() * pool.length)];
+        if (!fp) continue;
+        const nav = fp.payload?.navigator ?? {};
+        let picks: { hardware_concurrency?: number; device_memory?: number; platform_version?: string } = {};
+        try { picks = await enrichPicksForPreset(fp.id); } catch { /* the preset's own values */ }
+        await profileSave(toStored({
+          ...form,
+          gpu_preset_id: fp.id,
+          hardware_concurrency: picks.hardware_concurrency ?? nav.hardware_concurrency ?? form.hardware_concurrency,
+          device_memory: picks.device_memory ?? nav.device_memory ?? form.device_memory,
+          platform_version: picks.platform_version ?? form.platform_version,
+          user_agent: nav.user_agent ?? form.user_agent,
+        }, fp));
+        // The fingerprint is not in the row, so the row does not change: Peek's cached form goes by hand.
+        forgetForm(id);
+        changed++;
+      } catch (e) { failed++; firstError ??= e; }
+    }
+    get().reload();
+    if (failed > 0) {
+      const name = get().profiles.find((x) => x.id === todo[0])?.name ?? "";
+      toast.fail({
+        title: todo.length === 1 ? t("useProfile.regenerateFailed", { name }) : t("useProfile.regenerateSomeFailed", { failed, total: ids.length }),
+        detail: firstError,
+      });
+    }
+    if (changed > 0) {
+      toast.ok(changed === 1
+        ? t("useProfile.regeneratedOne")
+        : t("useProfile.regeneratedMany", { n: changed }));
+    }
+    if (skipped > 0) toast.info(t("useProfile.regenerateSkippedRunning", { n: skipped }));
+    return changed;
   },
 
   // Paste profile JSON from clipboard → fresh profiles.
-  bulkImport: async () => {
+  importFromClipboard: async () => {
     try {
       const text = await clip.read();
       if (!text.trim()) { toast.err(t("useProfile.clipboardEmpty")); return; }
+      const tooBig = clipboardTooBig(text);
+      if (tooBig) { toast.err(tooBig); return; }
       const data = JSON.parse(text);
       const arr = Array.isArray(data) ? data : [data];
       const n = await profileImport(arr);
-      get().reload();
+      // IFACE-14: what arrived is selected, and the first is brought into view.
+      const had = new Set(get().profiles.map((p) => p.id));
+      await get().reload();
+      const arrived = get().profiles.filter((p) => !had.has(p.id)).map((p) => p.id);
+      markArrived(set, get, arrived);
+      if (arrived.length > 0) uiBridge.arrived?.(arrived);
       toast.ok(n === 1
         ? t("useProfile.profileImportedOne")
         : t("useProfile.profilesImportedMany", { n }));
-    } catch (e) { toast.err(t("useProfile.importFailed", { e: String(e) })); }
+    } catch (e) { toast.fail({ title: t("useProfile.importFailed"), detail: e }); }
   },
 }));
 
-/// The ids in the order the table paints them — a range covers what is visible.
-function visibleIds(s: ProfileStore): string[] {
-  return applyProfileFilters(
-    s.profiles, s.proxies, s.search, s.folder, s.filters, s.running, s.sort,
-  ).map((p) => p.id);
-}
-
-/// Shared with `useVisibleProfiles` so the rows on screen and the rows a range
-/// covers cannot drift apart.
-export function applyProfileFilters(
-  profiles: ProfileMeta[],
-  proxies: ProxyEntry[],
-  search: string,
-  folder: string,
-  filters: ProfileFilters,
-  running: Record<string, number> = {},
-  sort: ProfileSort = "added",
-): ProfileMeta[] {
-  const q = search.trim().toLowerCase();
-  const byId = new Map(proxies.map((p) => [p.id, p]));
-  const kept = profiles.filter((p) => {
-    if (folder !== "all" && p.folder !== folder) return false;
-    if (q && !p.name.toLowerCase().includes(q) && !p.notes.toLowerCase().includes(q)) return false;
-    if (filters.proxy === "bound" && !p.proxy_id) return false;
-    if (filters.proxy === "direct" && p.proxy_id) return false;
-    if (filters.country) {
-      const cc = p.proxy_id ? byId.get(p.proxy_id)?.country ?? "" : "";
-      if (cc.toUpperCase() !== filters.country.toUpperCase()) return false;
-    }
-    if (filters.status !== "all") {
-      const isRunning = !!running[p.id];
-      if ((filters.status === "running") !== isRunning) return false;
-    }
-    return true;
-  });
-  // Sorted here rather than in the table, so the rows on screen and the rows a
-  // shift-click range covers stay the same list.
-  return sortProfiles(kept, sort);
-}
+// A row that changed (an edit, a reload with news, a save from Peek) may have
+// left its cached form behind: Peek reads it again next time (PERF-14).
+useProfile.subscribe((s, prev) => {
+  if (s.profiles !== prev.profiles) forgetChanged(prev.profiles, s.profiles);
+});

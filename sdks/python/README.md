@@ -156,7 +156,9 @@ page — and it does not appear in `/json/protocol`, so a page cannot discover i
 from shardx import ShardX, Motion
 
 async with sdk.session(profile) as browser:
-    motion = await Motion.attach(browser)
+    page = await browser.new_page()
+    # Motion acts on a page's widget, so it attaches to a page.
+    motion = await Motion.attach(page)
 
     # desktop profile
     await motion.create_pointer(20, 20)

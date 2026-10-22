@@ -2,7 +2,7 @@ export * from "./model/types";
 export * from "./model/api";
 export * from "./lib/useProxy";
 export * from "./lib/selectors";
-
-export * from "./ui/ProxyTypeBadge";
-export * from "./ui/ProxyCountryCell";
-export * from "./ui/ProxyTestResult";
+export * from "./lib/columns";
+export * from "./lib/status";
+export * from "./lib/labels";
+export * from "./lib/identity";

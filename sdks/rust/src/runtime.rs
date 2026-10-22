@@ -14,7 +14,7 @@ use serde::{Deserialize, Serialize};
 use tokio::io::AsyncWriteExt;
 
 pub const PUB_BASE: &str = "https://pub-e57a7c60f6934eb09a6600bf2fc59cdc.r2.dev";
-pub const CHROMIUM_VERSION: &str = "152.0.7977.65";
+pub const CHROMIUM_VERSION: &str = "156.0.8078.48";
 /// This SDK's own version, compared against the manifest's `min_sdk_version`.
 pub const SDK_VERSION: &str = env!("CARGO_PKG_VERSION");
 /// Version manifest (GitHub raw) — one tiny GET yields every archive's current
@@ -334,9 +334,14 @@ impl Runtime {
         let mut local = self.load_manifest();
         let remote = fetch_manifest().await;
         // Remember the engine version + grease so launch can normalise profiles.
+        // Without the manifest, what is ALREADY installed — not the version
+        // this SDK was published with. Falling back to the constant made an
+        // offline run record 152 over an engine that is 156, and profiles
+        // then declared a version the engine does not have.
         *self.engine_version.lock().unwrap() = remote
             .chromium_version
             .clone()
+            .or_else(|| local.installed_chromium_version.clone())
             .unwrap_or_else(|| CHROMIUM_VERSION.to_string());
         *self.grease.lock().unwrap() =
             (remote.grease_brand.clone(), remote.grease_version.clone());
@@ -366,13 +371,19 @@ impl Runtime {
             // stale libs can't linger beside the new ones (that pinned the
             // detected version → endless re-download). binary_subpath[0] is the
             // engine root dir.
+            // Download BEFORE wiping. The old tree has to go — see above —
+            // but removing it first meant a download that failed left no
+            // engine at all, and nothing could launch until the network came
+            // back.
+            let (archive_tmp, browser_etag) = self
+                .download(&self.spec.browser, &self.root)
+                .await
+                .context("download the engine")?;
             if let Some(engine_dir) = self.spec.binary_subpath.first() {
                 let _ = fs::remove_dir_all(self.root.join(engine_dir));
             }
-            let etag = self
-                .download_and_extract(&self.spec.browser, &self.root)
-                .await?;
-            local.browser_etag = Some(etag);
+            Self::extract_archive(&archive_tmp, &self.root).await?;
+            local.browser_etag = Some(browser_etag);
             if remote.engine_build.is_some() {
                 local.installed_engine_build = remote.engine_build.clone();
             }
@@ -419,6 +430,13 @@ impl Runtime {
     }
 
     async fn download_and_extract(&self, archive: &Archive, dest: &Path) -> Result<String> {
+        let (tmp, etag) = self.download(archive, dest).await?;
+        Self::extract_archive(&tmp, dest).await?;
+        Ok(etag)
+    }
+
+    /// Fetches `archive` beside `dest` without touching what is installed.
+    async fn download(&self, archive: &Archive, dest: &Path) -> Result<(PathBuf, String)> {
         let url = format!("{PUB_BASE}/{}", archive.key);
         fs::create_dir_all(dest)?;
         let tmp = dest.join(format!(".{}.tmp", archive.key));
@@ -450,11 +468,16 @@ impl Runtime {
             out.flush().await?;
         }
 
-        let zip_path = tmp.clone();
+        Ok((tmp, etag))
+    }
+
+    /// Unpacks what `download` left behind, and removes it.
+    async fn extract_archive(tmp: &Path, dest: &Path) -> Result<()> {
+        let zip_path = tmp.to_path_buf();
         let dest = dest.to_path_buf();
         tokio::task::spawn_blocking(move || extract_zip(&zip_path, &dest)).await??;
-        let _ = fs::remove_file(&tmp);
-        Ok(etag)
+        let _ = fs::remove_file(tmp);
+        Ok(())
     }
 
     async fn install_fingerprints(&self) -> Result<()> {

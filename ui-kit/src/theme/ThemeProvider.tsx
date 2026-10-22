@@ -3,6 +3,7 @@ import {
   useCallback,
   useContext,
   useEffect,
+  useLayoutEffect,
   useMemo,
   useState,
 } from 'react'
@@ -11,10 +12,16 @@ export type Theme = 'light' | 'dark' | 'system'
 export type ResolvedTheme = 'light' | 'dark'
 
 type ThemeContextValue = {
+  /** The chosen theme, the one that is stored. */
   theme: Theme
+  /** A theme shown without being stored (a settings page before Save), or null. */
+  previewTheme: Theme | null
   systemTheme: ResolvedTheme
+  /** What is on screen: the preview when there is one, else the chosen theme. */
   resolvedTheme: ResolvedTheme
   setTheme: (theme: Theme) => void
+  /** Shows `theme` without storing it; null shows the chosen theme again. */
+  setPreviewTheme: (theme: Theme | null) => void
   toggleTheme: () => void
 }
 
@@ -29,13 +36,16 @@ function getSystemTheme(): ResolvedTheme {
 
 function getInitialTheme(): Theme {
   if (typeof window === 'undefined') return 'system'
-  const stored = window.localStorage.getItem(STORAGE_KEY)
+  // A blocked storage (a private window, a policy) throws: follow the system.
+  let stored: string | null = null
+  try { stored = window.localStorage.getItem(STORAGE_KEY) } catch { /* blocked */ }
   if (stored === 'light' || stored === 'dark' || stored === 'system') return stored
   return 'system'
 }
 
 export function ThemeProvider({ children }: { children: React.ReactNode }) {
   const [theme, setThemeState] = useState<Theme>(getInitialTheme)
+  const [previewTheme, setPreviewTheme] = useState<Theme | null>(null)
   const [systemTheme, setSystemTheme] = useState<ResolvedTheme>(getSystemTheme)
 
   useEffect(() => {
@@ -45,26 +55,48 @@ export function ThemeProvider({ children }: { children: React.ReactNode }) {
     return () => mql.removeEventListener('change', onChange)
   }, [])
 
-  const resolvedTheme: ResolvedTheme = theme === 'system' ? systemTheme : theme
+  const shown = previewTheme ?? theme
+  const resolvedTheme: ResolvedTheme = shown === 'system' ? systemTheme : shown
 
-  useEffect(() => {
-    document.documentElement.setAttribute('data-theme', resolvedTheme)
-    window.localStorage.setItem(STORAGE_KEY, theme)
-  }, [resolvedTheme, theme])
+  // Only the chosen theme is stored: a preview is never written.
+  useLayoutEffect(() => {
+    try { window.localStorage.setItem(STORAGE_KEY, theme) } catch { /* blocked: kept until reload */ }
+  }, [theme])
 
-  const setTheme = useCallback((next: Theme) => setThemeState(next), [])
-  const toggleTheme = useCallback(
-    () =>
-      setThemeState((prev) => {
-        const current = prev === 'system' ? getSystemTheme() : prev
-        return current === 'dark' ? 'light' : 'dark'
-      }),
-    [],
-  )
+  // A theme change snaps (PERF-07): transitions are off while the attribute
+  // flips and for the next two frames, set before paint so no frame mixes
+  // the two themes.
+  useLayoutEffect(() => {
+    const root = document.documentElement
+    root.setAttribute('data-theme-switching', '')
+    root.setAttribute('data-theme', resolvedTheme)
+    let second = 0
+    const first = requestAnimationFrame(() => {
+      second = requestAnimationFrame(() => root.removeAttribute('data-theme-switching'))
+    })
+    return () => {
+      cancelAnimationFrame(first)
+      cancelAnimationFrame(second)
+      root.removeAttribute('data-theme-switching')
+    }
+  }, [resolvedTheme])
+
+  // Choosing a theme ends any preview: the choice is what shows.
+  const setTheme = useCallback((next: Theme) => {
+    setThemeState(next)
+    setPreviewTheme(null)
+  }, [])
+  const toggleTheme = useCallback(() => {
+    setThemeState((prev) => {
+      const current = prev === 'system' ? getSystemTheme() : prev
+      return current === 'dark' ? 'light' : 'dark'
+    })
+    setPreviewTheme(null)
+  }, [])
 
   const value = useMemo<ThemeContextValue>(
-    () => ({ theme, systemTheme, resolvedTheme, setTheme, toggleTheme }),
-    [theme, systemTheme, resolvedTheme, setTheme, toggleTheme],
+    () => ({ theme, previewTheme, systemTheme, resolvedTheme, setTheme, setPreviewTheme, toggleTheme }),
+    [theme, previewTheme, systemTheme, resolvedTheme, setTheme, toggleTheme],
   )
 
   return <ThemeContext.Provider value={value}>{children}</ThemeContext.Provider>

@@ -1,4 +1,4 @@
-// ShardX Launcher — Tauri backend.
+// ShardBrowser Launcher — Tauri backend.
 
 mod profile_icon;
 mod api;
@@ -26,6 +26,7 @@ mod modguard;
 mod runner;
 mod wasm;
 mod trash;
+mod reset;
 
 use serde_json::Value;
 
@@ -879,7 +880,7 @@ async fn automation_fleet_window(app: tauri::AppHandle) {
         return;
     }
     let built = WebviewWindowBuilder::new(&app, "fleet", WebviewUrl::App("index.html#/?fleet=1".into()))
-        .title("ShardX Fleet")
+        .title("ShardBrowser Fleet")
         .inner_size(460.0, 420.0)
         .min_inner_size(360.0, 240.0)
         .always_on_top(true)
@@ -1091,7 +1092,17 @@ fn clipboard_write(app: tauri::AppHandle, text: String) -> Result<(), String> {
 #[tauri::command]
 fn clipboard_read(app: tauri::AppHandle) -> Result<String, String> {
     use tauri_plugin_clipboard_manager::ClipboardExt;
-    app.clipboard().read_text().map_err(|e| e.to_string())
+    // An empty clipboard is an empty string, not a failure.
+    //
+    // The platform reports "nothing to read" as an error, and every caller
+    // then showed whatever the operating system called it — on macOS a bare
+    // "unknown error" — where the honest answer is that there was nothing to
+    // paste. Each caller says what it wanted and found nothing; this one just
+    // stops pretending the clipboard broke.
+    match app.clipboard().read_text() {
+        Ok(text) => Ok(text),
+        Err(_) => Ok(String::new()),
+    }
 }
 
 #[tauri::command]
@@ -1420,6 +1431,13 @@ fn proxy_bulk_save(entries: Vec<proxy::ProxyEntry>) -> Result<usize, String> {
 
 // ---- Launcher ----
 
+/// Cancel a launch still on its way (a slow proxy can hold one in Starting):
+/// the pending `launch` call returns "launch cancelled" and no browser starts.
+#[tauri::command]
+fn launch_cancel(profile_id: String) {
+    launch::cancel(&profile_id);
+}
+
 #[tauri::command]
 async fn launch(profile_id: String) -> Result<u32, String> {
     // UI launches: no CDP, headed. The bus goes along even with no group so the
@@ -1463,7 +1481,7 @@ fn open_sync_panel(app: &tauri::AppHandle, group: &str) {
     }
     let url = format!("index.html#/?syncPanel={group}");
     let built = WebviewWindowBuilder::new(app, "sync-panel", WebviewUrl::App(url.into()))
-        .title("ShardX Sync")
+        .title("ShardBrowser Sync")
         .inner_size(360.0, 168.0)
         .resizable(true)
         .min_inner_size(280.0, 120.0)
@@ -1652,6 +1670,25 @@ async fn helper_fill(profile: String) -> Result<usize, String> {
     }
 }
 
+/// Brings a running profile's browser window to the front.
+///
+/// The browser raises itself, because on macOS raising another
+/// application's window needs an Accessibility grant the operator never
+/// gave. The message travels over the same bus the synchroniser uses, so it
+/// works whether or not the profile is in a group.
+#[tauri::command]
+async fn profile_focus_window(profile_id: String) -> Result<(), String> {
+    if !process::Tracker::shared().is_running(&profile_id) {
+        return Err("profile is not running".into());
+    }
+    let b = bus().await?;
+    if !b.focus(&profile_id) {
+        // Started before this launcher, or started without the bus.
+        return Err("this profile's browser is not listening — stop it and start it again".into());
+    }
+    Ok(())
+}
+
 /// Opens (or re-focuses) the helper panel for one profile.
 fn open_helper_panel(app: &tauri::AppHandle, profile: &str) {
     use tauri::{Manager, WebviewUrl, WebviewWindowBuilder};
@@ -1761,6 +1798,38 @@ fn settings_get() -> Result<settings::Settings, String> {
 /// The primary monitor in CSS pixels, so the editor can offer resolutions and
 /// refuse the ones this machine cannot actually show. None when there is no
 /// monitor to ask (headless), and the editor then offers the full list.
+/// What this computer really has, for the profile form's "Real" choice.
+///
+/// Offered only when the profile claims the same operating system as this
+/// one: a Windows profile reporting an Apple GPU's core count, or a mac
+/// profile reporting a number no Mac ships, is a worse tell than a rounded
+/// guess. Even then it ties every profile on this machine to every other —
+/// they all answer alike — which is why it is a choice and not the default.
+#[derive(serde::Serialize)]
+struct HostHardware {
+    os: &'static str,
+    cores: u32,
+    memory_gb: u32,
+}
+
+#[tauri::command]
+fn host_hardware() -> HostHardware {
+    HostHardware {
+        os: if cfg!(target_os = "windows") {
+            "Windows"
+        } else if cfg!(target_os = "macos") {
+            "macOS"
+        } else {
+            "Linux"
+        },
+        cores: host_logical_cores(),
+        // The bucket, not the raw figure: navigator.deviceMemory is reported
+        // in the same steps by every browser, so a raw 12 would be a value no
+        // real one returns.
+        memory_gb: host_ram_bucket_gb(),
+    }
+}
+
 #[tauri::command]
 fn host_screen(window: tauri::WebviewWindow) -> Option<(i64, i64)> {
     let monitor = window
@@ -1908,6 +1977,13 @@ async fn ps_import_order(order_id: i64, kind: String) -> Result<usize, String> {
         .map_err(|e| e.to_string())
 }
 
+/// The public trial offer. No API key: the one call in this app that asks the
+/// site API rather than the billing API.
+#[tauri::command]
+async fn ps_trial_offer() -> Result<Value, String> {
+    psapi::trial_offer().await.map_err(|e| e.to_string())
+}
+
 #[tauri::command]
 async fn ps_products() -> Result<Value, String> {
     psapi::call("GET", "/user/api/proxies/products", &[], None)
@@ -1999,6 +2075,12 @@ async fn ps_add_bandwidth(id: i64, amount: i64, promo_code: Option<String>) -> R
 }
 
 /// Account-owner traffic for a residential proxy type ("standart" | "premium").
+/// The ProxyShard page's Usage section (`psapi::usage`).
+#[tauri::command]
+async fn ps_usage(range: String) -> Result<Value, String> {
+    psapi::usage(&range).await.map_err(|e| e.to_string())
+}
+
 #[tauri::command]
 async fn ps_profile_traffic(proxy_type: String) -> Result<Value, String> {
     psapi::call(
@@ -2101,7 +2183,7 @@ fn show_main_window(app: &tauri::AppHandle) {
 }
 
 pub fn run() {
-    tauri::Builder::default()
+    with_app_menu(tauri::Builder::default())
         // Must be the first plugin: a second launch focuses the running window.
         .plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
             show_main_window(app);
@@ -2109,12 +2191,28 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_clipboard_manager::init())
+        .on_menu_event(|app, e| {
+            if e.id.as_ref() == "app_quit" {
+                quit(app);
+            }
+        })
         .on_window_event(|window, event| {
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                // Mid-reset the window stays: closing it could end the app
+                // with the data half moved.
+                if reset::active() {
+                    api.prevent_close();
+                    notify_warning(reset::WAIT);
+                    return;
+                }
                 let to_tray = settings::load().map(|s| s.minimize_to_tray).unwrap_or(true);
                 if window.label() == "main" && to_tray {
                     api.prevent_close();
                     let _ = window.hide();
+                } else if window.label() == "main" {
+                    // Closing it ends the app: the same question as Quit.
+                    api.prevent_close();
+                    crate::quit(tauri::Manager::app_handle(window));
                 }
             }
         })
@@ -2129,6 +2227,7 @@ pub fn run() {
             helper_profiles,
             helper_fields,
             helper_fill,
+            profile_focus_window,
             helper_show,
             helper_close,
             helper_dismiss,
@@ -2216,6 +2315,7 @@ pub fn run() {
             settings_save,
             settings_load_error,
             host_screen,
+            host_hardware,
             api_info,
             api_regenerate_token,
             ps_get_key,
@@ -2226,12 +2326,14 @@ pub fn run() {
             ps_active,
             ps_import_order,
             ps_products,
+            ps_trial_offer,
             ps_available_count,
             ps_resi_isps,
             ps_calculate,
             ps_purchase,
             ps_add_bandwidth,
             ps_profile_traffic,
+            ps_usage,
             ps_renew,
             ps_set_tag,
             ps_countries,
@@ -2245,6 +2347,19 @@ pub fn run() {
             runtime::runtime_status,
             runtime::runtime_install,
             runtime::launcher_update_check,
+            reset::app_reset_plan,
+            reset::app_reset,
+            reset::app_reset_backup,
+            reset::app_reset_keep_storage,
+            reset::app_reset_pending,
+            reset::app_reset_undo,
+            reset::app_reset_finish,
+            reset::app_reset_set_aside,
+            reset::app_restart,
+            launch_cancel,
+            app_quit_asking,
+            app_quit_confirmed,
+            app_quit_cancelled,
         ])
         .setup(|app| {
             let _ = APP_HANDLE.set(app.handle().clone());
@@ -2263,12 +2378,12 @@ pub fn run() {
                     #[cfg(target_os = "macos")]
                     let builder = builder.icon_as_template(true);
                     builder
-                        .tooltip("ShardX Launcher")
+                        .tooltip("ShardBrowser Launcher")
                         .menu(&menu)
                         .show_menu_on_left_click(false)
                         .on_menu_event(|app, e| match e.id.as_ref() {
                             "tray_show" => show_main_window(app),
-                            "tray_quit" => app.exit(0),
+                            "tray_quit" => crate::quit(app),
                             _ => {}
                         })
                         .on_tray_icon_event(|tray, e| {
@@ -2294,11 +2409,18 @@ pub fn run() {
                 }
             }
 
+            // A Delete all data that did not finish (a crash, a forced quit)
+            // keeps the app locked, and nothing below writes into its folders:
+            // the window opens on "A reset didn’t finish" (undo or finish).
+            let reset_pending = reset::check_pending();
+
             // Migrate already-created profiles' UA + client_hints to the
             // current engine version (independent of the fingerprint seed).
-            tauri::async_runtime::spawn(async {
-                runtime::ensure_profiles_migrated().await;
-            });
+            if !reset_pending {
+                tauri::async_runtime::spawn(async {
+                    runtime::ensure_profiles_migrated().await;
+                });
+            }
 
             // Point the heavy directories wherever the operator moved them,
             // before anything reads a profile.
@@ -2306,6 +2428,10 @@ pub fn run() {
                 if let Some(root) = s.data_root.as_deref().filter(|r| !r.is_empty()) {
                     store::set_data_root(Some(std::path::PathBuf::from(root)));
                 }
+            }
+
+            if reset_pending {
+                return Ok(());
             }
 
             // Trash older than its week.
@@ -2335,6 +2461,106 @@ pub fn run() {
             }
             Ok(())
         })
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while building tauri application")
+        .run(|_app, event| {
+            // Mid-reset nothing ends the app but its own restart.
+            if let tauri::RunEvent::ExitRequested { api, code, .. } = event {
+                if reset::active() && code != Some(tauri::RESTART_EXIT_CODE) {
+                    api.prevent_exit();
+                    notify_warning(reset::WAIT);
+                }
+            }
+        });
+}
+
+/// Quit from the tray, the app menu, or closing the window with the tray off.
+/// Refused while Delete all data moves the data (the toast says why), so it
+/// never stops half way. Otherwise the window is asked first: nothing saves
+/// on its own, so an open editor may hold unsaved changes, and the window
+/// answers Save / Don't save / Cancel (`useQuitGuard.ts`).
+///
+/// The window says it is asking (`app_quit_asking`) at once; one that does
+/// not within a few seconds is gone or wedged, and the app exits as it always
+/// did. Once it is asking there is no timeout: a person deciding whether to
+/// save must not have the app close under the dialog.
+fn quit(app: &tauri::AppHandle) {
+    use std::sync::atomic::Ordering::SeqCst;
+    use tauri::{Emitter, Manager};
+    if reset::active() {
+        notify_warning(reset::WAIT);
+        return;
+    }
+    let Some(main) = app.get_webview_window("main") else {
+        app.exit(0);
+        return;
+    };
+    if QUIT_ASKING.load(SeqCst) {
+        return; // already asking: the dialog is up
+    }
+    let round = QUIT_ROUND.fetch_add(1, SeqCst) + 1;
+    show_main_window(app);
+    if main.emit("app://quit-requested", ()).is_err() {
+        app.exit(0);
+        return;
+    }
+    let app = app.clone();
+    tauri::async_runtime::spawn(async move {
+        tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+        if QUIT_ROUND.load(SeqCst) == round && !QUIT_ASKING.load(SeqCst) {
+            app.exit(0);
+        }
+    });
+}
+
+/// Which Quit the window last answered for: a late timer from an earlier
+/// round must not end the app.
+static QUIT_ROUND: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+/// The window has the question up.
+static QUIT_ASKING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+#[tauri::command]
+fn app_quit_asking() {
+    QUIT_ASKING.store(true, std::sync::atomic::Ordering::SeqCst);
+}
+
+#[tauri::command]
+fn app_quit_confirmed(app: tauri::AppHandle) {
+    QUIT_ASKING.store(false, std::sync::atomic::Ordering::SeqCst);
+    if reset::active() {
+        notify_warning(reset::WAIT);
+        return;
+    }
+    app.exit(0);
+}
+
+#[tauri::command]
+fn app_quit_cancelled() {
+    QUIT_ASKING.store(false, std::sync::atomic::Ordering::SeqCst);
+    // A later Quit is a new round; the timer of this one must not fire.
+    QUIT_ROUND.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+}
+
+/// macOS: the app menu's Quit (⌘Q) is the launcher's own, so it can refuse
+/// mid-reset (the stock item ends the process at once). Elsewhere the window
+/// keeps having no menu.
+fn with_app_menu(b: tauri::Builder<tauri::Wry>) -> tauri::Builder<tauri::Wry> {
+    #[cfg(target_os = "macos")]
+    let b = b.menu(app_menu);
+    b
+}
+
+/// The stock macOS menu with its Quit swapped for one that asks `quit`.
+#[cfg(target_os = "macos")]
+fn app_menu(app: &tauri::AppHandle) -> tauri::Result<tauri::menu::Menu<tauri::Wry>> {
+    use tauri::menu::{Menu, MenuItem, MenuItemKind};
+    let menu = Menu::default(app)?;
+    if let Some(MenuItemKind::Submenu(first)) = menu.items()?.into_iter().next() {
+        if let Some(stock) = first.items()?.last() {
+            first.remove(stock)?;
+        }
+        let label = format!("Quit {}", app.package_info().name);
+        first.append(&MenuItem::with_id(app, "app_quit", label, true, Some("CmdOrCtrl+Q"))?)?;
+    }
+    Ok(menu)
 }

@@ -2,9 +2,11 @@ import { useEffect, useState } from "react";
 import {
   helperFields, helperFill, helperClose, helperDismiss, type HelperField,
 } from "../../entities/profile/model/api";
-import { SyncIcon } from "../../shared/icons";
+import { Button, IconButton } from "@proxyshard/shardx-ui-kit";
+import { CloseIcon } from "../../shared/icons";
+import { FloatingPanel } from "../../shared/ui/FloatingPanel";
 import { useT } from "../../shared/i18n";
-import { dragWindowOnMouseDown } from "../../shared/lib/dragWindow";
+import { hasOwn } from "../../shared/lib/utils";
 
 /**
  * Shard Helper: offers to fill a form the browser noticed. It only ever offers —
@@ -19,12 +21,15 @@ export function HelperPanel({ profile }: { profile: string }) {
 
   useEffect(() => {
     let alive = true;
+    let last = "";
     const tick = async () => {
       try {
         const r = await helperFields(profile);
         if (!alive) return;
         const next = r?.fields ?? [];
-        setFields(next);
+        // Unchanged: nothing to draw (PERF-23).
+        const json = JSON.stringify(next);
+        if (json !== last) { last = json; setFields(next); }
         // Nothing left to fill — the page moved on, or the browser closed.
         if (next.length === 0) void helperClose();
       } catch { void helperClose(); }
@@ -49,37 +54,36 @@ export function HelperPanel({ profile }: { profile: string }) {
   const kinds = [...new Set(fields.map((f) => f.kind))];
 
   return (
-    <div
-      onMouseDown={dragWindowOnMouseDown}
-      className="flex h-screen w-screen flex-col rounded-12 bg-bg-white-0 ring-1 ring-inset ring-stroke-soft-200"
+    <FloatingPanel
+      title={t("helperPanel.title")}
+      actions={
+        <IconButton
+          size="3xsmall"
+          icon={<CloseIcon className="size-3.5" />}
+          label={t("helperPanel.dismiss")}
+          tooltipSide="bottom"
+          onMouseDown={(e) => e.stopPropagation()}
+          onClick={() => void helperDismiss(profile)}
+        />
+      }
     >
-      <div className="flex shrink-0 select-none items-center gap-2 px-3 pt-2.5 pb-1">
-        <SyncIcon className="size-4 shrink-0 text-primary-base" />
-        <div className="flex-1 truncate text-label-xs text-text-strong-950">
-          {t("helperPanel.title")}
-        </div>
-        <button type="button" onMouseDown={(e) => e.stopPropagation()} onClick={() => void helperDismiss(profile)}
-                title={t("helperPanel.dismiss")}
-                className="rounded-4 px-1.5 text-paragraph-xs text-text-soft-400 hover:bg-bg-weak-50">
-          ✕
-        </button>
-      </div>
 
       <div className="min-h-0 flex-1 overflow-auto px-3 pb-1">
         {/* In a group each window fills with its own person. */}
         <div className="flex flex-wrap gap-1">
           {kinds.map((k) => (
             <span key={k}
-                  className="rounded-6 px-1.5 py-0.5 text-paragraph-xs text-text-sub-600 ring-1 ring-inset ring-stroke-soft-200">
-              {LABELS[k] ?? k}
+                  className="rounded-chip px-1.5 py-0.5 text-secondary text-text-sub-600 ring-1 ring-inset ring-stroke-soft-200">
+              {hasOwn(LABELS, k) ? LABELS[k] : k}
             </span>
           ))}
         </div>
       </div>
 
       <div className="shrink-0 px-3 pb-3 pt-1">
-        <button
-          type="button"
+        <Button
+          size="2xsmall"
+          className="w-full"
           onMouseDown={(e) => e.stopPropagation()}
           disabled={busy || fields.length === 0}
           onClick={async () => {
@@ -87,7 +91,6 @@ export function HelperPanel({ profile }: { profile: string }) {
             try { setFilled(await helperFill(profile)); } catch { /* shown by the next poll */ }
             setBusy(false);
           }}
-          className="w-full rounded-8 bg-primary-base py-1.5 text-label-xs text-static-white hover:bg-primary-darker disabled:opacity-50"
         >
           {filled > 1
             ? t("helperPanel.filledWindows", { n: filled })
@@ -96,8 +99,8 @@ export function HelperPanel({ profile }: { profile: string }) {
               : fields.length === 1
                 ? t("helperPanel.fillOneField")
                 : t("helperPanel.fillFields", { n: fields.length })}
-        </button>
+        </Button>
       </div>
-    </div>
+    </FloatingPanel>
   );
 }

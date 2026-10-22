@@ -11,7 +11,12 @@ use std::path::Path;
 /// Marker on the managed folder node. Anything carrying it is ours to replace.
 const MANAGED_KEY: &str = "shardx_managed";
 /// What the managed folder is called inside the browser.
-const MANAGED_FOLDER: &str = "ShardX";
+const MANAGED_FOLDER: &str = "ShardBrowser";
+/// Its name before the rename to ShardBrowser. Builds that old may have
+/// written it without the marker, so the name alone still makes it ours; the
+/// new name never does, because every folder this build writes carries the
+/// marker, and a folder the person made and called "ShardBrowser" is theirs.
+const LEGACY_MANAGED_FOLDER: &str = "ShardX";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Bookmark {
@@ -213,5 +218,24 @@ fn is_managed(node: &Value) -> bool {
     node.get("meta_info")
         .and_then(|m| m.get(MANAGED_KEY))
         .is_some()
-        || node.get("name").and_then(|v| v.as_str()) == Some(MANAGED_FOLDER)
+        || node.get("name").and_then(|v| v.as_str()) == Some(LEGACY_MANAGED_FOLDER)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_managed_folder_is_ours_under_its_new_name_its_old_one_or_its_marker() {
+        // Written by this build.
+        assert!(is_managed(&json!({ "name": MANAGED_FOLDER, "type": "folder", "meta_info": { MANAGED_KEY: "1" } })));
+        // The person's own folder that happens to share the new name stays.
+        assert!(!is_managed(&json!({ "name": "ShardBrowser", "type": "folder" })));
+        // Written before the rename: replaced, so a profile never shows both.
+        assert!(is_managed(&json!({ "name": "ShardX", "type": "folder" })));
+        // Renamed by the person: the marker still says it is ours.
+        assert!(is_managed(&json!({ "name": "Work", "type": "folder", "meta_info": { MANAGED_KEY: "1" } })));
+        // The person's own folder stays.
+        assert!(!is_managed(&json!({ "name": "Work", "type": "folder" })));
+    }
 }

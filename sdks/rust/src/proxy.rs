@@ -54,15 +54,52 @@ pub fn parse_proxy(url: &str) -> Result<ParsedProxy> {
     })
 }
 
+/// "%2C" back to ",". Anything that is not a well-formed escape stands as it
+/// is, so a password with a per-cent sign in it survives.
+///
+/// Form decoding was used here, and it reads "&" as the end of a field and
+/// "+" as a space — so a password containing either came back cut short or
+/// altered. Userinfo is percent-encoded, not form-encoded.
 fn percent_decode(s: &str) -> String {
-    url::form_urlencoded::parse(format!("x={s}").as_bytes())
-        .next()
-        .map(|(_, v)| v.to_string())
-        .unwrap_or_else(|| s.to_string())
+    let b = s.as_bytes();
+    let mut out: Vec<u8> = Vec::with_capacity(b.len());
+    let mut i = 0usize;
+    while i < b.len() {
+        if b[i] == b'%' && i + 2 < b.len() {
+            let hi = (b[i + 1] as char).to_digit(16);
+            let lo = (b[i + 2] as char).to_digit(16);
+            if let (Some(hi), Some(lo)) = (hi, lo) {
+                let byte = (hi * 16 + lo) as u8;
+                if byte >= 0x20 {
+                    out.push(byte);
+                    i += 3;
+                    continue;
+                }
+            }
+        }
+        out.push(b[i]);
+        i += 1;
+    }
+    String::from_utf8(out).unwrap_or_else(|_| s.to_string())
 }
 
+/// Everything outside the unreserved set, percent-encoded.
+///
+/// Form encoding writes a space as "+", which is a plus sign to whoever
+/// reads the string back, so a password with a space arrived at the proxy
+/// wrong. The engine's `--proxy-server` is also a list of rules where ",",
+/// ";" and "=" are punctuation, and providers put all three in usernames.
 fn encode(s: &str) -> String {
-    url::form_urlencoded::byte_serialize(s.as_bytes()).collect()
+    let mut out = String::with_capacity(s.len());
+    for b in s.as_bytes() {
+        let c = *b as char;
+        if c.is_ascii_alphanumeric() || matches!(c, '-' | '.' | '_' | '~') {
+            out.push(c);
+        } else {
+            out.push_str(&format!("%{b:02X}"));
+        }
+    }
+    out
 }
 
 /// Format as the ShardX engine's `--proxy-server` argument (URL-encoded

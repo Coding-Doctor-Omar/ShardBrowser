@@ -1,5 +1,5 @@
 import { create } from "zustand";
-import { toast } from "../../../shared/lib/toast";
+import { toast } from "../../../shared/model/toast";
 import { t } from "../../../shared/i18n";
 import { PsMe } from "../model/types";
 import { psGetKey, psSetKey, psMe } from "../model/api";
@@ -16,8 +16,14 @@ export type PsAccountStore = {
 
     init: () => Promise<void>;
     refreshMe: () => Promise<void>;
+    /** Reads the wallet and the order count again in place: the page keeps
+     *  what it shows, says nothing while it reads, and a failed read changes
+     *  nothing (after a buy, a top-up or a renewal). */
+    reloadMe: () => Promise<void>;
     saveKey: (next: string) => Promise<void>;
 };
+
+let initing = false;
 
 export const usePsAccount = create<PsAccountStore>((set, get) => ({
     key: null,
@@ -27,7 +33,10 @@ export const usePsAccount = create<PsAccountStore>((set, get) => ({
     keyLoaded: false,
 
     init: async () => {
-        if (get().keyLoaded) return;
+        // Once: a second call while the first is on its way (React runs
+        // effects twice in development) would check the key twice.
+        if (get().keyLoaded || initing) return;
+        initing = true;
         try {
             const k = await psGetKey();
             set({ key: k, keyLoaded: true });
@@ -35,6 +44,8 @@ export const usePsAccount = create<PsAccountStore>((set, get) => ({
             else set({ status: "idle" });
         } catch {
             set({ key: "", keyLoaded: true });
+        } finally {
+            initing = false;
         }
     },
     // Validate the saved key against user-api.proxyshard.com and pull the wallet.
@@ -47,6 +58,12 @@ export const usePsAccount = create<PsAccountStore>((set, get) => ({
             set({ me: null, status: "err", err: String(e) });
         }
     },
+    reloadMe: async () => {
+        try {
+            const m = await psMe();
+            set({ me: m });
+        } catch { /* quiet: the tiles keep what they show */ }
+    },
     saveKey: async (next) => {
         const value = next.trim();
         try {
@@ -55,6 +72,6 @@ export const usePsAccount = create<PsAccountStore>((set, get) => ({
             toast.ok(t("usePsAccount.apiKeySaved"));
             if (value) get().refreshMe();
             else set({ me: null, status: "idle" });
-        } catch (e) { toast.err(String(e)); }
+        } catch (e) { toast.fail({ title: t("usePsAccount.saveKeyFailed"), detail: e }); }
     },
 }));

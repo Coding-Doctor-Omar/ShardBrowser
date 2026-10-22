@@ -1,82 +1,158 @@
-import { Button } from "@proxyshard/shardx-ui-kit";
-import {
-  PinIconApp,
-  EditIcon,
-  CopyIcon,
-  DeleteIcon,
-  MoreIcon,
-  PlayIcon,
-  StopIcon,
-} from "../../../shared/icons";
+import type { ReactNode } from "react";
+import { Button, cn, IconButton, IconSwap, Tooltip } from "@proxyshard/shardx-ui-kit";
+import { MoreIcon, SpinnerIcon } from "../../../shared/icons";
 import { useProfile, type ProfileMeta } from "../../../entities/profile";
 import { useT } from "../../../shared/i18n";
+import { RowHoverActions, rowButtonDangerHoverClass, rowButtonHoverClass } from "../../../shared/ui/RowHoverActions";
+import { rowActionIcons } from "../../../shared/ui/rowActionIcons";
+import type { RowTone } from "../../../shared/ui/rowFill";
+import type { Command } from "../../../shared/commands";
+import { ariaOf, capOf, command, commandsFor, iconOf, labelOf, runCommand } from "../../commands";
+import { useTour } from "../../tour/model/useTour";
 
-export function ProfileRowActions({ profile, onMore }: {
+const isPin = (c: Command) => c.id === "profile.pin" || c.id === "profile.unpin";
+
+/// Start/Stop and the row menu button at the end of a Profiles row. The
+/// registry's hover commands (Pin, Open in Peek, Clone, Move to Trash) show
+/// as a hover overlay to their left (Task 5e: the owner wants these on every
+/// row, not only under the row menu, which still carries every item for
+/// right-click); their names and keys are the registry's, as the menus and
+/// the sheet print them (UI-29).
+export function ProfileRowActions({ profile, onMore, tabIndex, editing, tone, lead, built = true, tourStart = false }: {
   profile: ProfileMeta;
   onMore: (e: React.MouseEvent) => void;
+  /** -1 keeps the buttons out of the Tab order (rows other than the active one). */
+  tabIndex?: number;
+  /** An inline edit (Name or Notes) is open on this row: hides the overlay. */
+  editing?: boolean;
+  /** The row's own fill (`rowFill`): the overlay's tint matches it (fix
+   *  round 1, finding 1). */
+  tone: RowTone;
+  /** The edit button of the column the hover actions float over. */
+  lead?: ReactNode;
+  /** False leaves the hover buttons out until the row needs them (its
+   *  `engaged`): hidden and out of reach until then, so a row a scroll
+   *  brings in does not build them for nothing. Start/Stop and More stay. */
+  built?: boolean;
+  /** The tour's Start step points at this row's button: it carries the
+   *  tour's key and stays in view for that step (it shows on hover only,
+   *  and the tour blocks the pointer). */
+  tourStart?: boolean;
 }) {
   const t = useT();
   const p = profile;
   const isRunning = useProfile((s) => !!s.running[p.id]);
   const isStarting = useProfile((s) => s.startBusy.has(p.id));
-  const startStop = useProfile((s) => s.startStop);
-  const togglePin = useProfile((s) => s.togglePin);
-  const cloneProfile = useProfile((s) => s.cloneProfile);
-  const remove = useProfile((s) => s.remove);
-  const expand = useProfile((s) => s.expand);
+  // Cancel was pressed: the launch is being ended.
+  const isCancelling = useProfile((s) => s.cancelling.has(p.id));
+  const tourShowsStart = useTour((s) => tourStart && s.run?.steps[s.run.index]?.target === "start");
+  const runCmd = command(isRunning ? "profile.stop" : "profile.start");
+  const runLabel = labelOf(runCmd.id);
+  const cancelLabel = labelOf("profile.cancelStart");
+  // The registry's hover commands, Pin first, where the row has always had
+  // it (Task 5e; the Tab order of columns Task 8).
+  const listed = built ? commandsFor("hover", "profiles", { ids: [p.id] }) : [];
+  const hover = [...listed.filter(isPin), ...listed.filter((c) => !isPin(c))];
 
   return (
-    <div className="flex justify-end gap-1">
-      <Button
-        variant={isRunning ? "error" : "primary"}
-        mode="lighter"
-        size="xsmall"
-        fullRadius
-        className="min-w-[84px]"
-        leftIcon={
-          isRunning
-            ? <StopIcon className="size-3.5" />
-            : <span className={isStarting ? "spin-icon inline-grid place-items-center" : "inline-grid place-items-center"}><PlayIcon className="size-3.5" /></span>
-        }
-        onClick={() => startStop(p)}
-        disabled={!isRunning && isStarting}
-        title={!isRunning && isStarting ? t("profileRowActions.startingTitle") : undefined}
-      >
-        {isRunning ? t("profileRowActions.stop") : isStarting ? t("profileRowActions.starting") : t("profileRowActions.start")}
-      </Button>
-      <Button
-        variant={p.pinned ? "primary" : "neutral"}
-        mode={p.pinned ? "lighter" : "stroke"}
-        size="xsmall"
-        onlyIcon
-        onClick={() => togglePin(p)}
-        title={p.pinned ? t("profileRowActions.unpin") : t("profileRowActions.pinToTop")}
-        leftIcon={<PinIconApp className="size-4" />}
-      >
-      
-      </Button>
-      <Button variant="neutral" mode="stroke" size="xsmall" onlyIcon onClick={() => expand(p.id)} title={t("profileRowActions.edit")}
-        leftIcon={<EditIcon className="size-4" />}
-      >
-      </Button>
-      <Button variant="neutral" mode="stroke" size="xsmall" onlyIcon onClick={() => cloneProfile(p.id)} title={t("profileRowActions.clone")}
-        leftIcon={<CopyIcon className="size-4" />}
-      >
-      </Button>
-      <Button variant="error" mode='filled' size="xsmall" onlyIcon onClick={() => remove(p.id)} title={t("profileRowActions.delete")}
-        leftIcon={<DeleteIcon className="size-4" />}
-      >
-      </Button>
-      <Button
-        variant="neutral"
-        mode="stroke"
-        size="xsmall"
-        onlyIcon
-        onClick={onMore}
-        title={t("profileRowActions.moreActions")}
-        leftIcon={<MoreIcon className="size-4" />}
-      >
-      </Button>
-    </div>
+    <RowHoverActions
+      editing={editing}
+      tone={tone}
+      persistFixed={isRunning || isStarting || tourShowsStart}
+      lead={built ? lead : undefined}
+      fixed={
+        <>
+          {/* While the launch runs the button says Cancel and spins, and stays
+              focused (a launch can take long on a slow proxy: the way out is
+              always there). Pressed, it says Cancelling and does nothing
+              (aria-disabled, not disabled: the kit tooltip still shows, and
+              no spinner: the word alone fills the button's 76 px). Stop
+              comes once the launch returns (UI-30, A11Y-04). */}
+          <Tooltip
+            content={isStarting ? (isCancelling ? t("profileRowActions.cancellingTitle") : t("profileRowActions.cancelTitle")) : runLabel}
+            shortcut={isStarting ? undefined : capOf(runCmd)}
+          >
+            <Button
+              variant={isStarting ? "neutral" : isRunning ? "error" : "primary"}
+              mode="lighter"
+              size="3xsmall"
+              // A dense row button: no press scale (S3).
+              static
+              data-tour={tourStart ? "start" : undefined}
+              // The row buttons' inside ring (see rowButtonHoverClass).
+              className="min-w-[76px] focus-ring-inset"
+              leftIcon={
+                isCancelling ? undefined
+                : isStarting ? <SpinnerIcon className="size-3.5 animate-spin" />
+                : (
+                  <IconSwap
+                    on={isRunning}
+                    onIcon={rowActionIcons.stop({ className: "size-3.5" })}
+                    offIcon={rowActionIcons.start({ className: "size-3.5" })}
+                  />
+                )
+              }
+              onClick={() => {
+                if (isCancelling) return;
+                if (isStarting) void useProfile.getState().cancelStart(p.id);
+                else void useProfile.getState().startStop(p);
+              }}
+              tabIndex={tabIndex}
+              // Named by its word, so the tooltip that repeats it adds no
+              // description (A11Y-09); the key is declared here.
+              aria-label={isStarting ? undefined : runLabel}
+              aria-keyshortcuts={isStarting ? undefined : ariaOf(runCmd)}
+              {...(isCancelling ? { "aria-disabled": true, "aria-busy": true, "data-loading": "" } : {})}
+            >
+              {isCancelling ? t("profileRowActions.cancelling") : isStarting ? cancelLabel : runLabel}
+            </Button>
+          </Tooltip>
+          <IconButton
+            variant="neutral"
+            mode="ghost"
+            size="3xsmall"
+            onClick={onMore}
+            tabIndex={tabIndex}
+            className={rowButtonHoverClass}
+            icon={<MoreIcon className="size-3.5" />}
+            label={t("profileRowActions.moreActions")}
+            // The menu host sets aria-expanded while its menu is open.
+            aria-haspopup="menu"
+            aria-expanded="false"
+          />
+        </>
+      }
+    >
+      {hover.map((c) => {
+        // Fix round 1, finding 10: one stable label and glyph, "Pin", in both
+        // states (the APG toggle-button pattern): only its color and
+        // `aria-pressed` say "on". It runs Unpin when pinned; "Unpin" stays a
+        // menu-only wording.
+        const pin = isPin(c);
+        const look = pin ? command("profile.pin") : c;
+        return (
+          <IconButton
+            key={look.id}
+            data-command={c.id}
+            variant="neutral"
+            mode="ghost"
+            size="3xsmall"
+            tabIndex={tabIndex}
+            aria-pressed={pin ? p.pinned : undefined}
+            // The most destructive one stays neutral at rest (Task 5e): the
+            // owner does not want a permanent red slab on every row.
+            className={cn("pointer-events-auto", c.danger ? rowButtonDangerHoverClass : rowButtonHoverClass)}
+            icon={iconOf(look, cn("size-3.5", pin && p.pinned && "text-primary-text"))}
+            label={look.label(1)}
+            shortcut={capOf(c)}
+            aria-keyshortcuts={ariaOf(c)}
+            // A double click must not also run the second click's action on
+            // whatever this button became (or on the row that slid under the
+            // pointer): the click that matters already ran.
+            onClick={(e) => { e.stopPropagation(); if (e.detail > 1) return; void runCommand(c, { ids: [p.id] }, { from: "hover" }); }}
+          />
+        );
+      })}
+    </RowHoverActions>
   );
 }

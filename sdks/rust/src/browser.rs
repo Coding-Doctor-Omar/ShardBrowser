@@ -253,6 +253,13 @@ impl Browser {
             let _ = std::fs::remove_file(&marker);
             argv.push("--remote-debugging-port=0".into());
             argv.push("--remote-allow-origins=*".into());
+            // Gates the Motion domain, which every synthesised click and
+            // keystroke goes through. Without it `Motion.createPointer` comes
+            // back as "wasn't found": the domain is absent from
+            // Schema.getDomains and /json/protocol rather than merely
+            // disabled, which is what keeps it free when nobody uses it. The
+            // launcher passes the same flag.
+            argv.push("--shardx-automation".into());
         }
         if opts.headless {
             argv.push("--headless=new".into());

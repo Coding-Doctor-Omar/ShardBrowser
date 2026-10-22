@@ -1,6 +1,6 @@
 {
   "name": "@proxyshard/shardx",
-  "version": "2.0.3",
+  "version": "2.1.0",
   "description": "Self-contained Node SDK for the ShardX anti-detect browser — downloads the engine + Widevine + fingerprint library on first use, launches isolated profiles.",
   "type": "module",
   "main": "dist/index.js",
@@ -47,7 +47,7 @@
     "access": "public"
   },
   "dependencies": {
-    "adm-zip": "^0.5.16",
+    "adm-zip": "^0.6.1",
     "patchright": "^1.49.0",
     "socks-proxy-agent": "^8.0.4",
     "undici": "^6.19.0"

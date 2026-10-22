@@ -1,12 +1,23 @@
 import { useEffect } from "react";
-import { Topbar } from "../../shared/ui/Topbar";
+import { PageBody, PageHeader } from "../../widgets/PageHeader";
 import { useStoreChanged } from "../../shared/hooks/useStoreChanged";
-import { useProxy } from "../../entities/proxy";
+import { useHeldLoading } from "../../shared/hooks/useHeldLoading";
+import { countActiveProxyFilters, useFilteredProxies, useProxy } from "../../entities/proxy";
 import { storeBus } from "../../shared/lib/storeBus";
-import { ProxyEditor, ProxyBulkImporter, ProxyInfoPopover, ProxyDistributeModal } from "../../features/manage-proxies";
-import { ProxyTable } from "../../widgets/ProxyTable/ProxyTable";
-import { ProxyToolbar } from "../../widgets/ProxyTable/ProxyToolbar";
+import { useDialogLife } from "../../shared/lib/useDialogLife";
+import { useNav } from "../../shared/model/navigation";
+import { useProfile } from "../../entities/profile";
+import { usePsAccount } from "../../entities/proxyshard";
+import { useOnboarding } from "../../features/onboarding";
+import { ProxyBulkImporter, ProxyFilterChips } from "../../features/manage-proxies";
+import { PsTrialModal } from "../../features/proxyshard";
+import { ProxyList } from "../../widgets/ProxyList";
+import { ProxyToolbar } from "../../widgets/ProxyList/ProxyToolbar";
+import { ProxyPeek } from "../../widgets/ProxyPeek";
+import { ProxyBulkBar } from "../../widgets/ProxyBulkBar";
 import { useT } from "../../shared/i18n";
+import { ListColumn } from "../../shared/ui/ListColumn";
+import { showMeAround } from "../../features/tour";
 
 export function ProxiesPage() {
   const t = useT();
@@ -14,49 +25,75 @@ export function ProxiesPage() {
   const reload = useProxy((s) => s.reload);
   const search = useProxy((s) => s.search);
   const setSearch = useProxy((s) => s.setSearch);
-  const editing = useProxy((s) => s.editing);
-  const setEditing = useProxy((s) => s.setEditing);
+  const filterCount = useProxy((s) => countActiveProxyFilters(s.filters));
+  const count = useFilteredProxies().length;
+  const total = useProxy((s) => s.proxies.length);
+  const status = useProxy((s) => s.status);
+  const ready = status === "ready";
   const bulkOpen = useProxy((s) => s.bulkOpen);
   const setBulkOpen = useProxy((s) => s.setBulkOpen);
-  const infoFor = useProxy((s) => s.infoFor);
-  const setInfoFor = useProxy((s) => s.setInfoFor);
-  const snapshots = useProxy((s) => s.snapshots);
-  const distributeOpen = useProxy((s) => s.distributeOpen);
-  const setDistributeOpen = useProxy((s) => s.setDistributeOpen);
+  // It stays mounted through its exit (FEEL-01).
+  const bulkLife = useDialogLife(bulkOpen);
+  // No proxies at all: nothing to filter or count (LAYOUT-20).
+  const empty = ready && total === 0 && !search.trim() && filterCount === 0;
+  // The list's placeholder rows wait 150 ms and stay 400 ms (WIG-12); the
+  // count waits for them (held here, and passed to the list: one value).
+  const loading = useHeldLoading(status === "idle" || status === "loading");
 
   useEffect(() => { init(); }, [init]);
+  // ProxyShard's trial, for someone with no account connected yet. It asks the
+  // server on every visit to this page and shows nothing unless the server
+  // says there is an offer; see PsTrialModal.
+  const psInit = usePsAccount((s) => s.init);
+  useEffect(() => { psInit(); }, [psInit]);
   // Pick up proxies/profiles added via the automation API or MCP live.
   useStoreChanged(reload);
 
   return (
-    <section className="flex flex-col">
-      <Topbar crumbs={[t("proxies.crumbWorkspace"), t("proxies.crumbProxies")]} search={search} onSearch={setSearch} />
-      <div className="mb-3.5 flex items-end justify-between gap-4">
-        <h1 className="m-0 text-title-h5 text-text-strong-950">{t("proxies.title")}</h1>
-        <ProxyToolbar />
-      </div>
-      <ProxyTable />
-      {editing && (
-        <ProxyEditor
-          initial={editing}
-          onClose={() => { setEditing(null); reload(); }}
-          onSaved={() => storeBus.emit("proxies")}
-        />
-      )}
-      {bulkOpen && (
+    <>
+      <PageHeader
+        title={t("proxies.title")}
+        count={!loading && ready && !empty ? (search.trim() || filterCount > 0 ? { shown: count, total } : count) : undefined}
+        help={{ title: t("pageHelp.proxies.title"), body: t("pageHelp.proxies.body"), onTour: () => showMeAround("proxies") }}
+        filter={empty ? undefined : { value: search, onChange: setSearch }}
+        actions={<ProxyToolbar empty={empty} />}
+      />
+      <PageBody scroll={false} className="relative">
+        <ProxyFilterChips />
+        {/* Peek always pushes the list: it never lies over it. */}
+        <div className="relative flex min-h-0 flex-1 gap-panel">
+          {/* The list's own column: its bar and the toasts stay off Peek (F2). */}
+          <ListColumn>
+            {/* Before the list in Tab order; it floats over the list's bottom edge. */}
+            <ProxyBulkBar />
+            <ProxyList loading={loading} />
+          </ListColumn>
+          <ProxyPeek />
+        </div>
+      </PageBody>
+      {bulkLife.mounted && (
         <ProxyBulkImporter
-          onClose={() => { setBulkOpen(false); reload(); storeBus.emit("proxies"); }}
+          key={bulkLife.session}
+          open={bulkOpen}
+          onClose={async (added) => {
+            setBulkOpen(false);
+            reload();
+            // This store has just reloaded: only the Profiles side reads them again.
+            storeBus.emit("proxies", "proxies");
+            // Opened by step 1 of the setup checklist: back to it once the
+            // Profiles side has the new proxy (IFACE-02). No Peek: Proxies
+            // would open with it on the next visit.
+            if (useOnboarding.getState().endProxyStep()) {
+              await useProfile.getState().reload();
+              useNav.getState().setSection("profiles");
+            } else if (added) {
+              // One proxy added from the preview opens in Peek, as New profile does (CRAFT-26).
+              useProxy.getState().openPeek(added);
+            }
+          }}
         />
       )}
-      {distributeOpen && <ProxyDistributeModal onClose={() => setDistributeOpen(false)} />}
-      {infoFor && (
-        <ProxyInfoPopover
-          proxy={infoFor.proxy}
-          anchor={infoFor.anchor}
-          latest={snapshots[infoFor.proxy.id]}
-          onClose={() => setInfoFor(null)}
-        />
-      )}
-    </section>
+      <PsTrialModal />
+    </>
   );
 }

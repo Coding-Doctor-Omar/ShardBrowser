@@ -2,10 +2,16 @@
 //! gestures and turning the handset. Everything is produced inside the browser
 //! process; nothing is injected into the page.
 //!
-//! The domain lives on the BROWSER target and is deliberately absent from
-//! `/json/protocol` and `Schema.getDomains`, so a page that enumerates the
-//! protocol cannot find it. That also means chromiumoxide has no generated
-//! type for it, so the calls go out through [`RawCommand`] below.
+//! The domain is deliberately absent from `/json/protocol` and
+//! `Schema.getDomains`, so a page that enumerates the protocol cannot find
+//! it. That also means chromiumoxide has no generated type for it, so the
+//! calls go out through [`RawCommand`] below.
+//!
+//! It attaches to a PAGE. Everything it does happens to the page's widget,
+//! and the handler reaches that widget through the target's own web contents
+//! — a browser target has none, so every command sent to a browser session
+//! answered "no live frame". It used to be built from the browser, and Motion
+//! never worked from this SDK at all.
 //!
 //! Pointer and touch are exclusive: a profile claiming a touchscreen refuses
 //! every pointer command, and one that does not refuses every finger command.
@@ -14,7 +20,8 @@
 //! # use shardx::{ShardX, motion::Motion};
 //! # async fn demo(sdk: &ShardX, profile: shardx::Profile) -> anyhow::Result<()> {
 //! let session = sdk.session(profile, Default::default()).await?;
-//! let motion = Motion::new(&session.browser);
+//! let page = session.new_page("about:blank").await?;
+//! let motion = Motion::new(&page);
 //! motion.create_pointer(20.0, 20.0).await?;
 //! motion.glide_to(640.0, 360.0, Some(220.0)).await?;
 //! motion.tap("left", 1).await?;
@@ -25,7 +32,7 @@
 use std::borrow::Cow;
 
 use anyhow::Result;
-use chromiumoxide::{Browser as CdpBrowser, Command, Method};
+use chromiumoxide::{Command, Method, Page};
 use chromiumoxide_types::MethodId;
 use serde::Serialize;
 use serde_json::{json, Value};
@@ -49,18 +56,18 @@ impl Command for RawCommand {
     type Response = Value;
 }
 
-/// Human input on one browser. Cheap to make — it borrows the connection.
+/// Human input on one page. Cheap to make — it borrows the connection.
 pub struct Motion<'a> {
-    browser: &'a CdpBrowser,
+    page: &'a Page,
 }
 
 impl<'a> Motion<'a> {
-    pub fn new(browser: &'a CdpBrowser) -> Self {
-        Self { browser }
+    pub fn new(page: &'a Page) -> Self {
+        Self { page }
     }
 
     async fn call(&self, method: &'static str, params: Value) -> Result<Value> {
-        let r = self.browser.execute(RawCommand { method, params }).await?;
+        let r = self.page.execute(RawCommand { method, params }).await?;
         Ok(r.result.clone())
     }
 

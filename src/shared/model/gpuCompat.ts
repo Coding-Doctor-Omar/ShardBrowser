@@ -37,7 +37,7 @@ export const useGpuCompat = create<State>((set, get) => ({
   byId: {},
   loaded: false,
   loading: false,
-  suppressed: localStorage.getItem(WARN_OFF_KEY) === "1",
+  suppressed: (() => { try { return localStorage.getItem(WARN_OFF_KEY) === "1"; } catch { return false; } })(),
 
   load: async () => {
     if (get().loading || get().loaded) return;
@@ -56,7 +56,7 @@ export const useGpuCompat = create<State>((set, get) => ({
   },
 
   setSuppressed: (v) => {
-    localStorage.setItem(WARN_OFF_KEY, v ? "1" : "0");
+    try { localStorage.setItem(WARN_OFF_KEY, v ? "1" : "0"); } catch { /* private mode: until reload */ }
     set({ suppressed: v });
   },
 
@@ -75,4 +75,13 @@ export function useGpuCompatReady() {
   useEffect(() => {
     void load();
   }, [load]);
+}
+
+/** Loads this machine's GPU verdicts, waiting for a load already in flight. */
+export async function verdictsLoaded(): Promise<void> {
+  await useGpuCompat.getState().load();
+  if (!useGpuCompat.getState().loading) return;
+  await new Promise<void>((resolve) => {
+    const stop = useGpuCompat.subscribe((s) => { if (!s.loading) { stop(); resolve(); } });
+  });
 }

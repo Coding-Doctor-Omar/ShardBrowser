@@ -45,7 +45,7 @@ export default function IconsShowcase() {
         {icons.map((Icon, i) => (
           <div
             key={i}
-            className="flex size-10 items-center justify-center rounded-lg bg-bg-weak-50 ring-1 ring-inset ring-stroke-soft-200"
+            className="flex size-10 items-center justify-center rounded-control bg-bg-weak-50 ring-1 ring-inset ring-stroke-soft-200"
           >
             <Icon className="size-5" />
           </div>
@@ -59,7 +59,7 @@ export default function IconsShowcase() {
         <RiFireFill className="size-6 text-error-base" />
         <RiThumbUpFill className="size-6 text-success-base" />
         <RiStarLine className="size-6 text-warning-base" />
-        <span className="text-paragraph-sm text-text-sub-600">
+        <span className="text-body text-text-sub-600">
           — same components, colour driven by <code>text-*</code>
         </span>
       </div>

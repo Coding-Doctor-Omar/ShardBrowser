@@ -274,7 +274,7 @@ fn main() -> Result<()> {
         // No export is a valid answer: the module asks for nothing.
         Err(_) => json!({}),
     };
-    println!("  ·  asks to call: {}", manifest);
+    println!("  -  asks to call: {}", manifest);
     if !bad.is_empty() {
         println!("{bad:#?}");
     }
@@ -456,7 +456,7 @@ fn main() -> Result<()> {
 
     println!("\nlogs from the last run:");
     for l in &m.rec.lock().unwrap().logs {
-        println!("  · {l}");
+        println!("  - {l}");
     }
     println!("\nall checks passed");
     Ok(())

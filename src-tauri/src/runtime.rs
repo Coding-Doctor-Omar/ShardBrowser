@@ -1,4 +1,4 @@
-//! Self-bootstrapping runtime: download ShardX browser + Widevine from R2.
+//! Self-bootstrapping runtime: download the ShardBrowser engine + Widevine from R2.
 //! Emits `runtime:progress` and `runtime:done` events to the Tauri frontend.
 
 use anyhow::{Context, Result};
@@ -15,7 +15,7 @@ const MANIFEST_URL: &str =
     "https://raw.githubusercontent.com/ProxyShard/ShardBrowser/main/runtime.json";
 const LAUNCHER_RELEASE_REPO: &str = "ProxyShard/ShardBrowser";
 /// Chromium version baked into the current bundle (used for Mac Framework path).
-pub const CHROMIUM_VERSION: &str = "152.0.7977.65";
+pub const CHROMIUM_VERSION: &str = "156.0.8078.48";
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct ArchiveSpec {
@@ -34,21 +34,21 @@ pub fn host_spec() -> Option<PlatformSpec> {
     return Some(PlatformSpec {
         browser: ArchiveSpec {
             key: "ShardX-Mac-arm64.zip".into(),
-            label: "ShardX browser (macOS arm64)".into(),
+            label: "ShardBrowser engine (macOS arm64)".into(),
         },
     });
     #[cfg(all(target_os = "windows", target_arch = "x86_64"))]
     return Some(PlatformSpec {
         browser: ArchiveSpec {
             key: "ShardX-Windows.zip".into(),
-            label: "ShardX browser (Windows x64)".into(),
+            label: "ShardBrowser engine (Windows x64)".into(),
         },
     });
     #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
     return Some(PlatformSpec {
         browser: ArchiveSpec {
             key: "ShardX-Linux.zip".into(),
-            label: "ShardX browser (Linux x64)".into(),
+            label: "ShardBrowser engine (Linux x64)".into(),
         },
     });
     #[allow(unreachable_code)]
@@ -669,7 +669,7 @@ pub async fn runtime_status() -> Result<RuntimeStatus, String> {
 
 #[tauri::command]
 pub async fn runtime_install(window: Window, force: bool) -> Result<RuntimeStatus, String> {
-    let spec = host_spec().ok_or("Host platform has no published ShardX archive")?;
+    let spec = host_spec().ok_or("Host platform has no published ShardBrowser engine archive")?;
     let base = runtime_dir().map_err(|e| e.to_string())?;
     fs::create_dir_all(&base).map_err(|e| e.to_string())?;
 
@@ -680,7 +680,7 @@ pub async fn runtime_install(window: Window, force: bool) -> Result<RuntimeStatu
     // Refused rather than installed: this build could not configure it.
     if engine_needs_newer_launcher(&manifest) {
         return Err(format!(
-            "This engine build needs ShardX Launcher {} or newer — you are on {}. Update the launcher first.",
+            "This engine build needs ShardBrowser Launcher {} or newer — you are on {}. Update the launcher first.",
             manifest.min_launcher_version.as_deref().unwrap_or("?"),
             launcher_version(),
         ));
@@ -695,10 +695,19 @@ pub async fn runtime_install(window: Window, force: bool) -> Result<RuntimeStatu
         // critically the previous `<version>.manifest`, which lingers beside the
         // new one and poisons version detection into an endless re-download (and
         // stale DLLs/.so could be loaded). Applies to win + linux + mac alike.
-        let _ = fs::remove_dir_all(base.join(engine_root_dir()));
-        download_and_extract(&window, &spec.browser, &base)
+        // Download BEFORE wiping. The old tree has to go — see above — but
+        // removing it first meant a download that failed left no engine at
+        // all, and the launcher could not start a single profile until the
+        // network came back. The archive is on disk by the time anything is
+        // removed.
+        let (archive, etag) = download_archive(&window, &spec.browser, &base)
             .await
-            .map_err(|e| e.to_string())?
+            .map_err(|e| e.to_string())?;
+        let _ = fs::remove_dir_all(base.join(engine_root_dir()));
+        extract_archive(&window, &spec.browser, &archive, &base)
+            .await
+            .map_err(|e| e.to_string())?;
+        etag
     } else {
         local.browser_etag.clone().unwrap_or_default()
     };
@@ -820,7 +829,22 @@ async fn install_fingerprints(
 }
 
 /// Stream archive → temp file → extract; emits `runtime:progress` events.
+/// Downloads `spec` beside `base` and hands back the archive and its etag,
+/// without touching anything that is already installed.
+async fn download_archive(window: &Window, spec: &ArchiveSpec, base: &Path) -> Result<(PathBuf, String)> {
+    download_and_extract_inner(window, spec, base, false).await
+}
+
 async fn download_and_extract(window: &Window, spec: &ArchiveSpec, base: &Path) -> Result<String> {
+    Ok(download_and_extract_inner(window, spec, base, true).await?.1)
+}
+
+async fn download_and_extract_inner(
+    window: &Window,
+    spec: &ArchiveSpec,
+    base: &Path,
+    extract: bool,
+) -> Result<(PathBuf, String)> {
     let url = format!("{PUB_BASE}/{}", spec.key);
     let mut resp = reqwest::Client::new().get(&url).send().await?.error_for_status()?;
     let total = resp.content_length().unwrap_or(0);
@@ -858,6 +882,23 @@ async fn download_and_extract(window: &Window, spec: &ArchiveSpec, base: &Path) 
         out.flush().await?;
     }
 
+    // The caller asked for the archive only: it has something installed that
+    // it is not willing to remove until this much has succeeded.
+    if !extract {
+        return Ok((tmp, etag));
+    }
+    extract_archive(window, spec, &tmp, base).await?;
+    Ok((tmp, etag))
+}
+
+/// Unpacks an archive `download_archive` left behind, and removes it.
+async fn extract_archive(
+    window: &Window,
+    spec: &ArchiveSpec,
+    tmp: &Path,
+    base: &Path,
+) -> Result<()> {
+    let total = tokio::fs::metadata(tmp).await.map(|m| m.len()).unwrap_or(0);
     let _ = window.emit(
         "runtime:progress",
         serde_json::json!({
@@ -869,7 +910,7 @@ async fn download_and_extract(window: &Window, spec: &ArchiveSpec, base: &Path) 
         }),
     );
 
-    let zip_path = tmp.clone();
+    let zip_path = tmp.to_path_buf();
     let dest = base.to_path_buf();
     tokio::task::spawn_blocking(move || -> Result<()> {
         // On macOS / Linux shell out to the system `unzip`: the Rust `zip`
@@ -917,7 +958,7 @@ async fn download_and_extract(window: &Window, spec: &ArchiveSpec, base: &Path) 
     })
     .await??;
 
-    let _ = fs::remove_file(&tmp);
+    let _ = fs::remove_file(tmp);
 
     // Linux/mac archives produced on Windows lose every Unix exec bit;
     // restore +x on every ELF/Mach-O file under the runtime tree (not
@@ -930,7 +971,7 @@ async fn download_and_extract(window: &Window, spec: &ArchiveSpec, base: &Path) 
         }
     }
 
-    Ok(etag)
+    Ok(())
 }
 
 /// First-4-bytes magic check; matches ELF + every Mach-O flavour.

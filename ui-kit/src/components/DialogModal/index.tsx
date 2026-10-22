@@ -1,170 +1,91 @@
-import { useEffect, useState } from 'react'
-import { createPortal } from 'react-dom'
+import { useId } from 'react'
 import { cn } from '@/lib/cn'
-import Button from '@/components/Button'
-import type { ButtonVariant } from '@/components/Button'
-import { CloseIcon } from '@/lib/icons'
+import Button, { type ButtonVariant } from '@/components/Button'
+import Modal, { type ModalProps } from '@/components/Modal'
+import { useRequestClose } from '@/components/Modal/closeRequest'
+import { useLabels } from '@/lib/labels'
 
-export type DialogModalProps = {
-  open: boolean
-  onClose: () => void
-  /** Optional circular, bordered header icon. */
-  icon?: React.ReactNode
-  title: React.ReactNode
+type Confirm =
+  /** The confirm names its action ("Save", "Delete proxy"): no default words (WRITE-02). */
+  | { onConfirm: () => void; confirmLabel: string; confirmVariant?: ButtonVariant }
+  | { onConfirm?: undefined; confirmLabel?: undefined; confirmVariant?: undefined }
+
+export type DialogModalProps = Omit<ModalProps, 'description' | 'role' | 'form'> & Confirm & {
   subtitle?: React.ReactNode
-  /** Body content. */
-  children?: React.ReactNode
-
-  /** Custom footer. When omitted, the default Cancel + confirm actions render. */
-  footer?: React.ReactNode
   hideFooter?: boolean
-
-  /** Default footer actions (used only when `footer` is not provided). */
-  confirmLabel?: string
-  onConfirm?: () => void
-  confirmVariant?: ButtonVariant
   isLoading?: boolean
   isDisabled?: boolean
   cancelLabel?: string
   onCancel?: () => void
   hideCancel?: boolean
-
-  showClose?: boolean
-  maxWidthClassName?: string
-  bodyClassName?: string
-  className?: string
+  /** Words at the footer's start, before Cancel: why the confirm is
+   *  disabled, or why the last try failed. Never a grey button alone. The
+   *  confirm is described by it. It belongs to the default footer: a custom
+   *  `footer` or `hideFooter` shows no note. */
+  footerNote?: React.ReactNode
+  /** The confirm button itself, for a dialog with no field that wants the
+   *  keyboard on it at open (`initialFocusRef`): the kit's own footer builds
+   *  the button, so there is no other way to name it. */
+  confirmRef?: React.Ref<HTMLButtonElement>
 }
 
+/** A task in a dialog: the shell, a form (Enter submits, Cmd/Ctrl+Enter from
+ *  a text area; EMIL-10), Cancel and a confirm that names its action. The
+ *  body draws its own top and bottom (each call site's content pads it). */
 export default function DialogModal({
-  open,
-  onClose,
-  icon,
-  title,
-  subtitle,
-  children,
-  footer,
-  hideFooter = false,
-  confirmLabel = 'Apply Changes',
-  onConfirm,
-  confirmVariant = 'primary',
-  isLoading = false,
-  isDisabled = false,
-  cancelLabel = 'Cancel',
-  onCancel,
-  hideCancel = false,
-  showClose = true,
-  maxWidthClassName = 'w-[480px] max-w-[calc(100vw-2rem)]',
-  bodyClassName,
-  className,
+  subtitle, footer, hideFooter = false, isLoading = false, isDisabled = false, cancelLabel, onCancel, hideCancel = false, footerNote, confirmRef,
+  onConfirm, confirmLabel, confirmVariant = 'primary', bodyClassName, ...modal
 }: DialogModalProps) {
-  const [mounted, setMounted] = useState(false)
-  const [render, setRender] = useState(false)
-  const [visible, setVisible] = useState(false)
-
-  useEffect(() => setMounted(true), [])
-
-  useEffect(() => {
-    if (open) {
-      setRender(true)
-      requestAnimationFrame(() => requestAnimationFrame(() => setVisible(true)))
-    } else {
-      setVisible(false)
-    }
-  }, [open])
-
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => e.key === 'Escape' && onClose()
-    window.addEventListener('keydown', onKey)
-    return () => window.removeEventListener('keydown', onKey)
-  }, [onClose])
-
-  useEffect(() => {
-    document.body.style.overflow = open ? 'hidden' : ''
-    return () => {
-      document.body.style.overflow = ''
-    }
-  }, [open])
-
-  if (!mounted || !render) return null
-
-  const target = document.getElementById('portal-root') ?? document.body
-  const showDefaultFooter = !hideFooter && (footer != null || onConfirm != null || !hideCancel)
-
-  return createPortal(
-    <div
-      className="fixed inset-0 z-50 flex items-center justify-center p-4 transition-colors duration-200"
-      style={{ backgroundColor: visible ? 'var(--backdrop)' : 'transparent' }}
-      onClick={onClose}
-      onTransitionEnd={() => {
-        if (!open) setRender(false)
+  const labels = useLabels()
+  const noteId = useId()
+  // A disabled or busy confirm stops Enter too (PC-045): the submit button
+  // is `aria-disabled` and cancels the implicit submit, and this guard
+  // covers Cmd/Ctrl+Enter.
+  const submit = () => {
+    if (!isDisabled && !isLoading) onConfirm?.()
+  }
+  const defaultFooter = onConfirm != null || !hideCancel ? (
+    <>
+      {footerNote != null && <div id={noteId} className="mr-auto min-w-0 text-pretty text-help text-text-sub-600">{footerNote}</div>}
+      {!hideCancel && (
+        <CancelButton onCancel={onCancel}>{cancelLabel ?? labels.cancel}</CancelButton>
+      )}
+      {onConfirm && (
+        <Button ref={confirmRef} type="submit" size="xsmall" variant={confirmVariant} disabled={isDisabled} isLoading={isLoading} aria-describedby={footerNote != null ? noteId : undefined}>{confirmLabel}</Button>
+      )}
+    </>
+  ) : null
+  return (
+    <Modal
+      {...modal}
+      role={confirmVariant === 'error' ? 'alertdialog' : 'dialog'}
+      description={subtitle}
+      padded={false}
+      bodyClassName={cn('px-inset-dialog', bodyClassName)}
+      footer={hideFooter ? undefined : footer ?? defaultFooter}
+      form={{
+        // An Enter a field kept for itself (a Combobox pick, a Select) has
+        // its default prevented and submits nothing.
+        onSubmit: (e) => {
+          const handled = e.defaultPrevented
+          e.preventDefault()
+          if (!handled) submit()
+        },
+        onKeyDown: (e) => {
+          if (e.defaultPrevented || e.key !== 'Enter' || !(e.metaKey || e.ctrlKey) || e.nativeEvent.isComposing) return
+          if (!(e.target instanceof HTMLTextAreaElement)) return
+          e.preventDefault()
+          submit()
+        },
       }}
-    >
-      <div
-        role="dialog"
-        aria-modal="true"
-        onClick={(e) => e.stopPropagation()}
-        className={cn(
-          'flex max-h-[calc(100vh-2rem)] flex-col overflow-hidden rounded-[20px] border border-stroke-soft-200 bg-bg-white-0 shadow-[var(--shadow-md)] transition-all duration-200',
-          maxWidthClassName,
-          className,
-        )}
-        style={{
-          opacity: visible ? 1 : 0,
-          transform: visible ? 'scale(1) translateY(0)' : 'scale(0.96) translateY(8px)',
-        }}
-      >
-        {/* Header */}
-        <div className="flex items-start gap-4 border-b border-stroke-soft-200 p-4">
-          {icon && (
-            <span className="flex size-10 shrink-0 items-center justify-center rounded-full border border-stroke-soft-200 text-text-sub-600">
-              <span className="flex size-5 items-center justify-center">{icon}</span>
-            </span>
-          )}
-          <div className="flex min-w-0 flex-1 flex-col gap-1">
-            <h2 className="text-label-sm text-text-strong-950">{title}</h2>
-            {subtitle && <p className="text-paragraph-xs text-text-sub-600">{subtitle}</p>}
-          </div>
-          {showClose && (
-            <button
-              type="button"
-              onClick={onClose}
-              aria-label="Close"
-              className="flex size-6 shrink-0 items-center justify-center rounded-md text-text-sub-600 shadow-[var(--shadow-xs)] transition-colors hover:bg-bg-weak-50 hover:text-text-strong-950"
-            >
-              <CloseIcon className="size-5" />
-            </button>
-          )}
-        </div>
-
-        {/* Body */}
-        {children != null && (
-          <div className={cn('overflow-auto px-5', bodyClassName)}>{children}</div>
-        )}
-
-        {/* Footer */}
-        {showDefaultFooter &&
-          (footer != null ? (
-            <div className="flex items-center gap-3 border-t border-stroke-soft-200 px-5 py-4">
-              {footer}
-            </div>
-          ) : (
-            <div className="flex items-center border-t border-stroke-soft-200 px-5 py-4">
-              <div className="flex flex-1 items-center justify-end gap-3">
-                {!hideCancel && (
-                  <Button size="small" mode="stroke" variant="neutral" onClick={onCancel ?? onClose}>
-                    {cancelLabel}
-                  </Button>
-                )}
-                {onConfirm && (
-                  <Button size="small" disabled={isDisabled} variant={confirmVariant} isLoading={isLoading} onClick={onConfirm}>
-                    {confirmLabel}
-                  </Button>
-                )}
-              </div>
-            </div>
-          ))}
-      </div>
-    </div>,
-    target,
+    />
   )
+}
+
+/** Cancel closes the way the close button does: a dirty dialog asks
+ *  Discard / Keep editing first, and `onCancel` (else the plain close) runs
+ *  only once the close is agreed. */
+function CancelButton({ onCancel, children }: { onCancel?: () => void; children: React.ReactNode }) {
+  const requestClose = useRequestClose()
+  return <Button size="xsmall" mode="stroke" variant="neutral" onClick={() => requestClose?.(onCancel)}>{children}</Button>
 }

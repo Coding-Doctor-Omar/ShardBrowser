@@ -1,18 +1,17 @@
-export { InlineEditor } from "./ui/InlineEditor";
-export { QuickEditDialog } from "./ui/QuickEditDialog";
-export { TemplatePicker } from "./ui/TemplatePicker";
-export { FolderModal } from "./ui/FolderModal";
-
-export { ProfileInlineEditor } from "./ui/ProfileInlineEditor";
-export { ProfileTemplatePicker } from "./ui/ProfileTemplatePicker";
-export { ProfileFolderModal } from "./ui/ProfileFolderModal";
-export { ProfileQuickEdit } from "./ui/ProfileQuickEdit";
+export { FolderDialog } from "./ui/FolderDialog";
+export { FolderPicker } from "./ui/FolderPicker";
 
 export { ProfileRowActions } from "./ui/ProfileRowActions";
-export { BulkActionsBar } from "./ui/BulkActionsBar";
+export { InlineText } from "./ui/InlineText";
+export { ProxyCellPopover } from "./ui/ProxyCellPopover";
+export { FolderCellMenu } from "./ui/FolderCellMenu";
+export { AssignProxiesHost } from "./ui/AssignProxiesHost";
 export { NewProfileButton } from "./ui/NewProfileButton";
 export { ImportProfilesButton } from "./ui/ImportProfilesButton";
-export { FromTemplateButton } from "./ui/FromTemplateButton";
+export { ProfilesMoreMenu } from "./ui/ProfilesMoreMenu";
 export { ExtensionPicker } from "./ui/ExtensionPicker";
-export { ProxySelect } from "./ui/ProxySelect";
 export { ProfileFilterBar } from "./ui/ProfileFilterBar";
+export { ProfileFilterChips } from "./ui/ProfileFilterChips";
+export { SaveAsViewButton } from "./ui/SaveAsViewButton";
+export { useProfileFilterChips, useProfileFilterFields } from "./lib/filterFields";
+export { ProfileDisplayMenu } from "./ui/ProfileDisplayMenu";

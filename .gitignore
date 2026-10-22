@@ -2,6 +2,33 @@ node_modules
 
 # build output — regenerated, keeps diffs readable
 dist/
+__pycache__/
+*.pyc
+/src-tauri/gen/schemas/
 ui-kit/dist/
 ui-kit/node_modules/
 /src-tauri/target
+
+# test and preview output
+test-results/
+playwright-report/
+blob-report/
+dist-mock/
+dist-mock-e2e/
+
+# macOS leaves one of these in every folder it has been looked at in.
+.DS_Store
+
+# Screenshot baselines: per machine and per OS, remade by
+# `playwright test --update-snapshots`, and a few hundred PNGs besides.
+e2e/__screenshots__/
+
+# What a patch or a merge leaves behind when a hunk does not apply.
+*.rej
+*.orig
+
+# Working material from the interface rework: dated notes and the screenshots
+# that went with each round of corrections. Kept on disk, not in the history.
+# The decisions themselves live in docs/adr and stay.
+docs/ui-redesign/
+docs/handoff/

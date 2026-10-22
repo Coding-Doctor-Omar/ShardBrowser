@@ -3,9 +3,10 @@ import {
   AlertCircleIcon,
   AlertTriangleIcon,
   CheckCircleIcon,
-  CloseIcon,
   InfoIcon,
 } from '@/lib/icons'
+import DismissButton from '@/components/DismissButton'
+import { useLabels } from '@/lib/labels'
 
 export type AlertStatus = 'information' | 'success' | 'warning' | 'error' | 'feature'
 export type AlertVariant = 'filled' | 'light' | 'lighter' | 'stroke'
@@ -16,28 +17,39 @@ export type AlertProps = {
   title?: React.ReactNode
   children?: React.ReactNode
   icon?: React.ReactNode
+  /** A button (Undo, Retry) shown before the close button. */
+  action?: React.ReactNode
   onClose?: () => void
+  /** Accessible name of the dismiss button. Defaults to the kit's "dismiss" label. */
+  dismissLabel?: string
+  /** Its live role (A11Y-05): an error alerts, anything else is a polite
+   *  status. `none` when an announcer elsewhere speaks for it. */
+  role?: 'alert' | 'status' | 'none'
   className?: string
 }
 
 const statusIcon: Record<AlertStatus, React.ReactNode> = {
-  information: <InfoIcon className="size-5" />,
-  success: <CheckCircleIcon className="size-5" />,
-  warning: <AlertTriangleIcon className="size-5" />,
-  error: <AlertCircleIcon className="size-5" />,
-  feature: <InfoIcon className="size-5" />,
+  information: <InfoIcon className="size-3.5" />,
+  success: <CheckCircleIcon className="size-3.5" />,
+  warning: <AlertTriangleIcon className="size-3.5" />,
+  error: <AlertCircleIcon className="size-3.5" />,
+  feature: <InfoIcon className="size-3.5" />,
 }
 
-// [status] -> { base bg, soft bg, weak bg, weak bg in dark (more pronounced), accent text }
-const palette: Record<
-  AlertStatus,
-  { base: string; soft: string; weak: string; weakDark: string; ring: string; accent: string }
-> = {
-  information: { base: 'bg-information-base', soft: 'bg-information-soft', weak: 'bg-information-weak', weakDark: 'dark:bg-information-soft', ring: 'ring-information-base', accent: 'text-information-base' },
-  success: { base: 'bg-success-base', soft: 'bg-success-soft', weak: 'bg-success-weak', weakDark: 'dark:bg-success-soft', ring: 'ring-success-base', accent: 'text-success-base' },
-  warning: { base: 'bg-warning-base', soft: 'bg-warning-soft', weak: 'bg-warning-weak', weakDark: 'dark:bg-warning-soft', ring: 'ring-warning-base', accent: 'text-warning-base' },
-  error: { base: 'bg-error-base', soft: 'bg-error-soft', weak: 'bg-error-weak', weakDark: 'dark:bg-error-soft', ring: 'ring-error-base', accent: 'text-error-base' },
-  feature: { base: 'bg-primary-base', soft: 'bg-purple-200', weak: 'bg-purple-50', weakDark: 'dark:bg-purple-200', ring: 'ring-primary-base', accent: 'text-primary-base' },
+// Tints are translucent state colors, so a tinted alert reads the same on any
+// layer in both themes and keeps the theme's own text colors: no dark-mode
+// overrides (COLOR-04). The icon is the state's text color (Phase A 5b: the
+// base falls under 3:1 on some tints). A filled alert reads the Alert tokens:
+// a solid state fill with white text and icon in light, the state's tint in
+// dark (owner: no solid block in dark) with the theme's text and, as on every
+// tinted surface, the icon in the state's text color. Text 4.5:1 or better.
+// `npm run check:contrast` measures every pair.
+const palette: Record<AlertStatus, { fill: string; fillIcon: string; tint: string; tintStrong: string; icon: string }> = {
+  information: { fill: 'bg-information-alert', fillIcon: 'text-information-alert-icon', tint: 'bg-information-tint', tintStrong: 'bg-information-tint-hover', icon: 'text-information-text' },
+  success: { fill: 'bg-success-alert', fillIcon: 'text-success-alert-icon', tint: 'bg-success-tint', tintStrong: 'bg-success-tint-hover', icon: 'text-success-text' },
+  warning: { fill: 'bg-warning-alert', fillIcon: 'text-warning-alert-icon', tint: 'bg-warning-tint', tintStrong: 'bg-warning-tint-hover', icon: 'text-warning-text' },
+  error: { fill: 'bg-error-alert', fillIcon: 'text-error-alert-icon', tint: 'bg-error-tint', tintStrong: 'bg-error-tint-hover', icon: 'text-error-text' },
+  feature: { fill: 'bg-primary-alert', fillIcon: 'text-primary-alert-icon', tint: 'bg-primary-tint', tintStrong: 'bg-primary-tint-hover', icon: 'text-primary-text' },
 }
 
 export default function Alert({
@@ -46,56 +58,41 @@ export default function Alert({
   title,
   children,
   icon,
+  action,
   onClose,
+  dismissLabel,
+  role,
   className,
 }: AlertProps) {
+  const labels = useLabels()
   const p = palette[status]
-
-  // Variants that sit on a light/pastel background in BOTH themes. Their text
-  // must stay dark in dark mode (otherwise white text lands on a pale bg).
-  const isTinted = variant === 'light' || variant === 'lighter'
-
-  const container =
-    variant === 'filled'
-      ? cn(p.base, 'text-static-white')
-      : variant === 'light'
-        ? cn(p.soft, 'text-text-strong-950 dark:text-static-black')
-        : variant === 'stroke'
-          ? cn('bg-bg-white-0 text-text-strong-950 ring-1 ring-inset ring-stroke-soft-200 shadow-[var(--shadow-xs)]')
-          : cn(p.weak, p.weakDark, 'text-text-strong-950 dark:text-static-black')
-
-  const iconColor = variant === 'filled' ? 'text-static-white' : p.accent
-  const bodyColor = variant === 'filled'
-    ? 'text-static-white/90'
-    : isTinted
-      ? 'text-text-sub-600 dark:text-neutral-700'
-      : 'text-text-sub-600'
+  const filled = variant === 'filled'
+  const container = filled
+    ? cn(p.fill, 'text-on-alert')
+    : variant === 'light'
+      ? cn(p.tintStrong, 'text-text-strong-950')
+      : variant === 'stroke'
+        ? 'bg-bg-raised text-text-strong-950 ring-1 ring-inset ring-stroke-soft-200 shadow-[var(--shadow-xs)]'
+        : cn(p.tint, 'text-text-strong-950')
 
   return (
-    <div className={cn('flex w-full gap-3 rounded-xl p-4', container, className)} role="alert">
-      <span className={cn('mt-0.5 flex size-5 shrink-0 items-center justify-center', iconColor)}>
+    <div
+      className={cn('flex w-full gap-[12px] rounded-surface p-[16px]', container, className)}
+      role={role === 'none' ? undefined : role ?? (status === 'error' ? 'alert' : 'status')}
+    >
+      <span className={cn('mt-[5px] flex size-3.5 [&>svg]:size-3.5 shrink-0 items-center justify-center', filled ? p.fillIcon : p.icon)}>
         {icon ?? statusIcon[status]}
       </span>
-      <div className="flex min-w-0 flex-1 flex-col gap-1">
-        {title && <div className="text-label-sm">{title}</div>}
-        {children && <div className={cn('text-paragraph-sm', bodyColor)}>{children}</div>}
+      <div className="flex min-w-0 flex-1 flex-col gap-[4px]">
+        {title && <div className="text-section-title">{title}</div>}
+        {/* A long path or id wraps anywhere instead of running out of the alert (WIG-07). */}
+        {children && <div className={cn('min-w-0 break-words text-body [overflow-wrap:anywhere]', filled ? 'text-on-alert' : 'text-text-sub-600')}>{children}</div>}
       </div>
+      {action && <div className="flex shrink-0 items-center self-center">{action}</div>}
       {onClose && (
-        <button
-          type="button"
-          onClick={onClose}
-          aria-label="Dismiss"
-          className={cn(
-            'flex size-5 shrink-0 items-center justify-center rounded transition-opacity',
-            variant === 'filled'
-              ? 'text-static-white/80 hover:text-static-white'
-              : isTinted
-                ? 'text-text-soft-400 hover:text-text-strong-950 dark:text-neutral-500 dark:hover:text-static-black'
-                : 'text-text-soft-400 hover:text-text-strong-950',
-          )}
-        >
-          <CloseIcon className="size-5" />
-        </button>
+        // The one dismiss button. The sub icon holds 3:1 on every tint; a
+        // filled alert draws it in its on-alert colors.
+        <DismissButton onClick={onClose} label={dismissLabel ?? labels.dismiss} tone={filled ? 'onFill' : 'default'} />
       )}
     </div>
   )

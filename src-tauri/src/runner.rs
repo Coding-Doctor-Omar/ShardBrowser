@@ -157,10 +157,17 @@ fn param<'a>(params: &'a Value, name: &str) -> Option<&'a str> {
     params.get(name).and_then(|v| v.as_str()).filter(|s| !s.is_empty())
 }
 
-fn param_f64(params: &Value, name: &str) -> Option<f64> {
+/// A number a step asks for, with `{{variables}}` resolved first.
+///
+/// A step writes its numbers as numbers, but the operator can also type
+/// `{{delay}}` into one — that is how `var.random` feeds a wait. Without the
+/// expansion the string stayed a string, parsing it failed, and the step
+/// silently fell back to its default: `var.random` into `wait` did nothing at
+/// all, and every `timeout` behaved the same way.
+fn param_f64(params: &Value, name: &str, vars: &HashMap<String, String>) -> Option<f64> {
     params.get(name).and_then(|v| match v {
         Value::Number(n) => n.as_f64(),
-        Value::String(s) => s.parse().ok(),
+        Value::String(s) => expand(s, vars).trim().parse().ok(),
         _ => None,
     })
 }
@@ -252,8 +259,8 @@ async fn center_waiting(profile: &str, selector: &str, timeout_s: f64) -> Result
 }
 
 /// The wait a step asks for, or the default.
-fn wait_for(p: &Value) -> f64 {
-    param_f64(p, "timeout").filter(|v| *v >= 0.0).unwrap_or(DEFAULT_WAIT_S)
+fn wait_for(p: &Value, vars: &HashMap<String, String>) -> f64 {
+    param_f64(p, "timeout", vars).filter(|v| *v >= 0.0).unwrap_or(DEFAULT_WAIT_S)
 }
 
 async fn exists(profile: &str, selector: &str) -> bool {
@@ -394,7 +401,12 @@ impl CallCtx {
         let grant = wasm::grant_for(caller);
         let (allowed, what) = match target {
             Frame::Module(id) => (grant.call_modules.iter().any(|m| m == id), format!("module \"{id}\"")),
-            Frame::Flow(id) => (grant.call_flows.iter().any(|f| f == id), "that flow".to_string()),
+            // "*" is a module that asked to run any project and was granted
+            // exactly that by the operator (Modules: "run any of your projects").
+            Frame::Flow(id) => (
+                grant.call_flows.iter().any(|f| f == id || f == "*"),
+                "that flow".to_string(),
+            ),
         };
         if allowed {
             return Ok(());
@@ -851,7 +863,7 @@ fn build_traffic_rule(kind: &str, p: &Value, vars: &HashMap<String, String>) -> 
         }
         "traffic.editResponse" => {
             a.insert("type".into(), json!("modify"));
-            if let Some(n) = param_f64(p, "status") {
+            if let Some(n) = param_f64(p, "status", vars) {
                 a.insert("setStatus".into(), json!(n as i64));
             }
             let hs = traffic_headers(&g("responseHeaders"));
@@ -865,7 +877,7 @@ fn build_traffic_rule(kind: &str, p: &Value, vars: &HashMap<String, String>) -> 
         }
         "traffic.fulfill" => {
             a.insert("type".into(), json!("fulfill"));
-            if let Some(n) = param_f64(p, "status") {
+            if let Some(n) = param_f64(p, "status", vars) {
                 a.insert("status".into(), json!(n as i64));
             }
             let hs = traffic_headers(&g("responseHeaders"));
@@ -1457,7 +1469,7 @@ async fn run_block(
                 fingerprint,
                 session,
                 proxy,
-                timeout_s: param_f64(p, "timeout").unwrap_or(30.0),
+                timeout_s: param_f64(p, "timeout", vars).unwrap_or(30.0),
             })
             .await?;
 
@@ -1769,7 +1781,7 @@ async fn run_block(
             cdp::page_call(profile, "Page.navigateToHistoryEntry", json!({ "entryId": id })).await?;
         }
         "waitLoad" => {
-            let secs = param_f64(p, "timeout").unwrap_or(30.0);
+            let secs = param_f64(p, "timeout", vars).unwrap_or(30.0);
             if let Some(w) = cdp::watch(profile) {
                 w.until("Page.loadEventFired", Duration::from_secs_f64(secs)).await;
             }
@@ -1788,9 +1800,9 @@ async fn run_block(
             }
             let (x, y) = match param(p, "selector") {
                 Some(sel) if !sel.trim().is_empty() => {
-                    center_waiting(profile, &expand(sel, vars), wait_for(p)).await?
+                    center_waiting(profile, &expand(sel, vars), wait_for(p, vars)).await?
                 }
-                _ => match (param_f64(p, "x"), param_f64(p, "y")) {
+                _ => match (param_f64(p, "x", vars), param_f64(p, "y", vars)) {
                     (Some(x), Some(y)) => (x, y),
                     _ => viewport_center(profile).await,
                 },
@@ -1798,9 +1810,9 @@ async fn run_block(
             touch_front(profile).await;
             if block.kind == "touch.drag" {
                 let to = expand(param(p, "to").context("no element to drag onto")?, vars);
-                let (tx, ty) = center_waiting(profile, &to, wait_for(p)).await?;
+                let (tx, ty) = center_waiting(profile, &to, wait_for(p, vars)).await?;
                 let mut args = json!({ "fromX": x, "fromY": y, "toX": tx, "toY": ty });
-                if let Some(hold) = param_f64(p, "holdMs") {
+                if let Some(hold) = param_f64(p, "holdMs", vars) {
                     args["holdMs"] = json!(hold);
                 }
                 cdp::page_call(profile, "Motion.touchDrag", args).await?;
@@ -1808,7 +1820,7 @@ async fn run_block(
             }
             match block.kind.as_str() {
                 "touch.tap" => {
-                    let taps = param_f64(p, "tapCount").unwrap_or(1.0).clamp(1.0, 3.0) as i64;
+                    let taps = param_f64(p, "tapCount", vars).unwrap_or(1.0).clamp(1.0, 3.0) as i64;
                     cdp::page_call(profile, "Motion.touchTap",
                                    json!({ "x": x, "y": y, "tapCount": taps })).await?;
                 }
@@ -1817,8 +1829,8 @@ async fn run_block(
                                    json!({ "x": x, "y": y })).await?;
                 }
                 "touch.swipe" => {
-                    let dx = param_f64(p, "dx").unwrap_or(0.0);
-                    let dy = param_f64(p, "dy").unwrap_or(0.0);
+                    let dx = param_f64(p, "dx", vars).unwrap_or(0.0);
+                    let dy = param_f64(p, "dy", vars).unwrap_or(0.0);
                     if dx == 0.0 && dy == 0.0 {
                         return Err(anyhow!("a swipe of nothing goes nowhere — set how far"));
                     }
@@ -1827,7 +1839,7 @@ async fn run_block(
                                            "toX": x + dx, "toY": y + dy })).await?;
                 }
                 _ => {
-                    let scale = param_f64(p, "scale").unwrap_or(2.0);
+                    let scale = param_f64(p, "scale", vars).unwrap_or(2.0);
                     if scale <= 0.0 {
                         return Err(anyhow!("a pinch scales by a positive factor"));
                     }
@@ -1845,14 +1857,14 @@ async fn run_block(
                     "only a phone profile can be turned — this one claims a desktop screen"
                 ));
             }
-            let angle = param_f64(p, "angle").unwrap_or(90.0) as i64;
+            let angle = param_f64(p, "angle", vars).unwrap_or(90.0) as i64;
             if !matches!(angle, 0 | 90 | 180 | 270) {
                 return Err(anyhow!(
                     "a screen turns to 0, 90, 180 or 270 degrees, not {angle}"
                 ));
             }
             let mut args = json!({ "angle": angle });
-            if let Some(ms) = param_f64(p, "turnMs") {
+            if let Some(ms) = param_f64(p, "turnMs", vars) {
                 args["turnMs"] = json!(ms);
             }
             let r = cdp::page_call(profile, "Motion.setOrientation", args).await?;
@@ -1869,10 +1881,10 @@ async fn run_block(
         }
         "click" | "doubleClick" | "rightClick" | "hover" => {
             let (x, y) = match param(p, "selector") {
-                Some(sel) => center_waiting(profile, &expand(sel, vars), wait_for(p)).await?,
+                Some(sel) => center_waiting(profile, &expand(sel, vars), wait_for(p, vars)).await?,
                 None => (
-                    param_f64(p, "x").context("no target")?,
-                    param_f64(p, "y").context("no target")?,
+                    param_f64(p, "x", vars).context("no target")?,
+                    param_f64(p, "y", vars).context("no target")?,
                 ),
             };
             // One palette, two bodies: the operator says WHAT, the runner picks
@@ -1921,14 +1933,14 @@ async fn run_block(
             let (x0, y0) = if from.trim().is_empty() {
                 viewport_center(profile).await
             } else {
-                center_waiting(profile, &from, wait_for(p)).await?
+                center_waiting(profile, &from, wait_for(p, vars)).await?
             };
             let (x1, y1) = if block.kind == "drag" {
                 let to = expand(param(p, "to").context("no element to drag onto")?, vars);
-                center_waiting(profile, &to, wait_for(p)).await?
+                center_waiting(profile, &to, wait_for(p, vars)).await?
             } else {
-                let dx = param_f64(p, "dx").unwrap_or(0.0);
-                let dy = param_f64(p, "dy").unwrap_or(0.0);
+                let dx = param_f64(p, "dx", vars).unwrap_or(0.0);
+                let dy = param_f64(p, "dy", vars).unwrap_or(0.0);
                 if dx == 0.0 && dy == 0.0 {
                     return Err(anyhow!("a swipe of nothing goes nowhere — set how far"));
                 }
@@ -1941,7 +1953,7 @@ async fn run_block(
                 // card up, so they are different commands here too.
                 if block.kind == "drag" {
                     let mut args = json!({ "fromX": x0, "fromY": y0, "toX": x1, "toY": y1 });
-                    if let Some(hold) = param_f64(p, "holdMs") {
+                    if let Some(hold) = param_f64(p, "holdMs", vars) {
                         args["holdMs"] = json!(hold);
                     }
                     cdp::page_call(profile, "Motion.touchDrag", args).await?;
@@ -1964,8 +1976,8 @@ async fn run_block(
             .await?;
         }
         "scroll" => {
-            let dy = param_f64(p, "deltaY").unwrap_or(0.0);
-            let dx = param_f64(p, "deltaX").unwrap_or(0.0);
+            let dy = param_f64(p, "deltaY", vars).unwrap_or(0.0);
+            let dx = param_f64(p, "deltaX", vars).unwrap_or(0.0);
             if dx == 0.0 && dy == 0.0 {
                 return Ok(Flow::Next);
             }
@@ -1975,7 +1987,7 @@ async fn run_block(
             // 400,400 landed outside a small window and inside a sidebar in a
             // wide one.
             let (px, py) = match param(p, "selector") {
-                Some(sel) => center_waiting(profile, &expand(sel, vars), wait_for(p)).await?,
+                Some(sel) => center_waiting(profile, &expand(sel, vars), wait_for(p, vars)).await?,
                 None => viewport_center(profile).await,
             };
             if bound.mobile {
@@ -2022,7 +2034,7 @@ async fn run_block(
         }
         "type" => {
             if let Some(sel) = param(p, "selector") {
-                let (x, y) = center_waiting(profile, &expand(sel, vars), wait_for(p)).await?;
+                let (x, y) = center_waiting(profile, &expand(sel, vars), wait_for(p, vars)).await?;
                 if bound.mobile {
                     touch_front(profile).await;
                     cdp::page_call(profile, "Motion.touchTap", json!({ "x": x, "y": y })).await?;
@@ -2062,7 +2074,7 @@ async fn run_block(
         }
         "clear" => {
             if let Some(sel) = param(p, "selector") {
-                let (x, y) = center_waiting(profile, &expand(sel, vars), wait_for(p)).await?;
+                let (x, y) = center_waiting(profile, &expand(sel, vars), wait_for(p, vars)).await?;
                 if bound.mobile {
                     touch_front(profile).await;
                     cdp::page_call(profile, "Motion.touchTap", json!({ "x": x, "y": y })).await?;
@@ -2075,7 +2087,7 @@ async fn run_block(
                 // clears a field by holding Backspace, so that is what this
                 // does — bounded, because a field of unknown length must not
                 // become an unbounded loop.
-                let len = param_f64(p, "count").unwrap_or(120.0).clamp(1.0, 200.0) as usize;
+                let len = param_f64(p, "count", vars).unwrap_or(120.0).clamp(1.0, 200.0) as usize;
                 for _ in 0..len {
                     cdp::page_call(profile, "Motion.pressKey",
                                    json!({ "key": "Backspace" })).await?;
@@ -2091,12 +2103,12 @@ async fn run_block(
             }
         }
         "wait" => {
-            let secs = param_f64(p, "seconds").unwrap_or(1.0).clamp(0.0, 3600.0);
+            let secs = param_f64(p, "seconds", vars).unwrap_or(1.0).clamp(0.0, 3600.0);
             tokio::time::sleep(Duration::from_secs_f64(secs)).await;
         }
         "waitFor" => {
             let sel = expand(param(p, "selector").context("no element")?, vars);
-            let secs = param_f64(p, "timeout").unwrap_or(15.0);
+            let secs = param_f64(p, "timeout", vars).unwrap_or(15.0);
             let deadline = Instant::now() + Duration::from_secs_f64(secs);
             loop {
                 if exists(profile, &sel).await {
@@ -2144,7 +2156,7 @@ async fn run_block(
         "log" => run.log(expand(param(p, "text").unwrap_or(""), vars)),
         "waitGone" => {
             let sel = expand(param(p, "selector").context("no element")?, vars);
-            let deadline = Instant::now() + Duration::from_secs_f64(wait_for(p).max(0.1));
+            let deadline = Instant::now() + Duration::from_secs_f64(wait_for(p, vars).max(0.1));
             loop {
                 if !exists(profile, &sel).await {
                     break;
@@ -2158,7 +2170,7 @@ async fn run_block(
         "waitText" => {
             let sel = expand(param(p, "selector").context("no element")?, vars);
             let want = expand(param(p, "text").context("no text to wait for")?, vars);
-            let deadline = Instant::now() + Duration::from_secs_f64(wait_for(p).max(0.1));
+            let deadline = Instant::now() + Duration::from_secs_f64(wait_for(p, vars).max(0.1));
             loop {
                 if let Ok(text) = element_text(profile, &sel).await {
                     if text.to_lowercase().contains(&want.to_lowercase()) {
@@ -2173,7 +2185,7 @@ async fn run_block(
         }
         "waitUrl" => {
             let want = expand(param(p, "url").context("no address to wait for")?, vars);
-            let deadline = Instant::now() + Duration::from_secs_f64(wait_for(p).max(0.1));
+            let deadline = Instant::now() + Duration::from_secs_f64(wait_for(p, vars).max(0.1));
             loop {
                 if current_url(profile).await.contains(&want) {
                     break;
@@ -2195,7 +2207,7 @@ async fn run_block(
             let sel = expand(param(p, "selector").context("no element")?, vars);
             let name = expand(param(p, "name").context("no attribute")?, vars);
             let into = check_var_name(param(p, "into").context("no name to save into")?)?;
-            center_waiting(profile, &sel, wait_for(p)).await?;
+            center_waiting(profile, &sel, wait_for(p, vars)).await?;
             let node = *cdp::query_piercing(profile, &sel)
                 .await?
                 .first()
@@ -2246,7 +2258,7 @@ async fn run_block(
             }
             // Same wait as a click: the text is usually the thing that arrives
             // last.
-            center_waiting(profile, &sel, wait_for(p)).await?;
+            center_waiting(profile, &sel, wait_for(p, vars)).await?;
             let node = *cdp::query_piercing(profile, &sel)
                 .await?
                 .first()

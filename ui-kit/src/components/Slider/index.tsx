@@ -1,5 +1,6 @@
 import { useId } from 'react'
 import { cn } from '@/lib/cn'
+import Label from '@/components/Label'
 
 export type SliderProps = {
   value: number
@@ -29,15 +30,13 @@ export default function Slider({
   const pct = ((value - min) / (max - min)) * 100
 
   return (
-    <div className={cn('flex w-full flex-col gap-2', className)}>
+    <div className={cn('flex w-full flex-col gap-[8px]', className)}>
       {(label || valueLabel != null) && (
         <div className="flex items-center justify-between">
           {label && (
-            <label htmlFor={id} className="text-label-sm text-text-strong-950">
-              {label}
-            </label>
+            <Label htmlFor={id}>{label}</Label>
           )}
-          {valueLabel != null && <span className="text-label-sm text-text-sub-600">{valueLabel}</span>}
+          {valueLabel != null && <span className="text-ui tabular-nums text-text-sub-600">{valueLabel}</span>}
         </div>
       )}
       <input
@@ -50,11 +49,14 @@ export default function Slider({
         disabled={disabled}
         onChange={(e) => onChange?.(Number(e.target.value))}
         className={cn(
-          'sx-slider h-1.5 w-full cursor-pointer appearance-none rounded-full outline-none',
-          disabled && 'cursor-not-allowed opacity-60',
+          // Pointer/not-allowed cursor is the kit's own base rule now
+          // (owner feedback 5v): `input[type=range]:not(:disabled)` /
+          // `:disabled`.
+          'sx-slider h-1.5 w-full appearance-none rounded-full focus-visible:outline-hidden',
+          disabled && 'opacity-60',
         )}
         style={{
-          background: `linear-gradient(to right, var(--color-primary-base) 0%, var(--color-primary-base) ${pct}%, var(--bg-soft-200) ${pct}%, var(--bg-soft-200) 100%)`,
+          background: `linear-gradient(to right, var(--color-primary-base) 0%, var(--color-primary-base) ${pct}%, var(--bg-sunken) ${pct}%, var(--bg-sunken) 100%)`,
         }}
       />
     </div>

@@ -1,8 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
-import { Button } from "@proxyshard/shardx-ui-kit";
-import { CloseIcon, PlayIcon } from "../../shared/icons";
-import { toast } from "../../shared/lib/toast";
+import { cn, layoutRect, Menu, pointerToLayout } from "@proxyshard/shardx-ui-kit";
+import { toast } from "../../shared/model/toast";
 import {
   automationCall,
   automationDetach,
@@ -12,8 +11,9 @@ import {
   type Frame,
   type Picked,
 } from "../../entities/automation";
-import { processKill } from "../../entities/profile";
-import { ActionMenu, type MenuAction } from "./ActionMenu";
+import { confirmDirect, processKill, profileList, proxyMissing, useProfile, useProfileUi, type ProfileMeta } from "../../entities/profile";
+import { proxyList } from "../../entities/proxy";
+import { describeTarget, liveActions, type MenuAction } from "./liveActions";
 import { useT } from "../../shared/i18n";
 
 const MAX_W = 1280;
@@ -21,12 +21,17 @@ const MAX_H = 800;
 
 type Props = {
   profileId: string | null;
+  /** The profile was started here and its frames come in (`useLiveBrowser`). */
+  live: boolean;
   /** Adds a step. `target` is null when nothing resolvable was under the click. */
   onAction?: (action: MenuAction, target: Picked | null) => void;
   /** Records an action the operator just performed on the page. */
   onRecorded?: (kind: string, target: Picked | null, extra?: Record<string, unknown>) => void;
   recording: boolean;
-  onRecording: (on: boolean) => void;
+  /** The next click picks an element instead of clicking it (a step's Pick). */
+  picking?: boolean;
+  /** What the picking click was over; null when nothing could be identified. */
+  onPicked?: (target: Picked | null) => void;
 };
 
 /** Keys the page should get as a named key rather than as text. Everything
@@ -38,21 +43,84 @@ const NAMED = new Set([
   "F1", "F2", "F3", "F4", "F5", "F6", "F7", "F8", "F9", "F10", "F11", "F12",
 ]);
 
+/** Starting and stopping the profile the live view mirrors. Held by the
+ *  editor, not the view: hiding the browser column must not forget that the
+ *  profile runs. */
+export function useLiveBrowser(profileId: string | null) {
+  const t = useT();
+  const [live, setLive] = useState(false);
+  const [busy, setBusy] = useState(false);
+  // Another profile chosen: it was not started here.
+  useEffect(() => { setLive(false); }, [profileId]);
+
+  const start = useCallback(async () => {
+    if (!profileId) return;
+    // This Start path doesn't go through useProfile.startStop, so it checks on
+    // its own that the profile's proxy still exists (IFACE-01, backend B1): a
+    // deleted one would start it on this computer's own IP. The profile and
+    // proxies are read fresh, and nothing starts when they can't be read.
+    let fresh: ProfileMeta[];
+    let proxies: { id: string }[];
+    try {
+      [fresh, proxies] = await Promise.all([profileList(), proxyList()]);
+    } catch (e) {
+      toast.fail({ title: t("liveView.openFailed"), detail: e });
+      return;
+    }
+    const p = fresh.find((x) => x.id === profileId);
+    if (!p) return;
+    if (proxyMissing(p, proxies)) {
+      toast.err(t("useProfile.proxyMissingStart", { name: p.name }), {
+        action: { label: t("useProfile.assignProxy"), run: () => useProfileUi.getState().openAssign([p.id]) },
+      });
+      return;
+    }
+    // Task 11 fix round 2: this Start path skipped O9a's question too — the
+    // same shared confirm every other start path uses, not a third copy.
+    const choice = await confirmDirect(useProfile.getState, [p]);
+    if (choice === "assign") { useProfileUi.getState().openAssign([p.id]); return; }
+    if (choice !== "start") return;
+    setBusy(true);
+    try {
+      await automationLaunch(profileId);
+      await automationScreencast(profileId, true, MAX_W, MAX_H);
+      setLive(true);
+    } catch (e) { toast.fail({ title: t("liveView.openFailed"), detail: e }); }
+    finally { setBusy(false); }
+  }, [profileId, t]);
+
+  const stop = useCallback(async () => {
+    if (!profileId) return;
+    try { await automationScreencast(profileId, false, MAX_W, MAX_H); } catch { /* already gone */ }
+    automationDetach(profileId);
+    // Actually close the browser — Stop used to only end the screencast and
+    // detach CDP, leaving the window open.
+    try { await processKill(profileId); } catch { /* already closed */ }
+    setLive(false);
+  }, [profileId]);
+
+  return { live, busy, start, stop };
+}
+
+export type LiveBrowser = ReturnType<typeof useLiveBrowser>;
+
 /** The profile's own window, mirrored frame by frame. Not an embedded browser:
  *  the page runs in the real engine and only its pixels come here. */
 export function LiveView({
   profileId,
+  live,
   onAction,
   onRecorded,
   recording,
-  onRecording,
+  picking = false,
+  onPicked,
 }: Props) {
   const t = useT();
+  // The data outlives `menuOpen` so the menu keeps its place while it fades out.
   const [menu, setMenu] = useState<{ at: { x: number; y: number }; target: Picked | null } | null>(null);
+  const [menuOpen, setMenuOpen] = useState(false);
   const canvas = useRef<HTMLCanvasElement | null>(null);
   const meta = useRef<Frame | null>(null);
-  const [live, setLive] = useState(false);
-  const [busy, setBusy] = useState(false);
   // The frame's own pixel ratio, so the view can size a box to it and grow the
   // browser to fill the column instead of sitting tiny inside letterbox bars.
   const [dim, setDim] = useState({ w: 16, h: 10 });
@@ -94,27 +162,6 @@ export function LiveView({
     return () => { alive = false; stop?.(); };
   }, [profileId, recording, onRecorded]);
 
-  const start = useCallback(async () => {
-    if (!profileId) return;
-    setBusy(true);
-    try {
-      await automationLaunch(profileId);
-      await automationScreencast(profileId, true, MAX_W, MAX_H);
-      setLive(true);
-    } catch (e) { toast.err(String(e)); }
-    finally { setBusy(false); }
-  }, [profileId]);
-
-  const stop = useCallback(async () => {
-    if (!profileId) return;
-    try { await automationScreencast(profileId, false, MAX_W, MAX_H); } catch { /* already gone */ }
-    automationDetach(profileId);
-    // Actually close the browser — Stop used to only end the screencast and
-    // detach CDP, leaving the window open.
-    try { await processKill(profileId); } catch { /* already closed */ }
-    setLive(false);
-  }, [profileId]);
-
   // Canvas pixels -> page CSS pixels. The frame is scaled to fit maxWidth, so
   // the ratio is the frame's own width against the page width it covers.
   // Where on the PAGE a click on the canvas landed.
@@ -129,15 +176,18 @@ export function LiveView({
     const el = canvas.current;
     const m = meta.current;
     if (!el || !m || !el.width || !el.height) return null;
-    const r = el.getBoundingClientRect();
+    // Layout px on both sides (Interface size): the pointer by the page zoom,
+    // the rect by its own scale.
+    const r = layoutRect(el);
+    const at = pointerToLayout({ x: e.clientX, y: e.clientY });
     if (!r.width || !r.height) return null;
 
     const shown = Math.min(r.width / el.width, r.height / el.height);
     const padX = (r.width - el.width * shown) / 2;
     const padY = (r.height - el.height * shown) / 2;
 
-    const imgX = (e.clientX - r.left - padX) / shown;
-    const imgY = (e.clientY - r.top - padY) / shown;
+    const imgX = (at.x - r.left - padX) / shown;
+    const imgY = (at.y - r.top - padY) / shown;
     // A click on the bars is not a click on the page.
     if (imgX < 0 || imgY < 0 || imgX > el.width || imgY > el.height) return null;
 
@@ -153,6 +203,16 @@ export function LiveView({
     if (!profileId || !live) return;
     const p = toPage(e);
     if (!p) return;
+    // Picking a step's target: the click names an element and does nothing
+    // on the page.
+    if (picking) {
+      const target = await automationPick(profileId, p.x, p.y).catch((err) => {
+        toast.fail({ title: t("liveView.identifyFailed"), detail: err });
+        return null;
+      });
+      onPicked?.(target);
+      return;
+    }
     // While recording, resolve the element BEFORE clicking: the click may
     // navigate, and then there is nothing left under the point to identify.
     let target: Picked | null = null;
@@ -160,7 +220,7 @@ export function LiveView({
       // Not swallowed: a pick that fails is why a step ends up as coordinates,
       // and silently falling back hid that for far too long.
       target = await automationPick(profileId, p.x, p.y).catch((err) => {
-        toast.err(`Could not identify that element: ${err}`);
+        toast.fail({ title: t("liveView.identifyFailed"), detail: err });
         return null;
       });
     }
@@ -169,7 +229,7 @@ export function LiveView({
       await automationCall(profileId, "Motion.glideTo", { x: p.x, y: p.y });
       await automationCall(profileId, "Motion.tap", {});
       if (recording) onRecorded?.("click", target ?? { selector: "", tag: "", label: "", x: p.x, y: p.y, tried: [] });
-    } catch (err) { toast.err(String(err)); }
+    } catch (err) { toast.fail({ title: t("liveView.inputFailed"), detail: err }); }
   };
 
   // The canvas is focusable, so it receives keys while the operator is looking
@@ -206,7 +266,7 @@ export function LiveView({
           ...(send.length ? { modifiers: send.join(", ") } : {}),
         });
       }
-    } catch (err) { toast.err(String(err)); }
+    } catch (err) { toast.fail({ title: t("liveView.inputFailed"), detail: err }); }
   };
 
   // Right-click belongs to the automator only while recording; otherwise it
@@ -225,89 +285,53 @@ export function LiveView({
         await automationCall(profileId, "Motion.createPointer", { x: p.x, y: p.y });
         await automationCall(profileId, "Motion.glideTo", { x: p.x, y: p.y });
         await automationCall(profileId, "Motion.tap", { button: "right" });
-      } catch (err) { toast.err(String(err)); }
+      } catch (err) { toast.fail({ title: t("liveView.inputFailed"), detail: err }); }
       return;
     }
 
     const at = { x: e.clientX, y: e.clientY };
     setMenu({ at, target: null });
+    setMenuOpen(true);
     const target = await automationPick(profileId, p.x, p.y).catch((err) => {
-      toast.err(`Could not identify that element: ${err}`);
+      toast.fail({ title: t("liveView.identifyFailed"), detail: err });
       return null;
     });
     setMenu((m) => (m ? { ...m, target: target ?? { selector: "", tag: "", label: "", x: p.x, y: p.y, tried: [] } } : m));
   };
 
-  if (!profileId) {
-    return (
-      <div className="flex h-full items-center justify-center rounded-12 bg-bg-weak-50 px-6 text-center ring-1 ring-inset ring-stroke-soft-200">
-        <p className="m-0 text-paragraph-sm text-text-soft-400">
-          {t("liveView.pickProfile")}
-        </p>
-      </div>
-    );
-  }
+  // Nothing to show yet: a centered line says what brings the page here.
+  const empty = !profileId ? t("liveView.pickProfile") : !live ? t("liveView.startHint") : null;
 
   return (
-    <div className="flex h-full flex-col gap-2">
-      <div className="flex items-center gap-2">
-        {live ? (
-          <Button
-            variant="neutral" mode="stroke" size="xsmall"
-            leftIcon={<CloseIcon className="size-4" />}
-            onClick={stop}
-          >
-            {t("liveView.stop")}
-          </Button>
-        ) : (
-          <Button
-            variant="primary" mode="filled" size="xsmall"
-            leftIcon={<PlayIcon className="size-4" />}
-            disabled={busy}
-            onClick={start}
-          >
-            {busy ? "Starting…" : "Open browser"}
-          </Button>
-        )}
-        {live && (
-          <>
-            <Button
-              variant={recording ? "error" : "neutral"}
-              mode={recording ? "filled" : "stroke"}
-              size="xsmall"
-              onClick={() => onRecording(!recording)}
-            >
-              {recording ? "Stop recording" : "Record steps"}
-            </Button>
-            <span className="text-paragraph-xs text-text-soft-400">
-              {recording
-                ? "Everything you do is being written down"
-                : "Right-click to add a step · Shift+right-click opens the page's own menu"}
-            </span>
-          </>
-        )}
-      </div>
-      <div className="flex flex-1 items-center justify-center overflow-hidden rounded-12 bg-bg-weak-50 ring-1 ring-inset ring-stroke-soft-200">
-        {/* A box the size of the frame's aspect ratio, grown to the largest that
-            fits — so the browser fills the column, not a tiny letterboxed strip. */}
-        <div className="max-h-full max-w-full" style={{ width: "100%", aspectRatio: `${dim.w} / ${dim.h}` }}>
-          <canvas
-            ref={canvas}
-            tabIndex={0}
-            className="h-full w-full object-contain outline-none"
-            onClick={onClick}
-            onContextMenu={onContext}
-            onKeyDown={onKeyDown}
-          />
-        </div>
+    <div className="relative flex h-full min-h-0 items-center justify-center overflow-hidden rounded-control bg-bg-weak-50 ring-1 ring-inset ring-stroke-soft-200">
+      {empty && (
+        <p className="m-0 max-w-[32ch] px-6 text-center text-balance text-body text-text-soft-400">{empty}</p>
+      )}
+      {/* A box the size of the frame's aspect ratio, grown to the largest that
+          fits — so the browser fills the column, not a tiny letterboxed strip.
+          It stays mounted (hidden) so the last frame survives a tab switch. */}
+      <div hidden={!!empty} className="max-h-full max-w-full" style={{ width: "100%", aspectRatio: `${dim.w} / ${dim.h}` }}>
+        <canvas
+          ref={canvas}
+          tabIndex={empty ? -1 : 0}
+          // Every key goes to the remote browser: the app's own keys stay out.
+          data-own-keys
+          // No focus ring: it would frame the remote page the whole time
+          // the operator types into it.
+          className={cn("h-full w-full object-contain focus-visible:outline-hidden", picking && "cursor-crosshair")}
+          onClick={onClick}
+          onContextMenu={onContext}
+          onKeyDown={onKeyDown}
+        />
       </div>
 
       {menu && (
-        <ActionMenu
-          at={menu.at}
-          target={menu.target}
-          onChoose={(a) => onAction?.(a, menu.target)}
-          onClose={() => setMenu(null)}
+        <Menu
+          open={menuOpen}
+          onOpenChange={setMenuOpen}
+          anchor={menu.at}
+          heading={describeTarget(menu.target, t)}
+          items={liveActions(t).map((a) => ({ label: a.label, onSelect: () => onAction?.(a, menu.target) }))}
         />
       )}
     </div>

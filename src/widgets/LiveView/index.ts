@@ -1,1 +1,1 @@
-export { LiveView } from './LiveView';
+export { LiveView, useLiveBrowser, type LiveBrowser } from './LiveView';

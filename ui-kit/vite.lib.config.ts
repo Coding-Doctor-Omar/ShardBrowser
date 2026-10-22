@@ -27,6 +27,9 @@ export default defineConfig({
         'src/main.tsx',
         // icon .d.ts is generated separately (see scripts/gen-icon-types.mjs)
         'src/icons/**',
+        'src/**/*.test.ts',
+        'src/**/*.test.tsx',
+        'src/test/**',
       ],
       entryRoot: 'src',
     }),

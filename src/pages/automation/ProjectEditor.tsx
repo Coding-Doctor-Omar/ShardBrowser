@@ -1,16 +1,15 @@
-import { useEffect, useState } from "react";
-import { Button } from "@proxyshard/shardx-ui-kit";
-import { Topbar } from "../../shared/ui/Topbar";
-import { AddIcon, CloseIcon, DownloadIcon, PlayIcon, StopIcon } from "../../shared/icons";
+import { useEffect, useRef, useState, type CSSProperties } from "react";
+import { Button, Card, SegmentControl, cn } from "@proxyshard/shardx-ui-kit";
+import { AddIcon } from "../../shared/icons";
 import {
   specFor,
+  freeSpot,
+  isUnplaced,
   automationDisplay,
-  automationExport,
   automationFleetWindow,
-  automationRun,
   automationRunStatus,
   automationRunStop,
-  scriptRun,
+  leaveEditor,
   useAutomation,
   type Block,
   type BlockSpec,
@@ -18,18 +17,33 @@ import {
   type DisplayInfo,
   type RunState,
 } from "../../entities/automation";
-import type { MenuAction } from "../../widgets/LiveView/ActionMenu";
+import type { MenuAction } from "../../widgets/LiveView/liveActions";
 import { BlockCanvas } from "../../widgets/BlockCanvas";
 import { StepDetails } from "./StepDetails";
-import { toast } from "../../shared/lib/toast";
+import { toast } from "../../shared/model/toast";
+import { confirmModal } from "../../shared/model/confirm";
+import { useUnsaved } from "../../shared/model/unsaved";
+import { isMod, keyboardIsTaken, overlayHasKeyboard } from "../../shared/lib/keyboard";
+import { commitFocusedField } from "../../shared/lib/commitField";
+import { useDialogLife } from "../../shared/lib/useDialogLife";
 import { BlockPicker } from "../../features/automation-blocks";
+import { ModulesDialog } from "../../features/automation-modules";
 import { profileList } from "../../entities/profile/model/api";
 import type { ProfileMeta } from "../../entities/profile/model/types";
 import type { Picked } from "../../entities/automation";
-import { LiveView } from "../../widgets/LiveView";
-import { TrafficPanel } from "../../widgets/TrafficPanel";
+import { LiveView, useLiveBrowser } from "../../widgets/LiveView";
+import { TrafficPanel, TrafficRequests, useTrafficObserver } from "../../widgets/TrafficPanel";
 import type { TrafficRule } from "../../entities/automation";
 import { useT } from "../../shared/i18n";
+import { PageBody } from "../../widgets/PageHeader";
+import { EditorHeader } from "./EditorHeader";
+import { BrowserColumn, type BrowserTab } from "./BrowserColumn";
+import {
+  BROWSER_DEFAULT, BROWSER_MIN, BROWSER_RESERVED, BrowserResizeHandle, loadBrowserWidth, saveBrowserWidth,
+} from "./BrowserResizeHandle";
+import { useScrollingFlag } from "../../shared/lib/useScrollingFlag";
+import { ReviewDialog, markReviewed, type ReviewLine } from "../../features/automation-review";
+import { exportProject, reviewBeforeRun, startProjectRun } from "../../features/automation-run";
 
 export function ProjectEditor() {
   const t = useT();
@@ -38,31 +52,167 @@ export function ProjectEditor() {
   const patch = useAutomation((s) => s.patch);
   const addBlock = useAutomation((s) => s.addBlock);
   const placeBlock = useAutomation((s) => s.placeBlock);
+  const commitMove = useAutomation((s) => s.commitMove);
+  const tidy = useAutomation((s) => s.tidy);
   const connect = useAutomation((s) => s.connect);
   const undo = useAutomation((s) => s.undo);
   const redo = useAutomation((s) => s.redo);
+  const save = useAutomation((s) => s.save);
+  const discard = useAutomation((s) => s.discard);
+  const focusName = useAutomation((s) => s.focusName);
+  const nameFocused = useAutomation((s) => s.nameFocused);
+  // Manual save (owner 2026-10-07): every change is a draft until Save.
+  const dirty = useAutomation((s) => !!s.openId && s.openId in s.drafts);
+  const saving = useAutomation((s) => !!s.openId && s.saving === s.openId);
+  const saveError = useAutomation((s) => (s.saveError && s.saveError.id === s.openId ? s.saveError.message : null));
+  // Leaving the project with changes asks first: Back, another project, another page.
+  useUnsaved(project && dirty ? {
+    id: `project:${project.id}`,
+    label: project.name || t("projectEditor.untitled"),
+    save: () => save(project.id),
+    discard: () => discard(project.id),
+  } : null);
 
   const [profiles, setProfiles] = useState<ProfileMeta[]>([]);
   const [target, setTarget] = useState<string | null>(null);
   const [picking, setPicking] = useState(false);
+  // The block library stays mounted through its exit (FEEL-01).
+  const pickerLife = useDialogLife(picking);
+  // Modules are managed from the library (Add step, Manage modules): the
+  // dialog opens over it, and the library reads the list again when it closes.
+  const [managing, setManaging] = useState(false);
+  const modulesLife = useDialogLife(managing);
+  const [modulesSeen, setModulesSeen] = useState(0);
   const [pickAt, setPickAt] = useState<{ x: number; y: number } | null>(null);
-  const [showLive, setShowLive] = useState(true);
+  // The browser is a third column only while it is open (owner, 2026-10-01).
+  const [showBrowser, setShowBrowser] = useState(false);
   const [recording, setRecording] = useState(false);
+  // The browser column's own width: dragged, kept, and given up first when
+  // the window shrinks (owner, 2026-10-01).
+  const [browserPref, setBrowserPref] = useState(loadBrowserWidth);
+  const [gridW, setGridW] = useState(0);
+  const gridRef = useRef<HTMLDivElement>(null);
+  const sideScroll = useScrollingFlag();
+  useEffect(() => {
+    const el = gridRef.current;
+    if (!el || !showBrowser) return;
+    const ro = new ResizeObserver(() => setGridW(Math.round(el.getBoundingClientRect().width)));
+    ro.observe(el);
+    setGridW(Math.round(el.getBoundingClientRect().width));
+    return () => ro.disconnect();
+  }, [showBrowser]);
+  const browserMax = gridW > 0 ? Math.max(BROWSER_MIN, gridW - BROWSER_RESERVED) : BROWSER_DEFAULT;
+  const browserShown = Math.max(BROWSER_MIN, Math.min(browserPref, browserMax));
   const [openStep, setOpenStep] = useState<string | null>(null);
   const [rightTab, setRightTab] = useState<"step" | "traffic">("step");
-  const [consoleSrc, setConsoleSrc] = useState("");
-  const [consoleWorld, setConsoleWorld] = useState<"isolated" | "main">("isolated");
-  const [consoleOut, setConsoleOut] = useState("");
+  const [browserTab, setBrowserTab] = useState<BrowserTab>("page");
+  // The step whose Pick is waiting for a click on the page.
+  const [pickFor, setPickFor] = useState<string | null>(null);
   const [run, setRun] = useState<RunState | null>(null);
+  const [runReview, setRunReview] = useState<ReviewLine[] | null>(null);
   const [display, setDisplay] = useState<DisplayInfo | null>(null);
+  // What is on the running browser: the project rules applied, or a test
+  // rule from a request (an empty set); null when nothing is.
+  const [applied, setApplied] = useState<ReadonlySet<TrafficRule> | null>(null);
+  // A rule just added from a request, whose form the Traffic tab opens.
+  const [newRule, setNewRule] = useState<TrafficRule | null>(null);
+  const observer = useTrafficObserver(target);
+  const browser = useLiveBrowser(target);
   useEffect(() => { automationDisplay().then(setDisplay).catch(() => {}); }, []);
+
+  // A stopped browser holds no rules, records nothing and picks nothing.
+  useEffect(() => {
+    if (browser.live) return;
+    setApplied(null);
+    setRecording(false);
+    setPickFor(null);
+  }, [browser.live]);
+
+  // Esc gives up a Pick, before the live view could send it to the page.
+  useEffect(() => {
+    if (!pickFor) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== "Escape") return;
+      e.preventDefault();
+      e.stopPropagation();
+      setPickFor(null);
+    };
+    window.addEventListener("keydown", onKey, true);
+    return () => window.removeEventListener("keydown", onKey, true);
+  }, [pickFor]);
+
+  // Closing the column only hides it: the browser stays open and a run goes
+  // on (the header shows its state and brings the log back). A hidden column
+  // records and picks nothing, so those end with it.
+  const closeBrowser = () => {
+    setShowBrowser(false);
+    setRecording(false);
+    setPickFor(null);
+  };
+
+  // A control that unmounts takes the keyboard with it, and a key pressed
+  // next would land on the page. So the keyboard goes on: the close button
+  // hands it to the header's browser switch, and the run's state button
+  // (which the open column replaces with plain words) to the column's Run
+  // log tab.
+  const focusNext = useRef<"switch" | "log" | null>(null);
+  useEffect(() => {
+    const next = focusNext.current;
+    if (next === null) return;
+    focusNext.current = null;
+    if (next === "switch" && !showBrowser) document.querySelector<HTMLElement>("[data-browser-toggle]")?.focus();
+    if (next === "log" && showBrowser) document.querySelector<HTMLElement>('[data-browser-column] [role="tab"][aria-selected="true"]')?.focus();
+  }, [showBrowser]);
+
+  // Esc goes back to the projects list, as Back does (with changes not yet
+  // saved it asks first). Only when nothing else wants the key:
+  // `keyboardIsTaken` says so for a field, the live browser view and an open
+  // dialog, menu or popover (keep that check: an overlay need not mark its
+  // Esc handled), and a tooltip's Esc arrives already `defaultPrevented`, so
+  // one press never does two things.
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== "Escape" || e.defaultPrevented || e.isComposing || e.repeat) return;
+      if (e.metaKey || e.ctrlKey || e.altKey || e.shiftKey) return;
+      if (keyboardIsTaken(e.target)) return;
+      e.preventDefault();
+      void leaveEditor();
+    };
+    document.addEventListener("keydown", onKey);
+    return () => document.removeEventListener("keydown", onKey);
+  }, []);
+
+  // A run that starts opens its log, in the browser column.
+  const wasRunning = useRef(false);
+  useEffect(() => {
+    const going = !!run?.running;
+    if (going && !wasRunning.current) {
+      setShowBrowser(true);
+      setBrowserTab("log");
+    }
+    wasRunning.current = going;
+  }, [run?.running]);
 
   // Undo covers every change to the project, deleting a step included. Skipped
   // while a text field has focus, where the browser's own undo is what the
-  // operator means.
+  // operator means. Cmd/Ctrl+S saves, from a field too (an app command
+  // cannot run in one, so the editor listens itself); with nothing unsaved,
+  // nothing happens. In the live browser view the key is that browser's.
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       const key = e.key.toLowerCase();
+      if (key === "s" && isMod(e) && !e.altKey && !e.shiftKey) {
+        if ((e.target as HTMLElement | null)?.closest?.("[data-own-keys]")) return;
+        // Never the browser's own Save page.
+        e.preventDefault();
+        // The field that has the keyboard commits first: the save reads what the screen shows.
+        commitFocusedField();
+        const st = useAutomation.getState();
+        const id = st.openId;
+        if (e.repeat || overlayHasKeyboard() || !id || !st.isDirty(id) || st.saving === id) return;
+        void st.save(id);
+        return;
+      }
       if (!(e.metaKey || e.ctrlKey) || (key !== "z" && key !== "y")) return;
       const el = document.activeElement;
       const tag = el?.tagName;
@@ -86,22 +236,24 @@ export function ProjectEditor() {
   }, [project?.id]);
   useEffect(() => { profileList().then(setProfiles).catch(() => {}); }, []);
 
+  // A project with no positions yet (new, or imported) gets one layout pass,
+  // quietly: it is not a change the user made, so it has no Undo step. Every
+  // other project keeps its steps exactly where they are.
+  const unplaced = !!project && isUnplaced(project.blocks);
+  useEffect(() => {
+    if (project && unplaced) void tidy(project.id, { silent: true });
+  }, [project?.id, unplaced]);
+
+  // The "type" step typed keys go into while recording (SEC-06).
+  const typing = useRef<string | null>(null);
+  useEffect(() => { if (!recording) typing.current = null; }, [recording]);
+
   if (!project) {
     open(null);
     return null;
   }
 
-  // A right-click on the live view records a step against the point clicked.
-  // Which element that point is over is resolved next, natively, through the
-  // DOM domain — never by running script in the page.
-  // Somewhere free: down the right of whatever is already there, so a step
-  // added while the canvas is scrolled elsewhere is still findable.
-  const freeSpot = () => {
-    const bs = project.blocks;
-    if (bs.length === 0) return { x: 80, y: 80 };
-    const last = bs[bs.length - 1];
-    return { x: last.x, y: last.y + 100 };
-  };
+  const savedProject = () => useAutomation.getState().projects.find((p) => p.id === project.id) ?? null;
 
   // Every step gets its block's defaults, however it was made. Recorded steps
   // used to be built by hand and so carried none — a recorded click had no
@@ -123,10 +275,55 @@ export function ProjectEditor() {
       params: { ...defaults, ...params },
       enabled: true,
       secrets: [],
-      ...(at ?? freeSpot()),
+      ...(at ?? freeSpot(project.blocks)),
       on_done: "next",
       on_fail: "stop",
     };
+  };
+
+  // The run uses the saved project (the backend runs what is stored), so
+  // changes not yet saved ask first: Save and run, or Cancel. An imported
+  // project that reaches beyond the page shows what it does once more
+  // before its first Run (SEC-02).
+  const tryRun = async () => {
+    commitFocusedField();
+    if (useAutomation.getState().isDirty(project.id)) {
+      const choice = await confirmModal({
+        title: t("projectEditor.runAskTitle"),
+        message: t("projectEditor.runAskBody"),
+        buttons: [
+          { label: t("projectEditor.saveAndRun"), value: "save", primary: true },
+          { label: t("unsaved.cancel"), value: null },
+        ],
+      });
+      if (choice !== "save" || !(await save(project.id))) return;
+    }
+    const saved = savedProject();
+    if (!saved) return;
+    const lines = reviewBeforeRun(saved);
+    if (lines) { setRunReview(lines); return; }
+    void startProjectRun(saved);
+  };
+
+  // Export writes the stored project too (the backend reads it by id), so
+  // changes not yet saved ask the same way: Save and export, or Cancel. The
+  // file's name and content then both come from the saved project
+  // (Controller Ruling 9).
+  const tryExport = async () => {
+    commitFocusedField();
+    if (useAutomation.getState().isDirty(project.id)) {
+      const choice = await confirmModal({
+        title: t("projectEditor.exportAskTitle"),
+        message: t("projectEditor.exportAskBody"),
+        buttons: [
+          { label: t("projectEditor.saveAndExport"), value: "save", primary: true },
+          { label: t("unsaved.cancel"), value: null },
+        ],
+      });
+      if (choice !== "save" || !(await save(project.id))) return;
+    }
+    const saved = savedProject();
+    if (saved) await exportProject(saved);
   };
 
   // A right-click on the live view: the operator chose what to do with the
@@ -145,7 +342,7 @@ export function ProjectEditor() {
       : target?.tag
         ? `<${target.tag}>`
         : t("projectEditor.point");
-    await addBlock(project.id, newBlock(a.kind, params, `${a.label.replace(/…$/, "")} ${what}`));
+    await addBlock(project.id, newBlock(a.kind, params, `${a.label} ${what}`));
   };
 
   // Recording: the operator did something on the page and it becomes a step.
@@ -154,6 +351,32 @@ export function ProjectEditor() {
     target: Picked | null,
     extra?: Record<string, unknown>,
   ) => {
+    // Typed characters go into one "type" step, marked secret, labelled only
+    // "Type text": a recorded login must not keep its password in step
+    // labels or exports (SEC-06). Named keys (Enter, Tab) stay press steps.
+    // AltGr reports as Control+Alt, and a lone Option/Alt key can also
+    // produce a printable character, so only Meta, or Control without Alt,
+    // keeps a character out of the typed text.
+    const key = typeof extra?.key === "string" ? extra.key : "";
+    const modifiers = typeof extra?.modifiers === "string" ? extra.modifiers.split(", ").filter(Boolean) : [];
+    const blocksTyping = modifiers.includes("Meta") || (modifiers.includes("Control") && !modifiers.includes("Alt"));
+    if (kind === "press" && key.length === 1 && !blocksTyping) {
+      const current = useAutomation.getState().edited(project.id);
+      const into = typing.current ? current?.blocks.find((b) => b.id === typing.current) : undefined;
+      if (current && into) {
+        await patch(project.id, {
+          blocks: current.blocks.map((b) =>
+            b.id === into.id ? { ...b, params: { ...b.params, text: `${String(b.params.text ?? "")}${key}` } } : b,
+          ),
+        });
+        return;
+      }
+      const block = { ...newBlock("type", { text: key }, t("palette.type.label")), secrets: ["text"] };
+      typing.current = block.id;
+      await addBlock(project.id, block);
+      return;
+    }
+    typing.current = null;
     const params: Record<string, unknown> = { ...(extra ?? {}) };
     if (target?.selector) params.selector = target.selector;
     else if (target) {
@@ -174,7 +397,7 @@ export function ProjectEditor() {
             ? t("projectEditor.stepScrollDown")
             : t("projectEditor.stepScrollUp")
           : kind === "goto"
-            ? t("projectEditor.stepOpen", { url: String(extra?.url ?? "").slice(0, 48) })
+            ? t("projectEditor.stepOpen", { url: pageLabel(String(extra?.url ?? "")).slice(0, 48) })
             : what
               ? t("projectEditor.stepClick", { what })
               : t("projectEditor.stepClickPoint");
@@ -188,26 +411,23 @@ export function ProjectEditor() {
     setOpenStep(b.id);
   };
 
-  // The run follows the visual stack (see BlockCanvas / the runner sort), so a
-  // drop only needs to place the card and make room: its position decides where
-  // it sits in the flow. Its "done" link becomes "next" so it flows into the
-  // card now beneath it — a stale goto from an earlier layout would otherwise
-  // send the run somewhere else.
+  // The run follows the visual stack (see BlockCanvas / the runner sort,
+  // runner.rs: by column, then by y), so a drop only needs to place the card
+  // and make room: its position decides where it sits in the flow. Dropped
+  // onto a card it takes that card's place, and everything at or below it in
+  // the column slides down one card — two cards at one spot would run in an
+  // order the canvas cannot show. Its "done" link becomes "next" so it flows
+  // into the card now beneath it; a stale goto from an earlier layout would
+  // otherwise send the run somewhere else.
   const onDrop = (dragged: string, at: { under?: string; before?: string }) => {
-    const CH = 60; // must match BlockCanvas CARD_H
+    const CH = 60; // BlockCanvas CARD_H
     const blocks = project.blocks;
     const d = blocks.find((b) => b.id === dragged);
     if (!d) return;
     const anchorId = at.before ?? at.under ?? null;
     const anchor = anchorId ? blocks.find((b) => b.id === anchorId) : null;
-
-    let x = d.x;
-    let y = d.y;
-    if (anchor) {
-      x = anchor.x;
-      y = at.before ? anchor.y : anchor.y + CH;
-    }
-
+    const x = anchor ? anchor.x : d.x;
+    const y = anchor ? (at.before ? anchor.y : anchor.y + CH) : d.y;
     patch(project.id, {
       blocks: blocks.map((b) => {
         if (b.id === dragged) return { ...b, x, y, on_done: "next" as Branch };
@@ -215,6 +435,12 @@ export function ProjectEditor() {
         if (Math.abs(b.x - x) < 6 && b.y >= y) return { ...b, y: b.y + CH };
         return b;
       }),
+    });
+  };
+
+  const tidyUp = () => {
+    void tidy(project.id).then(() => {
+      toast.undo(t("projectEditor.tidiedUp"), () => { void undo(); });
     });
   };
 
@@ -231,26 +457,6 @@ export function ProjectEditor() {
           : x,
       ),
     });
-
-  const exportProject = async () => {
-    try {
-      const bundle = await automationExport(project.id);
-      const blob = new Blob([JSON.stringify(bundle, null, 2)], { type: "application/json" });
-      const a = document.createElement("a");
-      a.href = URL.createObjectURL(blob);
-      a.download = `${project.name.replace(/[^\w.-]+/g, "-")}.shardx-project.json`;
-      a.click();
-      URL.revokeObjectURL(a.href);
-      const n = bundle.needs.length;
-      toast.ok(
-        n === 0
-          ? t("projectEditor.exported")
-          : n === 1
-            ? t("projectEditor.exportedOneSecret")
-            : t("projectEditor.exportedSecrets", { n }),
-      );
-    } catch (e) { toast.err(String(e)); }
-  };
 
   const setBranch = (blockId: string, which: "on_done" | "on_fail", b: Branch) =>
     patch(project.id, {
@@ -269,16 +475,14 @@ export function ProjectEditor() {
 
   const setRules = (rules: TrafficRule[]) => patch(project.id, { rules });
 
-  const runConsole = async () => {
-    if (!target || !consoleSrc.trim()) return;
-    try {
-      const r = await scriptRun(target, consoleSrc, consoleWorld);
-      setConsoleOut(r.result);
-    } catch (e) {
-      setConsoleOut("⚠ " + String(e));
-    }
+  // A step's Pick: the next click on the page names its target.
+  const onPicked = (target: Picked | null) => {
+    const id = pickFor;
+    setPickFor(null);
+    if (!id || !target) return;
+    if (!target.selector) { toast.err(t("projectEditor.pickNothing")); return; }
+    setParam(id, "selector", target.selector);
   };
-
 
   const removeBlock = (id: string) =>
     patch(project.id, { blocks: project.blocks.filter((b) => b.id !== id) });
@@ -289,290 +493,245 @@ export function ProjectEditor() {
     });
 
   return (
-    <section className="flex h-full min-h-0 flex-col">
-      <Topbar
-        crumbs={[t("projectEditor.crumbWorkspace"), t("projectEditor.crumbAutomation"), project.name]}
-        search=""
-        onSearch={() => {}}
+    <>
+      <EditorHeader
+        project={project}
+        run={run}
+        browserOpen={showBrowser}
+        selectName={focusName}
+        onNameSelected={nameFocused}
+        dirty={dirty}
+        saving={saving}
+        saveError={saveError}
+        onBack={() => { void leaveEditor(); }}
+        onRename={(name) => patch(project.id, { name })}
+        onDescribe={(notes) => patch(project.id, { notes })}
+        onSave={() => { commitFocusedField(); if (!saving) void save(project.id); }}
+        onRunOpts={setRunOpts}
+        onToggleBrowser={() => { if (showBrowser) closeBrowser(); else setShowBrowser(true); }}
+        onShowLog={() => { focusNext.current = "log"; setBrowserTab("log"); setShowBrowser(true); }}
+        onRun={() => { void tryRun(); }}
+        onStop={() => automationRunStop(project.id)}
+        onFleet={() => automationFleetWindow()}
+        onExport={() => { void tryExport(); }}
+        onTidy={tidyUp}
       />
-
-      <div className="mb-3.5 flex items-end justify-between gap-4">
-        <div className="min-w-0">
-          <input
-            className="m-0 w-full max-w-[36ch] truncate rounded-8 bg-transparent px-1 py-0.5 text-title-h5 text-text-strong-950 outline-none ring-1 ring-inset ring-transparent hover:ring-stroke-soft-200 focus:ring-primary-base"
-            value={project.name}
-            onChange={(e) => patch(project.id, { name: e.target.value })}
-          />
-          <input
-            className="mt-1 w-full max-w-[70ch] rounded-8 bg-transparent px-1 py-0.5 text-paragraph-xs text-text-soft-400 outline-none ring-1 ring-inset ring-transparent hover:ring-stroke-soft-200 focus:ring-primary-base"
-            placeholder={t("projectEditor.notesPlaceholder")}
-            value={project.notes}
-            onChange={(e) => patch(project.id, { notes: e.target.value })}
-          />
-        </div>
-        <Button
-          variant="neutral" mode="stroke" size="small"
-          leftIcon={<CloseIcon className="size-4" />}
-          onClick={() => open(null)}
-        >
-          {t("projectEditor.close")}
-        </Button>
-      </div>
-
-      <div className="mb-3.5 flex flex-wrap items-end gap-4 rounded-12 bg-bg-white-0 px-4 py-3 shadow-[var(--shadow-xs)] ring-1 ring-inset ring-stroke-soft-200">
-        <label className="flex flex-col gap-1">
-          <span className="text-subheading-2xs text-text-soft-400">{t("projectEditor.threads")}</span>
-          <input
-            type="number" min={1} max={64}
-            className="h-8 w-[90px] rounded-8 bg-bg-white-0 px-2 text-paragraph-sm text-text-strong-950 ring-1 ring-inset ring-stroke-soft-200 outline-none focus:ring-primary-base"
-            value={project.run.threads}
-            onChange={(e) => setRunOpts({ threads: Math.max(1, Number(e.target.value) || 1) })}
-          />
-        </label>
-        <label className="flex flex-col gap-1">
-          <span className="text-subheading-2xs text-text-soft-400">{t("projectEditor.loops")}</span>
-          <input
-            type="number" min={0}
-            className="h-8 w-[90px] rounded-8 bg-bg-white-0 px-2 text-paragraph-sm text-text-strong-950 ring-1 ring-inset ring-stroke-soft-200 outline-none focus:ring-primary-base"
-            value={project.run.loops}
-            onChange={(e) => setRunOpts({ loops: Math.max(0, Number(e.target.value) || 0) })}
-          />
-        </label>
-        {project.run.loops === 0 && (
-          <label className="flex flex-col gap-1">
-            <span className="text-subheading-2xs text-text-soft-400">{t("projectEditor.hours")}</span>
-            <input
-              type="number" min={0} step={0.5}
-              className="h-8 w-[90px] rounded-8 bg-bg-white-0 px-2 text-paragraph-sm text-text-strong-950 ring-1 ring-inset ring-stroke-soft-200 outline-none focus:ring-primary-base"
-              value={project.run.hours}
-              onChange={(e) => setRunOpts({ hours: Math.max(0, Number(e.target.value) || 0) })}
-            />
-          </label>
-        )}
-        <p className="m-0 max-w-[38ch] text-paragraph-xs text-text-soft-400">
-          {t("projectEditor.loopsHelp")}
-        </p>
-
-        <div className="ml-auto flex items-center gap-2">
-          {run?.running ? (
-            <Button
-              variant="error" mode="filled" size="small"
-              leftIcon={<StopIcon className="size-4" />}
-              onClick={() => automationRunStop(project.id)}
-            >
-              {t("projectEditor.stop")}
-            </Button>
-          ) : (
-            <Button
-              variant="primary" mode="filled" size="small"
-              leftIcon={<PlayIcon className="size-4" />}
-              onClick={() =>
-                automationRun(project.id).catch((e) => toast.err(String(e)))
-              }
-            >
-              {t("projectEditor.run")}
-            </Button>
+      <PageBody scroll={false}>
+        {/* The canvas and a 320 px side panel; the browser is a third column
+            only while it is open. The browser gives way first (380 down to
+            320 px) so the canvas keeps 360. Beside an open sidebar a 1280 px
+            window has 998 px here, 26 short of the three minimums: the canvas
+            gives those up, down to 240 px. Only past that does the body
+            scroll sideways (a 1024 px window with the sidebar open). */}
+        <div
+          ref={gridRef}
+          className={cn(
+            "grid min-h-0 flex-1 grid-rows-[minmax(0,1fr)] gap-3.5",
+            showBrowser
+              ? "grid-cols-[minmax(clamp(240px,calc(100%_-_664px),360px),1fr)_320px_var(--browser-w)] overflow-x-auto"
+              : "grid-cols-[minmax(0,1fr)_320px]",
           )}
-          <Button
-            variant="neutral" mode="stroke" size="small"
-            onClick={() => automationFleetWindow()}
-          >
-            {t("projectEditor.fleet")}
-          </Button>
-          <Button
-            variant="neutral" mode="stroke" size="small"
-            leftIcon={<DownloadIcon className="size-4" />}
-            onClick={exportProject}
-          >
-            {t("projectEditor.export")}
-          </Button>
-        </div>
-      </div>
-
-      {display?.limited && (
-        <div className="mb-3.5 rounded-12 bg-warning-alpha-16 px-4 py-2.5 text-paragraph-xs text-warning-base">
-          {display.note}
-        </div>
-      )}
-
-      <div
-        className={`grid min-h-0 flex-1 gap-3.5 ${
-          showLive ? "grid-cols-[minmax(0,1fr)_300px_minmax(420px,42%)]" : "grid-cols-[1fr_300px]"
-        }`}
-      >
-        <div className="flex min-h-0 flex-col gap-2">
-          <div className="flex items-center justify-between">
-            <span className="text-subheading-2xs text-text-soft-400">
-              {project.blocks.length === 1
-                ? t("projectEditor.stepCountOne")
-                : t("projectEditor.stepCountMany", { n: project.blocks.length })}
-            </span>
-            <div className="flex items-center gap-1.5">
+          style={showBrowser ? ({ "--browser-w": `max(${BROWSER_MIN}px, min(${browserPref}px, calc(100% - ${BROWSER_RESERVED}px)))` } as CSSProperties) : undefined}
+        >
+          <Card className="flex min-h-0 min-w-0 flex-col overflow-hidden">
+            <div className="flex shrink-0 items-center gap-1.5 py-1.5 pl-3 pr-1.5">
+              <span className="text-secondary text-text-soft-400 tabular-nums">
+                {project.blocks.length === 1
+                  ? t("projectEditor.stepCountOne")
+                  : t("projectEditor.stepCountMany", { n: project.blocks.length })}
+              </span>
               <Button
-                variant="neutral" mode="stroke" size="xsmall"
-                leftIcon={<AddIcon className="size-4" />}
+                variant="neutral" mode="ghost" size="2xsmall"
+                className="ml-auto"
+                leftIcon={<AddIcon className="size-3.5" />}
                 onClick={() => { setPickAt(null); setPicking(true); }}
               >
                 {t("projectEditor.addStep")}
               </Button>
-              <Button
-                variant="neutral" mode="ghost" size="xsmall"
-                onClick={() => setShowLive((v) => !v)}
-              >
-                {showLive ? t("projectEditor.hideBrowser") : t("projectEditor.showBrowser")}
-              </Button>
             </div>
-          </div>
-          <div className="min-h-0 flex-1">
-            <BlockCanvas
-              blocks={project.blocks}
-              startId={project.run.start}
-              selected={openStep}
-              active={
-                run?.workers.find((w) => w.status === "running" && w.step > 0)
-                  ? project.blocks
-                      .filter((b) => b.enabled)
-                      .sort((a, b) => Math.round(a.x / 40) - Math.round(b.x / 40) || a.y - b.y)[
-                      (run.workers.find((w) => w.status === "running")?.step ?? 1) - 1
-                    ]?.id ?? null
-                  : null
-              }
-              onSelect={(id) => { setOpenStep(id); if (id) setRightTab("step"); }}
-              onMove={(id, x, y) => placeBlock(project.id, id, x, y)}
-              onConnect={(from, port, to) => connect(project.id, from, port, to)}
-              onDrop={onDrop}
-              onSetStart={(id) => setRunOpts({ start: id })}
-              onDelete={removeBlock}
-              onAddAt={(x, y) => { setPickAt({ x, y }); setPicking(true); }}
-            />
-          </div>
-        </div>
-
-        <div className="flex min-h-0 flex-col gap-2 overflow-y-auto rounded-12 bg-bg-white-0 p-3 shadow-[var(--shadow-xs)] ring-1 ring-inset ring-stroke-soft-200">
-          <div className="flex gap-1">
-            {(["step", "traffic"] as const).map((tab) => (
-              <button
-                key={tab}
-                onClick={() => setRightTab(tab)}
-                className={
-                  "rounded-8 px-2 py-1 text-label-sm " +
-                  (rightTab === tab
-                    ? "bg-bg-weak-50 text-text-strong-950"
-                    : "text-text-soft-400 hover:text-text-strong-950")
+            <div className="min-h-0 flex-1">
+              {/* Held back for the one layout pass of a project with no positions, so the first fit sees the laid-out steps. */}
+              {!unplaced && <BlockCanvas
+                blocks={project.blocks}
+                startId={project.run.start}
+                resetKey={project.id}
+                selected={openStep}
+                active={
+                  run?.workers.find((w) => w.status === "running" && w.step > 0)
+                    ? project.blocks
+                        .filter((b) => b.enabled)
+                        .sort((a, b) => Math.round(a.x / 40) - Math.round(b.x / 40) || a.y - b.y)[
+                        (run.workers.find((w) => w.status === "running")?.step ?? 1) - 1
+                      ]?.id ?? null
+                    : null
                 }
-              >
-                {tab === "step" ? t("projectEditor.tabStep") : t("projectEditor.tabTraffic")}
-                {tab === "traffic" && (project.rules?.length ? ` (${project.rules.length})` : "")}
-              </button>
-            ))}
-          </div>
-          {/* Both stay mounted; we only hide the inactive one. Unmounting the
-              Traffic panel on a tab switch threw away its observed requests and
-              the "observing" toggle (while the core kept observing). */}
-          <div hidden={rightTab !== "traffic"} className="flex min-h-0 flex-col gap-2">
-            <TrafficPanel
-              rules={project.rules ?? []}
-              onRulesChange={setRules}
-              onAddStep={(kind, params, label) => {
-                const b = newBlock(kind, params, label);
-                addBlock(project.id, b);
-                setRightTab("step");
-                setOpenStep(b.id);
-              }}
-              profileId={target}
-              live={!!target}
+                onSelect={(id) => { setOpenStep(id); if (id) setRightTab("step"); }}
+                onMove={(id, x, y) => placeBlock(project.id, id, x, y)}
+                onConnect={(from, port, to) => connect(project.id, from, port, to)}
+                onDrop={onDrop}
+                onMoveEnd={() => { void commitMove(project.id); }}
+                onSetStart={(id) => setRunOpts({ start: id })}
+                onDelete={removeBlock}
+                onAddAt={(x, y) => { setPickAt({ x, y }); setPicking(true); }}
+              />}
+            </div>
+          </Card>
+
+          <Card className="flex min-h-0 min-w-0 flex-col overflow-hidden">
+            <div className="shrink-0 p-2">
+              <SegmentControl
+                size="xsmall"
+                aria-label={t("projectEditor.panels")}
+                value={rightTab}
+                onChange={(v) => setRightTab(v as "step" | "traffic")}
+                items={[
+                  { value: "step", label: t("projectEditor.tabStep") },
+                  { value: "traffic", label: t("projectEditor.tabTraffic"), count: project.rules?.length || undefined },
+                ]}
+              />
+            </div>
+            {/* Never sideways: every field fits 320 px. The side padding is
+                the room focus rings need inside the scroller. */}
+            <div data-editor-panel className="scrollbar-on-scroll min-h-0 flex-1 overflow-y-auto overflow-x-hidden overscroll-contain px-3.5 pb-3.5 pt-1" {...sideScroll}>
+            {/* Both stay mounted; only the inactive one hides, so a rule's
+                open form or a step's draft survives a switch. */}
+            <div hidden={rightTab !== "traffic"} className="flex min-h-full flex-col">
+              <TrafficPanel
+                rules={project.rules ?? []}
+                onRulesChange={setRules}
+                profileId={target}
+                live={browser.live}
+                applied={applied}
+                onApplied={setApplied}
+                openRule={newRule}
+              />
+            </div>
+            <div hidden={rightTab !== "step"} className="flex min-h-full flex-col">
+              {/* Keyed by step: a card selects on mousedown, before the field
+                  it leaves blurs, and a blur commits. One instance per step
+                  means that commit lands on the step it was typed in. */}
+              <StepDetails
+                key={openStep ?? ""}
+                block={project.blocks.find((b) => b.id === openStep) ?? null}
+                steps={project.blocks}
+                onParam={setParam}
+                onSecret={toggleSecret}
+                onBranch={setBranch}
+                onToggle={toggleBlock}
+                pick={{
+                  available: browser.live,
+                  active: !!openStep && pickFor === openStep,
+                  onToggle: () => {
+                    if (!openStep) return;
+                    if (pickFor === openStep) { setPickFor(null); return; }
+                    setPickFor(openStep);
+                    setShowBrowser(true);
+                    setBrowserTab("page");
+                  },
+                }}
+              />
+            </div>
+            </div>
+          </Card>
+
+          {showBrowser && (
+            <div className="relative grid min-h-0 min-w-0">
+            <BrowserResizeHandle
+              width={browserShown}
+              min={BROWSER_MIN}
+              max={browserMax}
+              onChange={setBrowserPref}
+              onCommit={(w) => { setBrowserPref(w); saveBrowserWidth(w); }}
+              onReset={() => { setBrowserPref(BROWSER_DEFAULT); saveBrowserWidth(BROWSER_DEFAULT); }}
             />
-          </div>
-          <div hidden={rightTab !== "step"} className="flex min-h-0 flex-col gap-2">
-            <StepDetails
-              block={project.blocks.find((b) => b.id === openStep) ?? null}
-              steps={project.blocks}
-              onParam={setParam}
-              onSecret={toggleSecret}
-              onBranch={setBranch}
-              onToggle={toggleBlock}
+            <BrowserColumn
+              profiles={profiles}
+              target={target}
+              onTarget={setTarget}
+              browser={browser}
+              recording={recording}
+              onRecording={setRecording}
+              tab={browserTab}
+              onTab={setBrowserTab}
+              run={run}
+              onClose={() => { focusNext.current = "switch"; closeBrowser(); }}
+              page={
+                <LiveView
+                  profileId={target}
+                  live={browser.live}
+                  onAction={onAction}
+                  onRecorded={onRecorded}
+                  recording={recording}
+                  picking={!!pickFor}
+                  onPicked={onPicked}
+                />
+              }
+              pageNote={
+                !browser.live ? (display?.limited ? display.note : null)
+                : pickFor ? t("liveView.pickHint")
+                : recording ? t("liveView.recordingNote")
+                : display?.limited ? display.note
+                : t("liveView.menuHint")
+              }
+              requests={
+                <TrafficRequests
+                  observer={observer}
+                  profileId={target}
+                  live={browser.live}
+                  onAddStep={(kind, params, label) => {
+                    const b = newBlock(kind, params, label);
+                    addBlock(project.id, b);
+                    setRightTab("step");
+                    setOpenStep(b.id);
+                  }}
+                  onAddRule={(rule) => {
+                    setRules([...(project.rules ?? []), rule]);
+                    setNewRule(rule);
+                    setRightTab("traffic");
+                  }}
+                  onMounted={() => setApplied((a) => a ?? new Set())}
+                />
+              }
             />
-          </div>
-          {run && (
-            <div className="mt-auto border-t border-stroke-soft-200 pt-2">
-              <div className="mb-1 flex items-center justify-between">
-                <span className="text-subheading-2xs text-text-soft-400">{t("projectEditor.runLog")}</span>
-                <span className="text-paragraph-xs text-text-soft-400">
-                  {t("projectEditor.runningCount", {
-                    n: run.workers.filter((w) => w.status === "running").length,
-                  })}{" "}
-                  ·{" "}
-                  {t("projectEditor.failedCount", {
-                    n: run.workers.filter((w) => w.status === "failed").length,
-                  })}
-                </span>
-              </div>
-              <div className="max-h-[150px] overflow-y-auto font-mono text-[10px] text-text-sub-600">
-                {run.log.length === 0 ? (
-                  <div className="text-text-soft-400">{t("projectEditor.logEmpty")}</div>
-                ) : (
-                  run.log.slice(-60).map((l, i) => <div key={i}>{l}</div>)
-                )}
-              </div>
             </div>
           )}
         </div>
 
-        {showLive && (
-          <div className="flex min-h-0 flex-col gap-2">
-            <select
-              className="h-8 w-full rounded-8 bg-bg-white-0 px-2 text-paragraph-sm text-text-strong-950 ring-1 ring-inset ring-stroke-soft-200 outline-none focus:ring-primary-base"
-              value={target ?? ""}
-              onChange={(e) => setTarget(e.target.value || null)}
-            >
-              <option value="">{t("projectEditor.chooseProfile")}</option>
-              {profiles.map((p) => (
-                <option key={p.id} value={p.id}>{p.name}</option>
-              ))}
-            </select>
-            <div className="min-h-0 flex-1">
-              <LiveView
-                profileId={target}
-                onAction={onAction}
-                onRecorded={onRecorded}
-                recording={recording}
-                onRecording={setRecording}
-              />
-            </div>
-            {/* Console: run JS in the page through the core's isolated world. */}
-            <div className="flex flex-col gap-1 rounded-12 bg-bg-white-0 p-2 ring-1 ring-inset ring-stroke-soft-200">
-              <div className="flex items-center gap-2">
-                <span className="text-subheading-2xs text-text-soft-400">{t("projectEditor.console")}</span>
-                <select
-                  className="h-7 rounded-8 bg-bg-white-0 px-1.5 text-paragraph-xs text-text-strong-950 ring-1 ring-inset ring-stroke-soft-200 outline-none focus:ring-primary-base"
-                  value={consoleWorld}
-                  onChange={(e) => setConsoleWorld(e.target.value as "isolated" | "main")}
-                >
-                  <option value="isolated">isolated</option>
-                  <option value="main">main</option>
-                </select>
-                <Button size="xsmall" className="ml-auto" disabled={!target} onClick={runConsole}>
-                  {t("projectEditor.consoleRun")}
-                </Button>
-              </div>
-              <input
-                className="h-8 w-full rounded-8 bg-bg-white-0 px-2 font-mono text-[11px] text-text-strong-950 ring-1 ring-inset ring-stroke-soft-200 outline-none placeholder:text-text-soft-400 focus:ring-primary-base"
-                placeholder="document.title"
-                value={consoleSrc}
-                onChange={(e) => setConsoleSrc(e.target.value)}
-                onKeyDown={(e) => { if (e.key === "Enter") runConsole(); }}
-              />
-              {consoleOut && (
-                <pre className="m-0 max-h-24 overflow-auto rounded-8 bg-bg-weak-50 p-2 font-mono text-[11px] text-text-strong-950">{consoleOut}</pre>
-              )}
-            </div>
-          </div>
+        {pickerLife.mounted && (
+          <BlockPicker
+            key={pickerLife.session}
+            open={picking}
+            modulesSeen={modulesSeen}
+            onPick={addFromLibrary}
+            onManageModules={() => setManaging(true)}
+            onClose={() => setPicking(false)}
+          />
         )}
-      </div>
+        {modulesLife.mounted && (
+          <ModulesDialog key={modulesLife.session} open={managing} onClose={() => { setManaging(false); setModulesSeen((n) => n + 1); }} />
+        )}
+      </PageBody>
 
-      {picking && (
-        <BlockPicker onPick={addFromLibrary} onClose={() => setPicking(false)} />
+      {runReview && (
+        <ReviewDialog
+          mode="run"
+          name={project.name}
+          lines={runReview}
+          onCancel={() => setRunReview(null)}
+          onConfirm={() => { setRunReview(null); markReviewed(project.id); void startProjectRun(savedProject() ?? project); }}
+        />
       )}
-    </section>
+    </>
   );
+}
+
+/** A recorded page for a step label: origin and path. A query or fragment
+ *  can hold a token or a session id, and labels travel in exports (SEC-06). */
+function pageLabel(url: string): string {
+  try {
+    const u = new URL(url);
+    return `${u.origin}${u.pathname}`;
+  } catch {
+    return url.split(/[?#]/)[0];
+  }
 }

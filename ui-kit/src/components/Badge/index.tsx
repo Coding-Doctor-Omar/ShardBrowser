@@ -1,71 +1,89 @@
-import { HugeiconsIcon } from '@hugeicons/react'
-import type { IconSvgElement } from '@hugeicons/react'
-import { CheckmarkCircle02Icon, Alert02Icon, CancelCircleIcon } from '@hugeicons/core-free-icons'
 import { cn } from '@/lib/cn'
 
-export type BadgeStatus =
-  | 'success'
-  | 'pending'
-  | 'error'
-  | 'paid'
-  | 'unpaid'
-  | 'active'
-  | 'on-hold'
-  | 'cancelled'
-  | 'refunded'
+export type BadgeColor = 'success' | 'error' | 'warning' | 'primary' | 'information' | 'gray'
+export type BadgeVariant = 'soft' | 'stroke'
+export type BadgeSize = 'small' | 'medium'
+export type BadgeShape = 'chip' | 'pill'
 
 export type BadgeProps = React.HTMLAttributes<HTMLSpanElement> & {
-  /** Известные статусы типизированы; любая другая строка рендерится
-   * нейтральным бейджем (фолбэк), а не роняет SSR. */
-  status: BadgeStatus | (string & {})
+  color?: BadgeColor
+  size?: BadgeSize
+  /** A leading dot in the text color, for live states such as "running". */
+  dot?: boolean
+  /** Drawn before the text in a 14 px slot: a status dot, a spinner or an
+   *  icon. Decoration only (hidden from assistive tech): the text says what
+   *  the state is. */
+  lead?: React.ReactNode
+} & (
+  | { shape?: 'chip'; variant?: BadgeVariant }
+  /** A status pill: fully rounded, fill and text only, so always soft. */
+  | { shape: 'pill'; variant?: 'soft' }
+)
+
+const soft: Record<BadgeColor, string> = {
+  success: 'bg-success-tint text-success-text',
+  error: 'bg-error-tint text-error-text',
+  warning: 'bg-warning-tint text-warning-text',
+  primary: 'bg-primary-tint text-primary-text',
+  information: 'bg-information-tint text-information-text',
+  gray: 'bg-bg-weak-50 text-text-sub-600',
 }
 
-// Hugeicons glyph per status (success ✓, warning !, failed ✕).
-const statusToIcon: Record<BadgeStatus, IconSvgElement> = {
-  success: CheckmarkCircle02Icon,
-  pending: Alert02Icon,
-  error: CancelCircleIcon,
-  paid: CheckmarkCircle02Icon,
-  unpaid: CancelCircleIcon,
-  active: CheckmarkCircle02Icon,
-  'on-hold': Alert02Icon,
-  cancelled: CancelCircleIcon,
-  refunded: CancelCircleIcon,
+const stroke: Record<BadgeColor, string> = {
+  success: 'border-success-base text-success-text',
+  error: 'border-error-base text-error-text',
+  warning: 'border-warning-base text-warning-text',
+  primary: 'border-primary-base text-primary-text',
+  information: 'border-information-base text-information-text',
+  gray: 'border-stroke-soft-200 text-text-sub-600',
 }
 
-// Text + soft-background pair per status (kit state tokens; on-hold = neutral).
-
-const statusToColor = {
-  success: "text-success bg-success-background",
-  pending: "text-warning bg-warning-background",
-  error: "text-error bg-error-background",
-  paid: "text-success bg-success-background",
-  unpaid: "text-error bg-error-background",
-  active: "text-success bg-success-background",
-  "on-hold": "dark:text-[var(--color-default)] dark:bg-[var(--color-default-background)] text-[var(--color-default-light)] bg-[var(--color-default-light-background)]",
-  cancelled: "text-error bg-error-background",
-  refunded: "dark:text-[var(--color-default)] dark:bg-[var(--color-default-background)] text-[var(--color-default-light)] bg-[var(--color-default-light-background)]",
+// Side padding per size. A lead's 14 px slot is mostly air around a 7 px dot
+// (3.5 px each side), so the lead side takes 3 px less and the dot sits about
+// as far in as the text does on the other side.
+const inline: Record<BadgeSize, { plain: string; lead: string }> = {
+  small: { plain: 'px-[5px]', lead: 'pl-[2px] pr-[5px]' },
+  medium: { plain: 'px-[7px]', lead: 'pl-[4px] pr-[7px]' },
 }
 
-// Неизвестный статус (новое значение из данных) не должен ронять рендер:
-// нейтральный вид + warning-глиф.
-const fallbackIcon = Alert02Icon
-const fallbackColor =
-  "dark:text-[var(--color-default)] dark:bg-[var(--color-default-background)] text-[var(--color-default-light)] bg-[var(--color-default-light-background)]"
-
-
-export default function Badge({ status, className, ...rest }: BadgeProps) {
+/** Small status chip: proxy types, counts, connection and run state. As a
+ *  pill (`shape="pill"`), the status pill of the Live layer: the same height
+ *  as a row's Tag and Folder chips, fully rounded, and in forced colors a
+ *  1 px system edge in place of the tint. */
+export default function Badge({
+  color = 'gray',
+  variant = 'soft',
+  size = 'medium',
+  shape = 'chip',
+  dot = false,
+  lead,
+  className,
+  children,
+  ...rest
+}: BadgeProps) {
+  const pill = shape === 'pill'
+  const hasLead = lead !== undefined && lead !== null && lead !== false
+  const pad = hasLead ? inline[size].lead : inline[size].plain
   return (
     <span
       className={cn(
-        'inline-flex min-w-24 items-center justify-center gap-1 rounded-lg py-1 pl-1 pr-2 text-center text-label-xs font-medium',
-        statusToColor[status as BadgeStatus] ?? fallbackColor,
+        'inline-flex items-center justify-center gap-[3px] whitespace-nowrap',
+        pill ? 'rounded-full' : 'rounded-chip',
+        'text-center font-medium',
+        size === 'small' ? cn(pad, 'py-[1px] text-micro') : cn(pad, 'py-[1px] text-secondary'),
+        variant === 'stroke' && !pill ? cn('border bg-transparent', stroke[color]) : soft[color],
+        pill && 'forced-edge',
         className,
       )}
       {...rest}
     >
-      <HugeiconsIcon icon={statusToIcon[status as BadgeStatus] ?? fallbackIcon} size={16} className="size-4 shrink-0" />
-      <span>{status.charAt(0).toUpperCase() + status.slice(1)}</span>
+      {dot && <span className="size-[5px] shrink-0 rounded-full bg-current" />}
+      {hasLead && (
+        <span aria-hidden="true" className="flex size-3.5 shrink-0 items-center justify-center">
+          {lead}
+        </span>
+      )}
+      {children}
     </span>
   )
 }

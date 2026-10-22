@@ -1,32 +1,69 @@
-import { useEffect } from "react";
-import { Topbar } from "../../shared/ui/Topbar";
+import { useEffect, useState } from "react";
+import { Button } from "@proxyshard/shardx-ui-kit";
+import { HeaderMenu, PageBody, PageHeader } from "../../widgets/PageHeader";
 import { usePsAccount } from "../../entities/proxyshard";
-import { PsApiKeyCard } from "../../features/proxyshard";
-import { PsAccountMetrics } from "../../widgets/ProxyShard/PsAccountMetrics";
-import { PsToolbar } from "../../widgets/ProxyShard/PsToolbar";
+import { OpenDashboardButton, PsBuyDialog, PsKeyDialog, PsKeySetup } from "../../features/proxyshard";
+import { PsHeaderFacts } from "../../widgets/ProxyShard/PsHeaderFacts";
 import { PsManagementPanels } from "../../widgets/ProxyShard/PsManagementPanels";
+import { KeyIcon, RefreshIcon } from "../../shared/icons";
+import { useDialogLife } from "../../shared/lib/useDialogLife";
 import { useT } from "../../shared/i18n";
+import { showMeAround } from "../../features/tour";
 
+type View = "panels" | "setup";
+
+/// One wide column: the stat tiles, Usage and Orders. Buy proxies sits in
+/// the header's actions, before Open dashboard (owner, 2026-10-02). Without a
+/// working key the key card is the page; with one, the key moves to the `…`
+/// menu (craft target state, rank 2).
 export function ProxyShardPage() {
   const t = useT();
   const init = usePsAccount((s) => s.init);
+  const key = usePsAccount((s) => s.key);
+  const status = usePsAccount((s) => s.status);
+  const refreshMe = usePsAccount((s) => s.refreshMe);
+  const [keyOpen, setKeyOpen] = useState(false);
+  const keyLife = useDialogLife(keyOpen);
+  const [buying, setBuying] = useState(false);
+  const buyLife = useDialogLife(buying);
   useEffect(() => { init(); }, [init]);
+  // While a key is being read or checked, the body keeps what it showed (the
+  // header says "Checking your key…"): empty before the first answer, so the
+  // setup card never flashes, and no swap during Check again or a new key.
+  const now: View | null = status === "ok" ? "panels" : status === "err" || key === "" ? "setup" : null;
+  const [last, setLast] = useState<View | null>(null);
+  if (now && now !== last) setLast(now);
+  const view = now ?? last;
 
   return (
-    <section className="ps-page flex flex-col">
-      <Topbar crumbs={[t("proxyshard.crumbWorkspace"), "ProxyShard"]} search="" onSearch={() => {}} />
-
-      <PsAccountMetrics />
-
-      <div className="mb-3.5 flex items-end justify-between gap-4">
-        <h1 className="m-0 text-title-h5 text-text-strong-950">ProxyShard</h1>
-        <PsToolbar />
-      </div>
-
-      {/* API key — kept first so it's always on view. */}
-      <PsApiKeyCard />
-
-      <PsManagementPanels />
-    </section>
+    <>
+      <PageHeader
+        title="ProxyShard"
+        help={{ title: t("pageHelp.proxyshard.title"), body: t("pageHelp.proxyshard.body"), onTour: () => showMeAround("proxyshard") }}
+        width="wide"
+        after={<PsHeaderFacts />}
+        actions={
+          <>
+            {view === "panels" && (
+              <Button variant="neutral" mode="stroke" size="xsmall" onClick={() => setBuying(true)}>{t("psBuyCard.open")}</Button>
+            )}
+            <OpenDashboardButton />
+            {view === "panels" && (
+              <HeaderMenu
+                items={[
+                  { label: t("psKey.changeItem"), icon: <KeyIcon className="size-3.5" />, onSelect: () => setKeyOpen(true) },
+                  { label: t("psKey.checkItem"), icon: <RefreshIcon className="size-3.5" />, onSelect: () => void refreshMe() },
+                ]}
+              />
+            )}
+          </>
+        }
+      />
+      <PageBody width="wide">
+        {view === "panels" ? <PsManagementPanels /> : view === "setup" ? <PsKeySetup /> : null}
+      </PageBody>
+      {buyLife.mounted && <PsBuyDialog key={buyLife.session} open={buying} onClose={() => setBuying(false)} />}
+      {keyLife.mounted && <PsKeyDialog key={keyLife.session} open={keyOpen} onClose={() => setKeyOpen(false)} />}
+    </>
   );
 }

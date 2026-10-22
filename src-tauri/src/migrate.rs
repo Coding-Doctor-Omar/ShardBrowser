@@ -9,9 +9,42 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use tauri::Emitter;
 
 static MIGRATING: AtomicBool = AtomicBool::new(false);
+/// A Delete all data that has not finished: its journal
+/// (`reset-in-progress.json`) is in the config folder (reset.rs).
+static RESET_PENDING: AtomicBool = AtomicBool::new(false);
 
+/// True while the data is being moved or reset, or while a reset that did
+/// not finish waits to be undone or finished: nothing starts, runs, writes
+/// through the local API, or moves meanwhile.
 pub fn in_progress() -> bool {
-    MIGRATING.load(Ordering::SeqCst)
+    MIGRATING.load(Ordering::SeqCst) || RESET_PENDING.load(Ordering::SeqCst)
+}
+
+pub fn set_reset_pending(on: bool) {
+    RESET_PENDING.store(on, Ordering::SeqCst);
+}
+
+pub fn reset_pending() -> bool {
+    RESET_PENDING.load(Ordering::SeqCst)
+}
+
+/// Delete all data (reset.rs) takes the same lock, so nothing starts, runs
+/// or moves while it moves the data aside. False when a move (or a reset)
+/// holds it.
+pub fn hold() -> bool {
+    !MIGRATING.swap(true, Ordering::SeqCst)
+}
+
+pub fn release() {
+    MIGRATING.store(false, Ordering::SeqCst);
+}
+
+/// Tests that hold the lock, or that a held lock would change (the local
+/// API's answers), take turns through this.
+#[cfg(test)]
+pub fn serial() -> std::sync::MutexGuard<'static, ()> {
+    static M: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    M.lock().unwrap_or_else(|e| e.into_inner())
 }
 
 /// What the progress bar reads.
@@ -36,6 +69,9 @@ fn emit(app: &tauri::AppHandle, p: Progress) {
 
 /// Move the data root to `dst`. Returns the number of files moved.
 pub fn run(app: &tauri::AppHandle, dst: &Path) -> Result<u64> {
+    if reset_pending() {
+        anyhow::bail!("a reset didn’t finish: restart ShardBrowser to undo or finish it first");
+    }
     if MIGRATING.swap(true, Ordering::SeqCst) {
         anyhow::bail!("a migration is already running");
     }
@@ -154,4 +190,18 @@ fn collect(src: &Path, dst: &Path, out: &mut Vec<(PathBuf, PathBuf)>) -> Result<
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    /// I-4: an unfinished reset closes every door the lock closes.
+    #[test]
+    fn an_unfinished_reset_counts_as_the_lock() {
+        let _serial = super::serial();
+        super::set_reset_pending(true);
+        let locked = super::in_progress();
+        super::set_reset_pending(false);
+        assert!(locked);
+        assert!(!super::in_progress());
+    }
 }

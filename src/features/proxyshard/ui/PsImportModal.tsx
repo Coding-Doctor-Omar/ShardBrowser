@@ -1,7 +1,6 @@
 import { useEffect, useState } from "react";
-import { Checkbox, DialogModal, SegmentControl } from "@proxyshard/shardx-ui-kit";
-import Badge from "../../../shared/ui/Badge";
-import { CSSelect } from "../../../shared/ui/CSSelect";
+import { Badge, Checkbox, DialogModal, SegmentControl } from "@proxyshard/shardx-ui-kit";
+import { SelectField } from "../../../shared/ui/SelectField";
 import { Field } from "../../../shared/ui/Field";
 import { toast } from "../../../shared/model/toast";
 import { useT } from "../../../shared/i18n";
@@ -11,7 +10,7 @@ import { proxyBulkSave } from "../../../entities/proxy";
 
 /// Active-proxy picker: fetch an order's proxies, choose SOCKS5/HTTP and which
 /// IPs to import into the local proxy list (via proxy_bulk_save, which dedups).
-export function PsImportModal({ order, onClose }: { order: PsOrder; onClose: () => void }) {
+export function PsImportModal({ open, order, onClose }: { open: boolean; order: PsOrder; onClose: () => void }) {
   const t = useT();
   const [items, setItems] = useState<PsActiveProxy[] | null>(null);
   const [err, setErr] = useState("");
@@ -19,6 +18,8 @@ export function PsImportModal({ order, onClose }: { order: PsOrder; onClose: () 
   const [sel, setSel] = useState<Set<string>>(new Set());
   const [saving, setSaving] = useState(false);
   const [tag, setTag] = useState("");
+  // The prefix the order came with: only a change of it is unsaved input.
+  const [loadedTag, setLoadedTag] = useState("");
   // Per-IP p0f signature ("" = leave unchanged).
   const [sigByIp, setSigByIp] = useState<Record<string, string>>({});
   // p0f slot accounting from the order detail (available vs already used).
@@ -32,7 +33,9 @@ export function PsImportModal({ order, onClose }: { order: PsOrder; onClose: () 
         setSel(new Set(data.map((d) => d.ip))); // select all by default
         // Prefill each row with its currently-set signature.
         setSigByIp(Object.fromEntries(data.map((d) => [d.ip, d.signature ?? ""])));
-        setTag((r.order_tag && r.order_tag !== "none" ? r.order_tag : "") || `order ${order.order_id}`);
+        const prefix = (r.order_tag && r.order_tag !== "none" ? r.order_tag : "") || t("psImportModal.orderName", { id: order.order_id });
+        setTag(prefix);
+        setLoadedTag(prefix);
       })
       .catch((e) => setErr(String(e)));
     psOrder(order.order_id)
@@ -59,21 +62,21 @@ export function PsImportModal({ order, onClose }: { order: PsOrder; onClose: () 
     if (!items) return;
     const chosen = items.filter((d) => sel.has(d.ip));
     if (chosen.length === 0) { toast.err(t("psImportModal.selectAtLeastOne")); return; }
-    const label = tag.trim() || `order ${order.order_id}`;
+    const label = tag.trim() || t("psImportModal.orderName", { id: order.order_id });
     const entries = chosen
       .map((d) => {
         const port = kind === "http" ? d.http_port : d.socks_port;
         if (!d.ip || !port) return null;
         return {
           id: "",
-          name: `${label} · ${d.ip}`,
+          name: `${label} (${d.ip})`,
           kind,
           host: d.ip,
           port,
           username: d.username ?? "",
           password: d.password ?? "",
           country: "",
-          notes: `ProxyShard order ${order.order_id}`,
+          notes: t("psImportModal.orderNote", { id: order.order_id }),
         };
       })
       .filter(Boolean);
@@ -94,19 +97,20 @@ export function PsImportModal({ order, onClose }: { order: PsOrder; onClose: () 
           toast.ok(sigItems.length === 1
             ? t("psImportModal.p0fSetOne", { n: sigItems.length })
             : t("psImportModal.p0fSetMany", { n: sigItems.length }));
-        } catch (e) { toast.err(t("psImportModal.signatureError", { err: String(e) })); }
+        } catch (e) { toast.fail({ title: t("psImportModal.signatureError"), detail: e }); }
       }
       onClose();
-    } catch (e) { toast.err(String(e)); }
+    } catch (e) { toast.fail({ title: t("psImportModal.failed", { id: order.order_id }), detail: e }); }
     finally { setSaving(false); }
   };
 
   return (
     <DialogModal
-      open
+      open={open}
       onClose={onClose}
       title={t("psImportModal.title", { product: order.product_name, id: order.order_id })}
-      maxWidthClassName="max-w-[880px]"
+      dirty={tag.trim() !== loadedTag.trim()}
+      size="lg"
       confirmLabel={saving ? t("psImportModal.adding") : t("psImportModal.addCount", { n: sel.size })}
       onConfirm={save}
       isLoading={saving}
@@ -121,7 +125,9 @@ export function PsImportModal({ order, onClose }: { order: PsOrder; onClose: () 
           </div>
           <div>
             <SegmentControl
-              size="small"
+              // Named, not a bare "radio group" (Pair 28 review M7).
+              aria-label={t("psImportModal.kindLabel")}
+              size="xsmall"
               value={kind}
               items={[
                 { value: "socks5", label: "SOCKS5" },
@@ -132,43 +138,46 @@ export function PsImportModal({ order, onClose }: { order: PsOrder; onClose: () 
           </div>
         </div>
         {slots && (
-          <p className="m-0 mb-1.5 text-paragraph-xs text-text-soft-400">
+          <p className="m-0 mb-1.5 text-secondary text-text-soft-400">
             {t("psImportModal.p0fSlots", { used: slots.used, avail: slots.avail })}
             {canSetP0f ? t("psImportModal.p0fSlotsFree", { n: free }) : t("psImportModal.p0fSlotsNone")}
           </p>
         )}
-        {!items && !err && <p className="m-0 text-paragraph-xs text-text-soft-400">{t("psImportModal.loading")}</p>}
-        {err && <p className="m-0 text-paragraph-xs text-text-soft-400">{err}</p>}
-        {items && items.length === 0 && <p className="m-0 text-paragraph-xs text-text-soft-400">{t("psImportModal.noActiveProxies")}</p>}
+        {!items && !err && <p className="m-0 text-secondary text-text-soft-400">{t("psImportModal.loading")}</p>}
+        {err && <p className="m-0 text-secondary text-text-soft-400">{err}</p>}
+        {items && items.length === 0 && <p className="m-0 text-secondary text-text-soft-400">{t("psImportModal.noActiveProxies")}</p>}
         {items && items.length > 0 && (
-          <div className="mt-1.5 max-h-[320px] overflow-hidden overflow-y-auto rounded-10 bg-bg-white-0 ring-1 ring-inset ring-stroke-soft-200">
-            <div className="grid items-center gap-2.5 border-b border-stroke-soft-200 bg-bg-weak-50 px-3 py-2" style={{ gridTemplateColumns: "20px 1fr 132px" }}>
-              <Checkbox checked={allChecked} onChange={toggleAll} title={t("psImportModal.selectAll")} />
-              <span className="text-paragraph-xs text-text-soft-400">{t("psImportModal.selectedCount", { n: sel.size, total: items.length })}</span>
-              <span className="text-right text-paragraph-xs text-text-soft-400">{canSetP0f ? "p0f" : ""}</span>
+          <div className="mt-1.5 max-h-[320px] overflow-hidden overflow-y-auto tile">
+            <div className="grid items-center gap-2.5 px-cell py-2" style={{ gridTemplateColumns: "20px 1fr 132px" }}>
+              <Checkbox checked={allChecked} onChange={toggleAll} aria-label={t("psImportModal.selectAll")} />
+              <span className="text-secondary text-text-soft-400">{t("psImportModal.selectedCount", { n: sel.size, total: items.length })}</span>
+              <span className="text-right text-secondary text-text-soft-400">{canSetP0f ? "p0f" : ""}</span>
             </div>
             {items.map((d) => {
               const port = kind === "http" ? d.http_port : d.socks_port;
               return (
                 <div
                   key={d.ip}
-                  className="grid items-center gap-2.5 border-b border-stroke-soft-200 px-3 py-[9px] transition-colors last:border-b-0 hover:bg-bg-weak-50"
+                  // A click anywhere on the row toggles its box; the box's own
+                  // label click is left to the label (one toggle per click).
+                  onClick={(e) => { if (!(e.target as HTMLElement).closest("label,input,button,select,[role=combobox],[role=listbox],[role=option]")) toggle(d.ip); }}
+                  className="row-line row-line-hover relative grid cursor-pointer items-center gap-2.5 px-cell py-[9px] hover:bg-bg-hover"
                   style={{ gridTemplateColumns: "20px minmax(120px,1.3fr) 1fr auto 132px" }}
                 >
-                  <Checkbox checked={sel.has(d.ip)} onChange={() => toggle(d.ip)} />
-                  <span className="mono cursor-pointer text-paragraph-xs text-text-strong-950 transition-colors hover:text-primary-base" onClick={() => toggle(d.ip)}>{d.ip}:{port}</span>
-                  <span className="text-paragraph-xs text-text-soft-400">{d.username}</span>
-                  <Badge color={d.status === "active" ? "success" : "gray"} variant="filled" size="small" dot>
+                  <Checkbox checked={sel.has(d.ip)} onChange={() => toggle(d.ip)} aria-label={t("proxyBulkImporter.selectRow", { host: `${d.ip}:${port}` })} />
+                  <span className="text-mono text-text-strong-950 transition-hover hover:text-primary-text">{d.ip}:{port}</span>
+                  <span className="text-secondary text-text-soft-400">{d.username}</span>
+                  <Badge color={d.status === "active" ? "success" : "gray"} size="small" dot>
                     {d.status}
                   </Badge>
                   {(canSetP0f || d.signature) ? (
                     // Editable when free slots exist, or this IP is already
                     // signed (re-assigning an OS doesn't consume a slot).
                     <div onClick={(e) => e.stopPropagation()}>
-                      <CSSelect value={sigByIp[d.ip] ?? ""} onChange={(v) => setSig(d.ip, v)} options={PS_SIGNATURES} placeholder="p0f" />
+                      <SelectField aria-label={t("psImportModal.p0fFor", { ip: d.ip })} value={sigByIp[d.ip] ?? ""} onChange={(v) => setSig(d.ip, v)} options={PS_SIGNATURES} placeholder="p0f" />
                     </div>
                   ) : (
-                    <span className="text-right text-paragraph-xs text-text-soft-400">—</span>
+                    <span className="text-right text-secondary text-text-soft-400">—</span>
                   )}
                 </div>
               );

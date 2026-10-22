@@ -115,5 +115,10 @@ export function matchesOs(platform: string, os: string): boolean {
   const isAndroid = p.startsWith("android") || p.startsWith("linux arm");
   if (os === "Android") return isAndroid;
   if (os === "Linux") return p.startsWith("linux") && !isAndroid;
+  // An imported fingerprint keeps its navigator.platform: "Win32", "MacIntel".
+  if (os === "Windows") return p.startsWith("win");
+  if (os === "macOS") return p.startsWith("mac");
   return p === os.toLowerCase();
 }
+
+export { ACCENT_HEX, LABEL_COLORS, labelColor, type LabelColorId } from "./labelColors";

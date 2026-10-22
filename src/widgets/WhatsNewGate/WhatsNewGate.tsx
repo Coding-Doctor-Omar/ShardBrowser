@@ -1,12 +1,13 @@
 import { useEffect } from "react";
 import { getVersion } from "@tauri-apps/api/app";
-import { useNav } from "../../shared/model/navigation";
+import { useWhatsNew } from "../../shared/model/whatsNew";
 
 const SEEN_KEY = "shardx-patchlog-seen-version";
 
-/** Opens the patch log on the first run after an update. Renders nothing. */
+/** Opens What's new on the first run after an update, and tells a first
+ *  install from an update (`installKind`) for the welcome. Renders nothing. */
 export function WhatsNewGate() {
-  const setSection = useNav((s) => s.setSection);
+  const setOpen = useWhatsNew((s) => s.setOpen);
 
   useEffect(() => {
     let cancelled = false;
@@ -19,16 +20,25 @@ export function WhatsNewGate() {
         return;
       }
       if (cancelled) return;
-      const seen = localStorage.getItem(SEEN_KEY);
+      // Read before the version is recorded below: no seen version is a
+      // first install, another one an update. A storage that cannot be read
+      // claims neither (nothing extra shows then).
+      let seen: string | null;
+      try {
+        seen = localStorage.getItem(SEEN_KEY);
+      } catch {
+        return;
+      }
+      useWhatsNew.getState().setInstallKind(!seen ? "first" : seen !== version ? "update" : null);
       // A fresh install has nothing to catch up on — record the version and
       // leave the operator on the profile list.
-      localStorage.setItem(SEEN_KEY, version);
+      try { localStorage.setItem(SEEN_KEY, version); } catch { /* private mode: asked again next start */ }
       if (seen && seen !== version) {
-        setSection("patchlog");
+        setOpen(true);
       }
     })();
     return () => { cancelled = true; };
-  }, [setSection]);
+  }, [setOpen]);
 
   return null;
 }

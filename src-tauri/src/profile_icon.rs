@@ -24,20 +24,29 @@ struct Geometry {
     squircle: bool,
     shadow: bool,
     outline: bool,
+    /// Whether the body itself carries the profile's colour.
+    ///
+    /// A macOS icon does not follow the system theme — the same file is shown
+    /// on a light Dock and on a dark one — so it has to read on both. A white
+    /// card with a thin coloured band does not: against a dark Dock it is a
+    /// pale blank with the one thing that tells profiles apart reduced to a
+    /// stripe a few pixels tall. Every ordinary Mac icon is a filled shape,
+    /// so this one is too, and the profile's colour is what fills it.
+    coloured_body: bool,
 }
 
 const fn geometry() -> Geometry {
     #[cfg(target_os = "macos")]
     {
-        Geometry { margin: 0.098, radius: 0.0, squircle: true, shadow: true, outline: false }
+        Geometry { margin: 0.098, radius: 0.0, squircle: true, shadow: true, outline: false, coloured_body: true }
     }
     #[cfg(target_os = "windows")]
     {
-        Geometry { margin: 0.045, radius: 0.115, squircle: false, shadow: false, outline: false }
+        Geometry { margin: 0.045, radius: 0.115, squircle: false, shadow: false, outline: false, coloured_body: false }
     }
     #[cfg(not(any(target_os = "macos", target_os = "windows")))]
     {
-        Geometry { margin: 0.055, radius: 0.165, squircle: false, shadow: false, outline: true }
+        Geometry { margin: 0.055, radius: 0.165, squircle: false, shadow: false, outline: true, coloured_body: false }
     }
 }
 
@@ -252,7 +261,16 @@ fn draw_text(
 /// Composes the icon for `name` in `color` (None = derived from the name) and
 /// returns the PNG path, reusing the cached file when neither has changed.
 pub fn ensure_icon(cache_dir: &Path, name: &str, color: Option<&str>) -> Result<PathBuf> {
-    let key = format!("{name}\u{1}{}", color.unwrap_or(""));
+    // The drawing is part of the key, not just the name and the colour. The
+    // folder outlives updates, so when the mark or the layout changes an
+    // existing profile would otherwise keep showing the icon drawn by the
+    // version before — until somebody renamed it.
+    let key = format!(
+        "{name}\u{1}{}\u{1}{}\u{1}{}",
+        color.unwrap_or(""),
+        env!("CARGO_PKG_VERSION"),
+        MARK.len()
+    );
     let mut h: u64 = 1469598103934665603;
     for b in key.as_bytes() {
         h ^= *b as u64;
@@ -288,18 +306,27 @@ pub fn ensure_icon(cache_dir: &Path, name: &str, color: Option<&str>) -> Result<
         }
     }
 
-    // White body.
-    paint.set_color(Color::from_rgba8(255, 255, 255, 255));
+    let tint = color.and_then(parse_hex).unwrap_or_else(|| accent(name));
+
+    // The body: the profile's colour where the icon has to carry it alone,
+    // white where the surface behind it is predictable.
+    paint.set_color(if g.coloured_body {
+        tint
+    } else {
+        Color::from_rgba8(255, 255, 255, 255)
+    });
     pix.fill_path(&body, &paint, FillRule::Winding, Transform::identity(), None);
 
-    // Accent band, clipped to the body so its corners follow the same curve.
+    // The band the mark sits on, clipped to the body so its corners follow
+    // the same curve. On a coloured body it is a darker shade of the same
+    // colour rather than the colour itself, which would be invisible.
     let band_h = y0 + (y1 - y0) * 0.30;
     let mut band = PathBuilder::new();
     band.push_rect(tiny_skia::Rect::from_ltrb(0.0, 0.0, SIZE, band_h).context("band rect")?);
     if let Some(rect) = band.finish() {
         let mut clip = tiny_skia::Mask::new(s, s).context("mask")?;
         clip.fill_path(&body, FillRule::Winding, true, Transform::identity());
-        paint.set_color(color.and_then(parse_hex).unwrap_or_else(|| accent(name)));
+        paint.set_color(if g.coloured_body { shade(tint, 0.72) } else { tint });
         pix.fill_path(&rect, &paint, FillRule::Winding, Transform::identity(), Some(&clip));
         draw_mark(&mut pix, cx, (y0 + band_h) / 2.0, (band_h - y0) * 0.62);
     }
@@ -316,10 +343,34 @@ pub fn ensure_icon(cache_dir: &Path, name: &str, color: Option<&str>) -> Result<
     let (px, lines) = layout(&font, name, (x1 - x0) * 0.82, (y1 - top) * 0.72, 3);
     let block_h = lines.len() as f32 * px * 1.16;
     let text_top = top + ((y1 - top) - block_h) / 2.0;
-    draw_text(&mut pix, &font, &lines, px, cx, text_top, (34, 36, 42));
+    // Dark type on a white card; white type on a coloured one. Which way
+    // round is decided by the colour the operator picked, not by the theme,
+    // because the file is the same on both.
+    let ink = if g.coloured_body {
+        if luminance(tint) > 0.62 { (28, 30, 36) } else { (255, 255, 255) }
+    } else {
+        (34, 36, 42)
+    };
+    draw_text(&mut pix, &font, &lines, px, cx, text_top, ink);
 
     pix.save_png(&out).context("write icon png")?;
     Ok(out)
+}
+
+/// The same colour, darker, for the band under the mark.
+fn shade(c: Color, factor: f32) -> Color {
+    Color::from_rgba8(
+        (c.red() * 255.0 * factor) as u8,
+        (c.green() * 255.0 * factor) as u8,
+        (c.blue() * 255.0 * factor) as u8,
+        255,
+    )
+}
+
+/// Perceived brightness, for deciding whether type on this colour is dark or
+/// light. A pale colour an operator picked must not end up white on white.
+fn luminance(c: Color) -> f32 {
+    0.2126 * c.red() + 0.7152 * c.green() + 0.0722 * c.blue()
 }
 
 /// The product mark, centred on (`cx`, `cy`) at `height` pixels.
@@ -370,4 +421,3 @@ fn mark_pixmap() -> Option<&'static Pixmap> {
         })
         .as_ref()
 }
-

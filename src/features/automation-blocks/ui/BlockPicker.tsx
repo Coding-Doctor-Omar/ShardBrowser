@@ -1,23 +1,36 @@
-import { useEffect, useState } from "react";
-import { Modal } from "@proxyshard/shardx-ui-kit";
+import { useEffect, useId, useRef, useState } from "react";
+import { Button, cn, Input, Modal, Tooltip } from "@proxyshard/shardx-ui-kit";
 import {
   automationModules,
+  blockIcon,
+  categoryIcon,
   PALETTE,
   type BlockSpec,
   type ModuleInfo,
 } from "../../../entities/automation";
 import { useT } from "../../../shared/i18n";
+import { StepIcon } from "../../../shared/icons";
 
-type Props = { onPick: (spec: BlockSpec) => void; onClose: () => void };
+type Props = {
+  open: boolean;
+  /** Changes when the modules dialog above the library closes: the modules are read again. */
+  modulesSeen?: number;
+  onPick: (spec: BlockSpec) => void;
+  /** Opens the modules dialog, over the library. */
+  onManageModules: () => void;
+  onClose: () => void;
+};
 
 /** The library, grouped. Adding a step by hand is the ordinary way to build a
- *  project; recording from the live browser is the shortcut. */
-export function BlockPicker({ onPick, onClose }: Props) {
+ *  project; recording from the live browser is the shortcut. Its footer holds
+ *  the one way to the modules (Manage modules): they add steps, so they are
+ *  managed from where steps are added. */
+export function BlockPicker({ open, modulesSeen = 0, onPick, onManageModules, onClose }: Props) {
   const t = useT();
   const [cat, setCat] = useState(PALETTE[0].id);
   const [q, setQ] = useState("");
   const [modules, setModules] = useState<ModuleInfo[]>([]);
-  useEffect(() => { automationModules().then(setModules).catch(() => {}); }, []);
+  useEffect(() => { automationModules().then(setModules).catch(() => {}); }, [modulesSeen]);
 
   // A module's blocks sit in the library beside the built-in ones. Each block
   // chooses its group: a built-in one (by label or id), a new named group, or —
@@ -64,76 +77,165 @@ export function BlockPicker({ onPick, onClose }: Props) {
     ...[...extra.values()].filter((g) => !PALETTE.some((c) => c.id === g.id)),
   ];
 
+  // The chosen category can vanish under the open library: a module removed
+  // in the Modules dialog took its group with it. The first category then.
+  const catId = all.some((c) => c.id === cat) ? cat : PALETTE[0].id;
   const query = q.trim().toLowerCase();
+  // Searched on what the person sees, not on the key behind it.
+  const hits = (c: { blocks: BlockSpec[] }) =>
+    c.blocks.filter(
+      (b) => t(b.label).toLowerCase().includes(query) || t(b.about).toLowerCase().includes(query),
+    );
   const groups = query
-    ? all.map((c) => ({
-        ...c,
-        blocks: c.blocks.filter(
-          (b) =>
-            // Searched on what the person sees, not on the key behind it.
-            t(b.label).toLowerCase().includes(query) ||
-            t(b.about).toLowerCase().includes(query),
-        ),
-      })).filter((c) => c.blocks.length > 0)
-    : all.filter((c) => c.id === cat);
+    ? all.map((c) => ({ ...c, blocks: hits(c) })).filter((c) => c.blocks.length > 0)
+    : all.filter((c) => c.id === catId);
+  const hitCount = new Map(groups.map((g) => [g.id, g.blocks.length]));
 
+  // One flat run of rows for the keys: Arrow moves, Enter adds. The pointer
+  // moves the same marker, so two rows never wear a fill at once.
+  const flat = groups.flatMap((g) => g.blocks.map((b) => ({ b, cat: g.id })));
+  const [active, setActive] = useState(0);
+  const idx = Math.min(active, Math.max(flat.length - 1, 0));
+  const activeCat = flat[idx]?.cat ?? catId;
+  const uid = useId();
+  const listRef = useRef<HTMLDivElement>(null);
+  const [scrolling, setScrolling] = useState(false);
+  const scrollTimer = useRef<number | undefined>(undefined);
+  useEffect(() => () => window.clearTimeout(scrollTimer.current), []);
+  useEffect(() => { setActive(0); }, [query, catId]);
+  useEffect(() => {
+    listRef.current?.querySelector(`[data-row="${idx}"]`)?.scrollIntoView({ block: "nearest" });
+  }, [idx, flat.length]);
+
+  const pick = (b: BlockSpec) => { onPick(b); onClose(); };
+  const onKeyDown = (e: React.KeyboardEvent) => {
+    if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+      e.preventDefault();
+      if (!flat.length) return;
+      setActive((idx + (e.key === "ArrowDown" ? 1 : flat.length - 1)) % flat.length);
+    } else if (e.key === "Enter" && flat[idx]) {
+      e.preventDefault();
+      pick(flat[idx].b);
+    }
+  };
+
+  let row = -1;
   return (
-    <Modal open onClose={onClose}>
-      <div className="flex h-[520px] w-[720px] max-w-full flex-col gap-3 p-5">
-        <div className="flex items-center justify-between gap-3">
-          <h2 className="m-0 text-title-h6 text-text-strong-950">{t("blockPicker.title")}</h2>
-          <input
-            className="h-8 w-[240px] rounded-8 bg-bg-white-0 px-2.5 text-paragraph-sm text-text-strong-950 ring-1 ring-inset ring-stroke-soft-200 outline-none placeholder:text-text-soft-400 focus:ring-primary-base"
-            placeholder={t("blockPicker.searchPlaceholder")}
-            value={q}
-            onChange={(e) => setQ(e.target.value)}
-            autoFocus
-          />
-        </div>
+    <Modal
+      open={open}
+      onClose={onClose}
+      title={t("blockPicker.title")}
+      size="lg"
+      padded={false}
+      footer={
+        <Button variant="neutral" mode="stroke" size="xsmall" className="mr-auto" onClick={onManageModules}>
+          {t("blockPicker.manageModules")}
+        </Button>
+      }
+    >
+      <div className="flex flex-col gap-2 px-inset-dialog pb-2 pt-2">
+        <Input
+          inputSize="xsmall"
+          placeholder={t("blockPicker.searchPlaceholder")}
+          aria-label={t("blockPicker.searchPlaceholder")}
+          role="combobox"
+          aria-expanded="true"
+          aria-controls={`${uid}-list`}
+          aria-activedescendant={flat.length ? `${uid}-${idx}` : undefined}
+          value={q}
+          onChange={(e) => setQ(e.target.value)}
+          onKeyDown={onKeyDown}
+          data-autofocus
+        />
 
-        <div className="flex min-h-0 flex-1 gap-3">
-          {!query && (
-            <div className="flex w-[150px] shrink-0 flex-col gap-1">
-              {all.map((c) => (
+        <div className="flex max-h-[360px] min-h-0 gap-2">
+          <div role="group" aria-label={t("blockPicker.categories")} className="flex w-[150px] shrink-0 flex-col gap-0.5 overflow-y-auto">
+            {all.map((c) => {
+              const chosen = c.id === (query ? activeCat : catId);
+              const n = hitCount.get(c.id);
+              return (
+                // eslint-disable-next-line no-restricted-syntax -- list row; the kit's vertical Tabs cannot carry a hit count
                 <button
                   key={c.id}
                   type="button"
-                  className={`rounded-8 px-2.5 py-1.5 text-left text-label-sm transition-colors ${
-                    c.id === cat
-                      ? "bg-primary-alpha-10 text-primary-base"
-                      : "text-text-sub-600 hover:bg-bg-weak-50"
-                  }`}
-                  onClick={() => setCat(c.id)}
+                  tabIndex={-1}
+                  aria-pressed={chosen}
+                  className={cn(
+                    "flex h-[28px] shrink-0 items-center justify-between gap-2 rounded-8 px-2 text-left text-ui transition-hover",
+                    chosen ? "bg-bg-active text-text-strong-950" : "text-text-sub-600 hover:bg-bg-hover hover:text-text-strong-950",
+                    query && !n && "text-text-soft-400",
+                  )}
+                  onClick={() => {
+                    if (!query) { setCat(c.id); return; }
+                    const at = flat.findIndex((f) => f.cat === c.id);
+                    if (at >= 0) setActive(at);
+                  }}
                 >
-                  {t(c.label)}
+                  <span className="flex min-w-0 items-center gap-2">
+                    <StepIcon
+                      icon={categoryIcon(c.id)}
+                      className={cn("size-3.5 shrink-0", chosen ? "text-text-strong-950" : "text-text-soft-400")}
+                    />
+                    <span className="truncate">{t(c.label)}</span>
+                  </span>
+                  {query && n ? <span className="text-secondary tabular-nums text-text-soft-400">{n}</span> : null}
                 </button>
-              ))}
-            </div>
-          )}
+              );
+            })}
+          </div>
 
-          <div className="min-h-0 flex-1 overflow-y-auto pr-1">
+          <div
+            ref={listRef}
+            id={`${uid}-list`}
+            role="listbox"
+            aria-label={t("blockPicker.title")}
+            data-scrolling={scrolling ? "" : undefined}
+            onScroll={() => {
+              setScrolling(true);
+              window.clearTimeout(scrollTimer.current);
+              scrollTimer.current = window.setTimeout(() => setScrolling(false), 700);
+            }}
+            className="scrollbar-on-scroll min-h-0 flex-1 overflow-y-auto"
+          >
             {groups.map((c) => (
-              <div key={c.id} className="mb-3 last:mb-0">
+              <div key={c.id} role="group" aria-label={t(c.label)}>
                 {query && (
-                  <div className="mb-1 text-subheading-2xs text-text-soft-400">{t(c.label)}</div>
+                  <div className="px-2 pb-1 pt-2 text-secondary font-medium text-text-soft-400">{t(c.label)}</div>
                 )}
-                <div className="flex flex-col gap-1.5">
-                  {c.blocks.map((b) => (
-                    <button
+                {c.blocks.map((b) => {
+                  row += 1;
+                  const mine = row;
+                  return (
+                    <div
                       key={b.kind}
-                      type="button"
-                      className="rounded-10 px-3 py-2 text-left ring-1 ring-inset ring-stroke-soft-200 transition-colors hover:bg-bg-weak-50 hover:ring-primary-base"
-                      onClick={() => { onPick(b); onClose(); }}
+                      id={`${uid}-${mine}`}
+                      role="option"
+                      aria-selected={mine === idx}
+                      data-row={mine}
+                      className={cn(
+                        "flex h-[44px] cursor-default flex-col justify-center rounded-8 px-2",
+                        mine === idx && "bg-bg-active",
+                      )}
+                      onMouseMove={() => { if (mine !== idx) setActive(mine); }}
+                      onClick={() => pick(b)}
                     >
-                      <div className="text-label-sm text-text-strong-950">{t(b.label)}</div>
-                      <div className="text-paragraph-xs text-text-soft-400">{t(b.about)}</div>
-                    </button>
-                  ))}
-                </div>
+                      <div className="flex min-w-0 items-center gap-2">
+                        <StepIcon
+                          icon={blockIcon(b.kind, c.id)}
+                          className={cn("size-3.5 shrink-0", mine === idx ? "text-text-strong-950" : "text-text-soft-400")}
+                        />
+                        <span className="truncate text-ui font-medium text-text-strong-950">{t(b.label)}</span>
+                      </div>
+                      <Tooltip content={t(b.about)} whenTruncated warm={false}>
+                        <div className="truncate pl-[22px] text-secondary text-text-soft-400">{t(b.about)}</div>
+                      </Tooltip>
+                    </div>
+                  );
+                })}
               </div>
             ))}
             {broken.length > 0 && !query && (
-              <div className="mt-2 rounded-8 bg-warning-alpha-16 px-2.5 py-1.5 text-paragraph-xs text-warning-base">
+              <div className="mt-2 rounded-8 bg-warning-alpha-16 px-2.5 py-1.5 text-secondary text-warning-base">
                 {broken.length === 1
                   ? t("blockPicker.modulesFailedOne", { n: broken.length })
                   : t("blockPicker.modulesFailedMany", { n: broken.length })}{" "}
@@ -141,7 +243,7 @@ export function BlockPicker({ onPick, onClose }: Props) {
               </div>
             )}
             {groups.length === 0 && (
-              <p className="m-0 px-1 py-6 text-center text-paragraph-sm text-text-soft-400">
+              <p className="m-0 px-1 py-6 text-center text-balance text-body text-text-soft-400">
                 {t("blockPicker.noMatches", { q })}
               </p>
             )}

@@ -15,6 +15,11 @@ export type ProfileMeta = {
   /// the engine exits — for the currently-running session add `running[id]`
   /// (Date.now() - sessionStartTs) on top.
   total_runtime_ms: number;
+  /// How many times it was started, and the bytes its proxy carried for it,
+  /// in all (backend B41). Absent until the backend sends them: Peek's stat
+  /// strip shows only the stats it has.
+  launches?: number | null;
+  traffic_bytes?: number | null;
   /// Icon accent, "#rrggbb"; null = derived from the name, as the browser does.
   color: string | null;
   /// Extension ids from the library, loaded at launch.
@@ -43,11 +48,18 @@ export type ProfileForm = {
   /// Claimed screen, `0` = whatever the fingerprint template says.
   screen_w: number;
   screen_h: number;
+  /// The operator picked the resolution instead of taking the template's.
+  /// Saved to `_meta`; the launcher keeps the global screen setting out of a
+  /// launch that has one.
+  screen_custom: boolean;
   /// Cookies file picked in the editor, imported once the profile exists.
   /// Editor state, not part of the fingerprint — `toStored` does not write it.
   cookies_file: string;
 
   gpu_preset_id: string;
+  /** Report this computer's own graphics card instead of the template's.
+   *  Offered only while the profile's OS is this computer's. */
+  real_gpu: boolean;
   user_agent: string;
   hardware_concurrency: number;
   device_memory: number;

@@ -1,5 +1,7 @@
 import { cn } from '@/lib/cn'
 import { Link } from '@/lib/link'
+import { ICON_STROKE } from '@/lib/icons'
+import { fill, useLabels } from '@/lib/labels'
 import { HugeiconsIcon } from '@hugeicons/react'
 import {
   ArrowLeft01Icon,
@@ -40,7 +42,7 @@ export type PaginationProps = {
   /** "Page X of Y" text on the left. Default true. */
   showInfo?: boolean
   infoLabel?: (page: number, total: number) => React.ReactNode
-  /** Cell shape. Default 'default' (rounded-8); 'full' → pills. */
+  /** Cell shape. Default 'default' (the control radius, 8 px); 'full' → pills. */
   rounded?: 'default' | 'full'
   className?: string
 }
@@ -98,9 +100,10 @@ export default function Pagination({
   rounded = 'default',
   className,
 }: PaginationProps) {
+  const labels = useLabels()
   const current = Math.min(Math.max(page, 1), Math.max(totalPages, 1))
   const items = getItems(current, totalPages, siblingCount, boundaryCount)
-  const cellRadius = rounded === 'full' ? 'rounded-full' : 'rounded-lg'
+  const cellRadius = rounded === 'full' ? 'rounded-full' : 'rounded-control'
 
   const defaultHref = (p: number): string => {
     // basePath mode — build the URL from the provided path (+ its own query).
@@ -124,7 +127,7 @@ export default function Pagination({
   const hrefFor = getPageHref ?? defaultHref
 
   const cellBase = cn(
-    'flex size-8 shrink-0 items-center justify-center text-label-sm transition-colors select-none',
+    'flex size-8 shrink-0 items-center justify-center text-ui focus-ring transition-hover select-none',
     cellRadius,
   )
 
@@ -147,8 +150,8 @@ export default function Pagination({
       disabled
         ? 'pointer-events-none text-text-disabled-300'
         : active
-          ? 'bg-bg-weak-50 text-text-strong-950'
-          : 'bg-bg-white-0 text-text-sub-600 ring-1 ring-inset ring-stroke-soft-200 hover:bg-bg-weak-50 hover:text-text-strong-950',
+          ? 'bg-bg-active text-text-strong-950'
+          : 'bg-bg-white-0 text-text-sub-600 ring-1 ring-inset ring-stroke-soft-200 hover:bg-bg-hover hover:text-text-strong-950',
     )
     const handleClick = (e: React.MouseEvent) => {
       if (disabled || active) {
@@ -178,7 +181,7 @@ export default function Pagination({
       cellBase,
       disabled
         ? 'pointer-events-none text-text-disabled-300'
-        : 'text-text-sub-600 hover:bg-bg-weak-50 hover:text-text-strong-950',
+        : 'text-text-sub-600 hover:bg-bg-hover hover:text-text-strong-950',
     )
     if (asLinks && !disabled) {
       return (
@@ -195,22 +198,22 @@ export default function Pagination({
   }
 
   return (
-    <nav aria-label="Pagination" className={cn('flex w-full items-center justify-between gap-4', className)}>
+    <nav aria-label={labels.pagination} className={cn('flex w-full items-center justify-between gap-[16px]', className)}>
       {showInfo ? (
-        <div className="hidden w-[200px] shrink-0 text-paragraph-sm text-text-sub-600 sm:block">
-          {infoLabel ? infoLabel(current, totalPages) : `Page ${current} of ${totalPages}`}
+        <div className="hidden w-[200px] shrink-0 text-body text-text-sub-600 sm:block">
+          {infoLabel ? infoLabel(current, totalPages) : fill(labels.pageOf, { current, total: totalPages })}
         </div>
       ) : null}
 
-      <div className="flex flex-1 items-center justify-center gap-1.5 sm:gap-3">
+      <div className="flex flex-1 items-center justify-center gap-[6px] sm:gap-[12px]">
         {showFirstLast && (
-          <Arrow targetPage={1} disabled={current <= 1} ariaLabel="First page">
-            <HugeiconsIcon icon={ArrowLeftDoubleIcon} className="size-5" />
+          <Arrow targetPage={1} disabled={current <= 1} ariaLabel={labels.firstPage}>
+            <HugeiconsIcon icon={ArrowLeftDoubleIcon} strokeWidth={ICON_STROKE} className="size-3.5" />
           </Arrow>
         )}
         {showPrevNext && (
-          <Arrow targetPage={current - 1} disabled={current <= 1} ariaLabel="Previous page">
-            <HugeiconsIcon icon={ArrowLeft01Icon} className="size-5" />
+          <Arrow targetPage={current - 1} disabled={current <= 1} ariaLabel={labels.previousPage}>
+            <HugeiconsIcon icon={ArrowLeft01Icon} strokeWidth={ICON_STROKE} className="size-3.5" />
           </Arrow>
         )}
 
@@ -220,20 +223,20 @@ export default function Pagination({
               …
             </span>
           ) : (
-            <Control key={item} targetPage={item} active={item === current} ariaLabel={`Page ${item}`}>
+            <Control key={item} targetPage={item} active={item === current} ariaLabel={fill(labels.pageN, { page: item })}>
               {item}
             </Control>
           ),
         )}
 
         {showPrevNext && (
-          <Arrow targetPage={current + 1} disabled={current >= totalPages} ariaLabel="Next page">
-            <HugeiconsIcon icon={ArrowRight01Icon} className="size-5" />
+          <Arrow targetPage={current + 1} disabled={current >= totalPages} ariaLabel={labels.nextPage}>
+            <HugeiconsIcon icon={ArrowRight01Icon} strokeWidth={ICON_STROKE} className="size-3.5" />
           </Arrow>
         )}
         {showFirstLast && (
-          <Arrow targetPage={totalPages} disabled={current >= totalPages} ariaLabel="Last page">
-            <HugeiconsIcon icon={ArrowRightDoubleIcon} className="size-5" />
+          <Arrow targetPage={totalPages} disabled={current >= totalPages} ariaLabel={labels.lastPage}>
+            <HugeiconsIcon icon={ArrowRightDoubleIcon} strokeWidth={ICON_STROKE} className="size-3.5" />
           </Arrow>
         )}
       </div>

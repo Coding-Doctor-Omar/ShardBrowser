@@ -29,7 +29,7 @@ pub fn resolve_binary() -> Result<PathBuf> {
         }
     }
     #[cfg(target_os = "macos")]
-    let guess = "/Users/kritos/Documents/GitHub/ShardXBrowser/build/src/out/Release_GN_arm64/ShardX.app/Contents/MacOS/ShardX";
+    let guess = "/Applications/ShardX.app/Contents/MacOS/ShardX";
     #[cfg(target_os = "windows")]
     let guess = "C:\\Program Files\\ShardX\\ShardX.exe";
     #[cfg(target_os = "linux")]
@@ -38,7 +38,141 @@ pub fn resolve_binary() -> Result<PathBuf> {
     if pb.exists() {
         return Ok(pb);
     }
-    anyhow::bail!("ShardX browser not installed yet — open Settings to download, or configure Browser path manually")
+    anyhow::bail!("ShardBrowser browser engine not installed yet — open Settings to download, or configure Browser path manually")
+}
+
+/// Why a launch is refused while the data lock (migrate.rs) is held.
+pub const LOCKED: &str = "ShardBrowser is moving or resetting its data. Try again when that finishes.";
+/// Why a launch that was under way stops short of starting the browser.
+pub const CANCELLED: &str = "launch cancelled: ShardBrowser is moving or resetting its data.";
+
+/// Launches between their first step and their browser being tracked.
+static LAUNCHING: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// Counts one launch from its first step to its return. Taken before the lock
+/// is checked, and the reset takes the lock before it reads the count (both
+/// SeqCst): a launch the reset does not see is one that then sees the lock.
+pub struct Launching(());
+
+impl Launching {
+    pub fn start() -> Self {
+        LAUNCHING.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Launching(())
+    }
+}
+
+impl Drop for Launching {
+    fn drop(&mut self) {
+        LAUNCHING.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+/// How many launches are under way (reset.rs refuses while any is).
+pub fn in_flight() -> usize {
+    LAUNCHING.load(std::sync::atomic::Ordering::SeqCst)
+}
+
+/// The last look before the browser starts: a launch that waited on the
+/// network while the lock was taken stops here, as cancelled; so does one the
+/// person cancelled (`launch_cancel`).
+fn may_spawn(profile_id: &str) -> Result<()> {
+    if crate::migrate::in_progress() {
+        anyhow::bail!("{CANCELLED}");
+    }
+    check_cancel(profile_id)
+}
+
+/// Why a launch the person cancelled ends: the UI tells it apart from a failure.
+pub const CANCELLED_BY_USER: &str = "launch cancelled";
+
+/// Profiles whose launch was cancelled while it was still on its way.
+static CANCELS: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+
+/// Cancel a launch that has not started its browser yet: the slow network
+/// steps finish their call, and the launch stops at the next look, at the
+/// latest just before the browser would start. A launch that already started
+/// its browser is past cancelling; the UI stops that one.
+pub fn cancel(profile_id: &str) {
+    if let Ok(mut c) = CANCELS.lock() {
+        if !c.iter().any(|p| p == profile_id) {
+            c.push(profile_id.to_string());
+        }
+    }
+}
+
+fn check_cancel(profile_id: &str) -> Result<()> {
+    let hit = CANCELS
+        .lock()
+        .map(|c| c.iter().any(|p| p == profile_id))
+        .unwrap_or(false);
+    if hit {
+        anyhow::bail!("{CANCELLED_BY_USER}");
+    }
+    Ok(())
+}
+
+/// Clears a profile's cancel when its launch starts and when it ends, however
+/// it ends: a cancel is for the launch that was on its way, never for the next
+/// one (a cancel that arrives just after a launch returned would otherwise
+/// stop the following one).
+struct CancelScope(String);
+
+impl CancelScope {
+    fn start(profile_id: &str) -> Self {
+        if let Ok(mut c) = CANCELS.lock() {
+            c.retain(|p| p != profile_id);
+        }
+        CancelScope(profile_id.to_string())
+    }
+}
+
+impl Drop for CancelScope {
+    fn drop(&mut self) {
+        if let Ok(mut c) = CANCELS.lock() {
+            c.retain(|p| *p != self.0);
+        }
+    }
+}
+
+/// Give a profile a `window` block when it claims a screen but names no window.
+///
+/// The engine turns `window.outer_*` into `--window-size`; with nothing to turn,
+/// Chromium sizes the window from the real monitor's work area and the result
+/// has no relation to the screen the profile claims. Shape follows the
+/// library's own desktop entries: the window fills the work area one pixel
+/// short, and the viewport is 87 px shorter again for the browser's chrome.
+/// Returns the block it derived, so the caller can also put it in the profile.
+fn fill_window_from_screen(
+    raw: &mut serde_json::Map<String, serde_json::Value>,
+) -> Option<serde_json::Value> {
+    let scr = raw.get("screen").and_then(|v| v.as_object())?;
+    let w = scr.get("width").and_then(|v| v.as_i64()).unwrap_or(0);
+    let h = scr.get("height").and_then(|v| v.as_i64()).unwrap_or(0);
+    if w <= 0 || h <= 0 {
+        return None;
+    }
+    let avail_w = scr.get("avail_width").and_then(|v| v.as_i64()).unwrap_or(w).max(1);
+    let avail_h = scr.get("avail_height").and_then(|v| v.as_i64()).unwrap_or(h).max(1);
+
+    // Only when it is missing or says nothing: a profile that names its own
+    // window was captured that way and is left exactly as it is.
+    if profile::names_a_window(raw) {
+        return None;
+    }
+
+    let outer_h = (avail_h - 1).max(1);
+    let mut win = serde_json::Map::new();
+    win.insert("outer_width".into(), serde_json::Value::from(avail_w));
+    win.insert("outer_height".into(), serde_json::Value::from(outer_h));
+    win.insert("inner_width".into(), serde_json::Value::from(avail_w));
+    win.insert("inner_height".into(), serde_json::Value::from((outer_h - 87).max(1)));
+    let win = serde_json::Value::Object(win);
+    raw.insert("window".into(), win.clone());
+    eprintln!(
+        "[launcher] display: profile named no window — derived {avail_w}x{outer_h} \
+         from its claimed {w}x{h} screen"
+    );
+    Some(win)
 }
 
 pub async fn launch_profile(
@@ -59,6 +193,14 @@ pub async fn launch_profile_synced(
     bus_port: u16,
     bus_token: &str,
 ) -> Result<LaunchOutcome> {
+    // Counted from here to the return, before the slow network checks.
+    let _launching = Launching::start();
+    let _cancel_scope = CancelScope::start(profile_id);
+    // Every door (UI, local API, a run's own starts) comes through here:
+    // nothing starts while the data is being moved or reset.
+    if crate::migrate::in_progress() {
+        anyhow::bail!("{LOCKED}");
+    }
     // One browser per profile: two children sharing a user-data dir corrupt each other's
     // state, and the second displaces the first in the tracker, leaving it unstoppable.
     if Tracker::shared().is_running(profile_id) {
@@ -67,6 +209,19 @@ pub async fn launch_profile_synced(
     let bin = resolve_binary()?;
     let stored = profile::load_raw(profile_id)?;
     let udd = profile::user_data_dir(profile_id)?;
+
+    // A browser left over from an earlier run of the launcher holds the
+    // profile's lock but is in nobody's tracker. Starting another one does
+    // not open a second window: Chromium's singleton hands the command line
+    // to the browser already there and the new process exits at once, so the
+    // profile looked like it refused to start while its window sat open on
+    // the desktop. Say what is actually happening instead.
+    if crate::reset::lock_is_live(&udd) {
+        anyhow::bail!(
+            "profile {profile_id} is already open in a browser this launcher did not start \
+             — close that window, then start it again"
+        );
+    }
 
     // Stored proxy by id, else ephemeral inline (quick profiles, not in store).
     let bound_proxy: Option<proxy::ProxyEntry> = stored
@@ -124,13 +279,48 @@ pub async fn launch_profile_synced(
         false
     };
 
+    // "Real screen" is a global switch, and it exists for macOS profiles. A
+    // Win/Linux profile whose resolution the operator picked in the editor is
+    // left out of it, or the switch would report the host's screen over exactly
+    // the one they asked for.
+    let s = settings::load()?;
+    let use_real_screen =
+        s.screen_resolution_mode.as_deref() == Some("real") && !stored.meta.screen_custom;
+
     // Strip `_meta` wrapper and resolve "auto" sentinels before serialising.
     let mut raw = stored.config.clone();
     raw.remove("_meta");
     resolve_auto_fields(&mut raw, bound_proxy.as_ref()).await;
-    // A profile made on another machine carries that machine's screen; on Win/Linux
-    // the window has to fit this monitor. "real" mode skips — the core drops it anyway.
-    if settings::load()?.screen_resolution_mode.as_deref() != Some("real") {
+    // The proxy probe and the geo lookup are the slow part: a cancel made
+    // while they ran stops here, before anything is written.
+    check_cancel(profile_id)?;
+
+    // A window to go with the claimed screen. Without one the engine passes no
+    // --window-size, and Chromium falls back to the REAL monitor's work area —
+    // a profile claiming 1920x1080 then opens in a window sized for the host
+    // and sitting outside its own claimed screen. Profiles saved before the
+    // editor wrote this block are missing it, so it is derived here.
+    if let Some(win) = fill_window_from_screen(&mut raw) {
+        // And kept: the block follows from the profile's own screen, nothing
+        // about this machine, so writing it back fixes the profile for good
+        // instead of re-deriving it on every start. Temporary profiles are
+        // deleted on close — there is nothing to fix. A failure here only
+        // costs the correction; this launch already has its window.
+        if !stored.meta.temporary && !crate::migrate::in_progress() {
+            match profile::fill_missing_window(profile_id, win) {
+                Ok(true) => eprintln!("[launcher] display: wrote the window block into the profile"),
+                Ok(false) => {}
+                Err(e) => eprintln!("[launcher] display: could not store the window block: {e}"),
+            }
+        }
+    }
+
+    // Whenever the profile's own screen is the one being used, it still has to
+    // fit this monitor: the editor offers only sizes the display can hold, but
+    // the profile may since have moved to a smaller machine, and a window
+    // cannot be bigger than the screen it opens on. A display that can hold the
+    // claim leaves it untouched, so this costs a hand-picked resolution nothing.
+    if !use_real_screen {
         if let Some(w) = crate::main_window() {
             crate::clamp_screen_to_real_display(&w, &mut raw);
         }
@@ -286,9 +476,11 @@ pub async fn launch_profile_synced(
         }
     }
 
-    // Screen resolution mode: presence-only switch to use host monitor.
-    let s = settings::load()?;
-    if s.screen_resolution_mode.as_deref() == Some("real") {
+    // Screen resolution mode: presence-only switch to use host monitor. The
+    // setting is there for macOS profiles; a profile whose resolution the
+    // operator chose is left alone, or the switch would wipe exactly the
+    // screen they asked for.
+    if use_real_screen {
         cmd.arg("--shardx-real-screen");
     }
 
@@ -358,6 +550,7 @@ pub async fn launch_profile_synced(
         // when a Tauri GUI app spawns the engine binary.
         cmd.creation_flags(0x08000000);
     }
+    may_spawn(profile_id)?;
     let child = cmd.spawn().context("spawn ShardX")?;
     let pid = Tracker::shared().track(profile_id.to_string(), child, stored.meta.temporary);
 
@@ -758,4 +951,115 @@ fn host_locale() -> Option<String> {
         }
     }
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::fill_window_from_screen;
+    use serde_json::json;
+
+    /// I4: the local API and a run start profiles through here, not through
+    /// the UI's own check, so the lock is checked here.
+    #[tokio::test]
+    async fn nothing_starts_while_the_data_lock_is_held() {
+        let _serial = crate::migrate::serial();
+        assert!(crate::migrate::hold());
+        let plain = super::launch_profile("any", true, false).await;
+        let synced = super::launch_profile_synced("any", false, false, Some("g"), 0, "").await;
+        crate::migrate::release();
+        for r in [plain, synced] {
+            assert_eq!(r.err().map(|e| e.to_string()).as_deref(), Some(super::LOCKED));
+        }
+    }
+
+    /// I-1: a launch counts from its first step, and stops short of the spawn
+    /// when the lock was taken while it waited on the network.
+    #[test]
+    fn a_cancel_stops_only_the_launch_it_was_made_for() {
+        let id = "cancel-test-profile";
+        let scope = super::CancelScope::start(id);
+        assert!(super::check_cancel(id).is_ok());
+        super::cancel(id);
+        assert_eq!(super::check_cancel(id).err().map(|e| e.to_string()).as_deref(), Some(super::CANCELLED_BY_USER));
+        drop(scope);
+        // Late, after that launch returned: the next launch starts clean.
+        super::cancel(id);
+        let _next = super::CancelScope::start(id);
+        assert!(super::check_cancel(id).is_ok());
+    }
+
+    #[test]
+    fn a_launch_under_way_is_counted_and_stops_before_the_spawn() {
+        let _serial = crate::migrate::serial();
+        let before = super::in_flight();
+        let launching = super::Launching::start();
+        assert_eq!(super::in_flight(), before + 1);
+        assert!(super::may_spawn("not-a-profile").is_ok());
+        assert!(crate::migrate::hold());
+        let stopped = super::may_spawn("not-a-profile").err().map(|e| e.to_string());
+        crate::migrate::release();
+        drop(launching);
+        assert_eq!(stopped.as_deref(), Some(super::CANCELLED));
+        assert_eq!(super::in_flight(), before);
+    }
+
+    fn obj(v: serde_json::Value) -> serde_json::Map<String, serde_json::Value> {
+        v.as_object().unwrap().clone()
+    }
+
+    #[test]
+    fn derives_a_window_from_the_claimed_screen() {
+        let mut raw = obj(json!({
+            "screen": { "width": 1920, "height": 1080,
+                        "avail_width": 1920, "avail_height": 1032 }
+        }));
+        fill_window_from_screen(&mut raw);
+        let w = raw["window"].as_object().unwrap();
+        assert_eq!(w["outer_width"], 1920);
+        assert_eq!(w["outer_height"], 1031);
+        assert_eq!(w["inner_width"], 1920);
+        assert_eq!(w["inner_height"], 944);
+    }
+
+    #[test]
+    fn leaves_a_profile_that_names_its_own_window() {
+        let mut raw = obj(json!({
+            "screen": { "width": 1920, "height": 1080,
+                        "avail_width": 1920, "avail_height": 1032 },
+            "window": { "outer_width": 1280, "outer_height": 800,
+                        "inner_width": 1280, "inner_height": 713 }
+        }));
+        fill_window_from_screen(&mut raw);
+        let w = raw["window"].as_object().unwrap();
+        assert_eq!(w["outer_width"], 1280, "a captured window must survive");
+        assert_eq!(w["inner_height"], 713);
+    }
+
+    #[test]
+    fn falls_back_to_the_full_screen_when_avail_is_absent() {
+        let mut raw = obj(json!({ "screen": { "width": 1366, "height": 768 } }));
+        fill_window_from_screen(&mut raw);
+        let w = raw["window"].as_object().unwrap();
+        assert_eq!(w["outer_width"], 1366);
+        assert_eq!(w["outer_height"], 767);
+    }
+
+    #[test]
+    fn does_nothing_without_a_screen() {
+        let mut raw = obj(json!({ "name": "no screen here" }));
+        fill_window_from_screen(&mut raw);
+        assert!(raw.get("window").is_none());
+    }
+
+    #[test]
+    fn an_empty_window_block_is_still_filled() {
+        let mut raw = obj(json!({
+            "screen": { "width": 1600, "height": 900, "avail_width": 1600, "avail_height": 860 },
+            "window": {}
+        }));
+        fill_window_from_screen(&mut raw);
+        let w = raw["window"].as_object().unwrap();
+        assert_eq!(w["outer_width"], 1600);
+        assert_eq!(w["outer_height"], 859);
+    }
 }

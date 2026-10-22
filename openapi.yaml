@@ -651,7 +651,10 @@ paths:
       tags: [Proxies]
       summary: Add a proxy
       description: |
-        Adds a proxy to the store (deduped by endpoint). Pass `proxy` as a
+        Adds a proxy to the store. An identical proxy already stored (same
+        `kind`, `host`, `port`, `username` and `password`) is reused instead;
+        one that differs only by password (a session or routing parameters
+        in it) is a new proxy. Pass `proxy` as a
         string, or explicit `host`/`port` (+ `kind`/`username`/`password`).
       requestBody:
         required: true
@@ -1456,7 +1459,8 @@ components:
           description: |
             Attach a proxy by string (`host:port:user:pass` or
             `scheme://user:pass@host:port`). On a **persistent** profile it is
-            added to the proxy store (deduped by endpoint) and full-tested
+            added to the proxy store (an identical one, same kind, host, port,
+            user and password, is reused) and full-tested
             (UDP + geo), then bound by id — so it appears in the proxy list
             and QUIC/WebRTC gating has a cached result. On a **temporary**
             profile it is attached inline (not stored). Ignored if `proxy_id`

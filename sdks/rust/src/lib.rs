@@ -14,8 +14,9 @@
 //! let sdk = ShardX::new(ShardXOptions::default())?;
 //!
 //! // Launch a random profile through a proxy AND attach a CDP browser.
+//! let profile = sdk.create_profile(None).await?;
 //! let session = sdk
-//!     .session(None, LaunchOptions {
+//!     .session(profile, LaunchOptions {
 //!         proxy: Some("socks5://user:pass@host:1080".into()),
 //!         ..Default::default()
 //!     })

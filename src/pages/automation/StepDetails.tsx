@@ -1,13 +1,17 @@
-import { useEffect, useState } from "react";
+import { useEffect, useId, useState } from "react";
+import { Button, Chip, Input, Switch, Textarea, Tooltip } from "@proxyshard/shardx-ui-kit";
 import {
   automationList,
+  blockIcon,
   branchKind,
   specFor,
   type Block,
   type Branch,
+  type ParamSpec,
   type Project,
 } from "../../entities/automation";
 import { MultiSelect, type MSOption } from "../../shared/ui/MultiSelect";
+import { StepIcon } from "../../shared/icons";
 import { useT } from "../../shared/i18n";
 import {
   psCountries,
@@ -15,6 +19,8 @@ import {
   psCities,
   psResiIsps,
 } from "../../entities/proxyshard";
+import { SelectField } from "../../shared/ui/SelectField";
+import { NumField } from "../../shared/ui/NumField";
 
 /** The one code in a comma list, if there is exactly one — dependent lists
  *  (region needs a country, city needs a region…) only load for a single pick. */
@@ -43,33 +49,33 @@ function useProjects(): Project[] {
 function ProjectField({
   block,
   name,
+  label,
   onParam,
 }: {
   block: Block;
   name: string;
+  /** Names the field: a caption beside it does not name a combobox. */
+  label: string;
   onParam: (id: string, key: string, value: unknown) => void;
 }) {
   const t = useT();
   const projects = useProjects();
   const value = String(block.params[name] ?? "");
   return (
-    <select
-      className="h-8 flex-1 rounded-8 bg-bg-white-0 px-2 text-paragraph-sm text-text-strong-950 ring-1 ring-inset ring-stroke-soft-200 outline-none focus:ring-primary-base"
-      value={value}
-      onChange={(e) => {
-        onParam(block.id, name, e.target.value);
-        onParam(
-          block.id,
-          `${name}Name`,
-          projects.find((p) => p.id === e.target.value)?.name ?? "",
-        );
-      }}
-    >
-      <option value="">{t("stepDetails.pickFlow")}</option>
-      {projects.map((p) => (
-        <option key={p.id} value={p.id}>{p.name}</option>
-      ))}
-    </select>
+    <div className="min-w-0 flex-1">
+      <SelectField
+        aria-label={label}
+        value={value}
+        onChange={(v) => {
+          onParam(block.id, name, v);
+          onParam(block.id, `${name}Name`, projects.find((p) => p.id === v)?.name ?? "");
+        }}
+        options={[
+          { value: "", label: t("stepDetails.pickFlow") },
+          ...projects.map((p) => ({ value: p.id, label: p.name })),
+        ]}
+      />
+    </div>
   );
 }
 
@@ -78,11 +84,14 @@ function ProjectStepField({
   block,
   name,
   of,
+  label,
   onParam,
 }: {
   block: Block;
   name: string;
   of: string;
+  /** Names the field: a caption beside it does not name a combobox. */
+  label: string;
   onParam: (id: string, key: string, value: unknown) => void;
 }) {
   const t = useT();
@@ -90,19 +99,18 @@ function ProjectStepField({
   const chosen = projects.find((p) => p.id === String(block.params[of] ?? ""));
   const entries = (chosen?.blocks ?? []).filter((b) => b.kind === "flow.entry");
   return (
-    <select
-      className="h-8 flex-1 rounded-8 bg-bg-white-0 px-2 text-paragraph-sm text-text-strong-950 ring-1 ring-inset ring-stroke-soft-200 outline-none focus:ring-primary-base disabled:opacity-50"
-      disabled={!chosen}
-      value={String(block.params[name] ?? "")}
-      onChange={(e) => onParam(block.id, name, e.target.value)}
-    >
-      <option value="">{t("stepDetails.entryDefault")}</option>
-      {entries.map((b) => (
-        <option key={b.id} value={b.id}>
-          {String(b.params.name ?? "") || b.label || b.id.slice(0, 6)}
-        </option>
-      ))}
-    </select>
+    <div className="min-w-0 flex-1">
+      <SelectField
+        aria-label={label}
+        disabled={!chosen}
+        value={String(block.params[name] ?? "")}
+        onChange={(v) => onParam(block.id, name, v)}
+        options={[
+          { value: "", label: t("stepDetails.entryDefault") },
+          ...entries.map((b) => ({ value: b.id, label: String(b.params.name ?? "") || b.label || b.id.slice(0, 6) })),
+        ]}
+      />
+    </div>
   );
 }
 
@@ -173,6 +181,16 @@ function ResiLocField({
   );
 }
 
+
+/** The browser's element picker, for the step's target. */
+export type PickControl = {
+  /** A profile is running in the browser column. */
+  available: boolean;
+  /** The next click on the page becomes this step's target. */
+  active: boolean;
+  onToggle: () => void;
+};
+
 type Props = {
   block: Block | null;
   steps: Block[];
@@ -180,9 +198,23 @@ type Props = {
   onSecret: (blockId: string, name: string) => void;
   onBranch: (blockId: string, which: "on_done" | "on_fail", b: Branch) => void;
   onToggle: (blockId: string) => void;
+  pick?: PickControl;
 };
 
-function BranchField({
+/** A group's small section label. */
+const CAPTION = "text-section-label text-text-soft-400";
+
+/** A select value as the panel shows it: sentence case, and names that keep
+ *  their own capitals. The stored value never changes. */
+const NAMES: Record<string, string> = {
+  macos: "macOS", ios: "iOS", sqlite: "SQLite", postgres: "PostgreSQL", mysql: "MySQL",
+  mariadb: "MariaDB", mongodb: "MongoDB", socks5: "SOCKS5", http: "HTTP", xhr: "XHR", standart: "Standard",
+};
+const optionText = (v: string) => NAMES[v] ?? (/^[a-z][a-z ]*$/.test(v) ? v[0].toUpperCase() + v.slice(1) : v);
+
+/** "When it works" or "When it fails": a label and its choice on one row,
+ *  with the step to jump to or the number of tries under the choice. */
+function BranchRow({
   title,
   value,
   steps,
@@ -198,210 +230,325 @@ function BranchField({
   const t = useT();
   const kind = branchKind(value);
   return (
-    <div className="flex flex-col gap-1">
-      <span className="text-subheading-2xs text-text-soft-400">{title}</span>
-      <select
-        className="h-8 rounded-8 bg-bg-white-0 px-2 text-paragraph-sm text-text-strong-950 ring-1 ring-inset ring-stroke-soft-200 outline-none focus:ring-primary-base"
+    <div className="grid grid-cols-[96px_minmax(0,1fr)] items-center gap-x-2 gap-y-1.5">
+      <span className="text-body text-text-sub-600">{title}</span>
+      <SelectField
+        aria-label={title}
         value={kind}
-        onChange={(e) => {
-          const k = e.target.value;
+        onChange={(k) => {
           if (k === "goto") {
             const first = steps.find((x) => x.id !== self);
             onChange({ goto: first?.id ?? "" });
           } else if (k === "retry") onChange({ retry: 2 });
           else onChange(k as Branch);
         }}
-      >
-        <option value="next">{t("stepDetails.branchNext")}</option>
-        <option value="goto">{t("stepDetails.branchGoto")}</option>
-        <option value="retry">{t("stepDetails.branchRetry")}</option>
-        <option value="endpass">{t("stepDetails.branchEndPass")}</option>
-        <option value="stop">{t("stepDetails.branchStop")}</option>
-      </select>
-
-      {kind === "goto" &&
-        !steps.some((x) => x.id === (value as { goto: string }).goto) && (
-          <div className="rounded-8 bg-warning-alpha-16 px-2 py-1 text-[11px] text-warning-base">
-            {t("stepDetails.gotoMissing")}
-          </div>
-        )}
-
+        options={[
+          { value: "next", label: t("stepDetails.branchNext") },
+          { value: "goto", label: t("stepDetails.branchGoto") },
+          { value: "retry", label: t("stepDetails.branchRetry") },
+          { value: "endpass", label: t("stepDetails.branchEndPass") },
+          { value: "stop", label: t("stepDetails.branchStop") },
+        ]}
+      />
       {kind === "goto" && (
-        <select
-          className="h-8 rounded-8 bg-bg-white-0 px-2 text-paragraph-sm text-text-strong-950 ring-1 ring-inset ring-stroke-soft-200 outline-none focus:ring-primary-base"
-          value={(value as { goto: string }).goto}
-          onChange={(e) => onChange({ goto: e.target.value })}
-        >
-          {steps.map((x, i) => (
-            <option key={x.id} value={x.id}>
-              {i + 1}. {x.label || x.kind}
-            </option>
-          ))}
-        </select>
+        <div className="col-start-2 min-w-0">
+          <SelectField
+            aria-label={t("stepDetails.branchGoto")}
+            value={(value as { goto: string }).goto}
+            onChange={(v) => onChange({ goto: v })}
+            options={steps.map((x, i) => ({ value: x.id, label: `${i + 1}. ${x.label || x.kind}` }))}
+          />
+        </div>
       )}
-
+      {kind === "goto" && !steps.some((x) => x.id === (value as { goto: string }).goto) && (
+        <p className="col-start-2 m-0 text-secondary text-warning-text">{t("stepDetails.gotoMissing")}</p>
+      )}
       {kind === "retry" && (
-        <input
-          type="number" min={1} max={50}
-          className="h-8 rounded-8 bg-bg-white-0 px-2 text-paragraph-sm text-text-strong-950 ring-1 ring-inset ring-stroke-soft-200 outline-none focus:ring-primary-base"
-          value={(value as { retry: number }).retry}
-          onChange={(e) => onChange({ retry: Math.max(1, Number(e.target.value) || 1) })}
-        />
+        <div className="col-start-2 min-w-0">
+          <NumField
+            aria-label={t("stepDetails.branchRetry")}
+            value={(value as { retry: number }).retry}
+            min={1}
+            max={50}
+            onChange={(v) => onChange({ retry: v })}
+          />
+        </div>
       )}
     </div>
   );
 }
 
-/** The selected block's settings. Kept out of the canvas so a long parameter
- *  list never changes where the cards are. */
-export function StepDetails({ block, steps, onParam, onSecret, onBranch, onToggle }: Props) {
+/** A number setting holding a `{{variable}}` rather than a number.
+ *
+ *  The runner resolves one before using it, so `var.random` can feed a wait
+ *  or a timeout. A number box cannot show it — it would read the text as no
+ *  number at all and write its default over the variable the moment anything
+ *  else on the step changed — so the field becomes a text box while a
+ *  variable is in it. */
+const isVarRef = (v: unknown): v is string =>
+  typeof v === "string" && v.includes("{{");
+
+/** A stored number setting as a number: imports may carry it as text. */
+const numberOf = (v: unknown): number | null => {
+  if (typeof v === "number") return Number.isFinite(v) ? v : null;
+  if (typeof v === "string" && v.trim() !== "" && Number.isFinite(Number(v))) return Number(v);
+  return null;
+};
+
+/** One of the step's own settings, under its small section label. */
+function ParamField({ block, prm, onParam, onSecret }: {
+  block: Block;
+  prm: ParamSpec;
+  onParam: Props["onParam"];
+  onSecret: Props["onSecret"];
+}) {
   const t = useT();
+  const label = t(prm.label);
+  const id = `step-${block.id}-${prm.name}`;
+  const secret = prm.secret && (
+    <Tooltip content={block.secrets.includes(prm.name) ? t("stepDetails.secretOn") : t("stepDetails.secretOff")}>
+      <Chip
+        size="xsmall"
+        tone="warning"
+        selected={block.secrets.includes(prm.name)}
+        onClick={() => onSecret(block.id, prm.name)}
+      >
+        {t("stepDetails.secretButton")}
+      </Chip>
+    </Tooltip>
+  );
+  const row = (control: React.ReactNode) => (
+    <div className="flex min-w-0 items-center gap-1.5">
+      {control}
+      {secret}
+    </div>
+  );
+
+  // WIG-01: a <label> must not wrap a select (a caption click would change
+  // it), and a number field is named by a caption tied with htmlFor (a
+  // wrapping label would read its message into its name, F11). Those two,
+  // and the project pickers, name their control by id; the text kinds keep
+  // a wrapping <label>.
+  if (prm.kind === "select" && prm.options) {
+    return (
+      <div className="flex flex-col gap-1.5">
+        <span id={`${id}-label`} className={CAPTION}>{label}</span>
+        {row(
+          <div className="min-w-0 flex-1">
+            <SelectField
+              aria-labelledby={`${id}-label`}
+              value={String(block.params[prm.name] ?? prm.default ?? "")}
+              onChange={(v) => onParam(block.id, prm.name, v)}
+              options={prm.options.map((o) => ({ value: o, label: o === "" ? t("stepDetails.anyOption") : optionText(o) }))}
+            />
+          </div>,
+        )}
+      </div>
+    );
+  }
+  if (prm.kind === "number") {
+    const held = block.params[prm.name];
+    if (isVarRef(held)) {
+      return (
+        <div className="flex flex-col gap-1.5">
+          <label id={`${id}-label`} htmlFor={id} className={CAPTION}>{label}</label>
+          {row(
+            <Input
+              id={id}
+              type="text"
+              inputSize="xsmall"
+              wrapperClassName="min-w-0 flex-1"
+              value={held}
+              onChange={(e) => onParam(block.id, prm.name, e.target.value)}
+            />,
+          )}
+        </div>
+      );
+    }
+    return (
+      <div className="flex flex-col gap-1.5">
+        <label id={`${id}-label`} htmlFor={id} className={CAPTION}>{label}</label>
+        {row(
+          <div className="min-w-0 flex-1">
+            {/* Keeps what you type (WIG-02): "-" on its way to a negative
+                scroll, an empty field on its way to a new timeout. A
+                setting with a default needs a number; one without is left
+                out when cleared, and its hint says what empty means. */}
+            {prm.default === undefined ? (
+              <NumField
+                id={id}
+                aria-labelledby={`${id}-label`}
+                decimals={prm.decimals ?? 2}
+                min={prm.min}
+                max={prm.max}
+                placeholder={prm.hint ? t(prm.hint) : undefined}
+                value={numberOf(block.params[prm.name])}
+                onChange={(v) => onParam(block.id, prm.name, v)}
+                onClear={() => onParam(block.id, prm.name, undefined)}
+              />
+            ) : (
+              <NumField
+                id={id}
+                aria-labelledby={`${id}-label`}
+                decimals={prm.decimals ?? 2}
+                min={prm.min}
+                max={prm.max}
+                placeholder={prm.hint ? t(prm.hint) : undefined}
+                value={numberOf(block.params[prm.name]) ?? numberOf(prm.default) ?? 0}
+                onChange={(v) => onParam(block.id, prm.name, v)}
+              />
+            )}
+          </div>,
+        )}
+      </div>
+    );
+  }
+  if (prm.kind === "project" || prm.kind === "projectStep") {
+    return (
+      <div className="flex flex-col gap-1.5">
+        <span aria-hidden="true" className={CAPTION}>{label}</span>
+        {row(
+          prm.kind === "project" ? (
+            <ProjectField block={block} name={prm.name} label={label} onParam={onParam} />
+          ) : (
+            <ProjectStepField block={block} name={prm.name} of={prm.of ?? "project"} label={label} onParam={onParam} />
+          ),
+        )}
+      </div>
+    );
+  }
+  return (
+    <label className="flex flex-col gap-1.5">
+      <span className={CAPTION}>{label}</span>
+      {row(
+        prm.kind === "resiloc" ? (
+          <div className="min-w-0 flex-1">
+            <ResiLocField
+              source={prm.name as "country" | "region" | "city" | "isp"}
+              block={block}
+              onChange={(v) => onParam(block.id, prm.name, v)}
+            />
+          </div>
+        ) : prm.kind === "textarea" ? (
+          <Textarea
+            wrapperClassName="min-w-0 flex-1"
+            className="mono"
+            technical
+            placeholder={prm.hint ? t(prm.hint) : undefined}
+            value={String(block.params[prm.name] ?? prm.default ?? "")}
+            onChange={(e) => onParam(block.id, prm.name, e.target.value)}
+          />
+        ) : (
+          <Input
+            type="text"
+            inputSize="xsmall"
+            wrapperClassName="min-w-0 flex-1"
+            placeholder={prm.hint ? t(prm.hint) : undefined}
+            value={String(block.params[prm.name] ?? prm.default ?? "")}
+            onChange={(e) => onParam(block.id, prm.name, e.target.value)}
+          />
+        ),
+      )}
+    </label>
+  );
+}
+
+/** The selected step's settings, as the side panel's Step tab: its name and
+ *  what it does, its target, whether it runs, where the run goes next, and
+ *  its own settings in small groups. Kept out of the canvas so a long list
+ *  never moves the cards. */
+export function StepDetails({ block, steps, onParam, onSecret, onBranch, onToggle, pick }: Props) {
+  const t = useT();
+  const uid = useId();
   if (!block) {
     return (
-      <p className="m-0 py-8 text-center text-paragraph-xs text-text-soft-400">
+      <p className="m-auto max-w-[28ch] py-8 text-center text-balance text-secondary text-text-soft-400">
         {t("stepDetails.emptyState")}
       </p>
     );
   }
   const spec = specFor(block.kind);
+  const params = spec?.params ?? [];
+  const selectorParam = params.find((p) => p.name === "selector");
+  const sel = typeof block.params.selector === "string" ? block.params.selector : "";
+  const hasXY = block.params.x !== undefined && block.params.y !== undefined;
+  // What the step aims at, said plainly. A step recorded by position is worth
+  // knowing about: it stops being right the moment the window changes size.
+  const showTarget = !!selectorParam || !!sel || hasXY;
+  const tried = Array.isArray(block.params._tried) ? (block.params._tried as string[]) : [];
 
   return (
-    <div className="flex flex-col gap-2">
-      <div>
-        <div className="text-label-sm text-text-strong-950">
-          {block.label || (spec?.label ? t(spec.label) : "") || block.kind}
-        </div>
-        {spec?.about && (
-          <div className="text-paragraph-xs text-text-soft-400">{t(spec.about)}</div>
-        )}
+    <div className="flex flex-col gap-4">
+      <div className="flex flex-col gap-0.5">
+        <h2 className="m-0 flex items-start gap-2 text-section-title text-text-strong-950 wrap-anywhere">
+          <StepIcon icon={blockIcon(block.kind)} className="mt-[3px] size-3.5 shrink-0 text-text-strong-950" />
+          <span className="min-w-0">{block.label || (spec?.label ? t(spec.label) : "") || block.kind}</span>
+        </h2>
+        {spec?.about && <p className="m-0 text-secondary text-text-soft-400">{t(spec.about)}</p>}
       </div>
 
-      {/* What this step actually aims at, said plainly. A step recorded by
-          position is worth knowing about: it stops being right the moment the
-          window is a different size. */}
-      {(() => {
-        const sel = block.params.selector;
-        const hasXY = block.params.x !== undefined && block.params.y !== undefined;
-        if (!sel && !hasXY) return null;
-        return sel ? (
-          <div className="rounded-8 bg-bg-weak-50 px-2 py-1.5">
-            <div className="text-subheading-2xs text-text-soft-400">{t("stepDetails.targets")}</div>
-            <code className="block break-all text-[11px] text-text-strong-950">
-              {String(sel)}
-            </code>
-          </div>
-        ) : (
-          <div className="rounded-8 bg-warning-alpha-16 px-2 py-1.5">
-            <div className="text-subheading-2xs text-warning-base">
-              {t("stepDetails.byPosition", {
-                x: Math.round(Number(block.params.x)),
-                y: Math.round(Number(block.params.y)),
-              })}
+      {showTarget && (
+        <div className="flex flex-col gap-1.5">
+          <label htmlFor={`${uid}-target`} className={CAPTION}>{t("stepDetails.target")}</label>
+          <Input
+            id={`${uid}-target`}
+            inputSize="xsmall"
+            className="mono"
+            technical
+            placeholder={selectorParam?.hint ? t(selectorParam.hint) : undefined}
+            value={sel}
+            onChange={(e) => onParam(block.id, "selector", e.target.value)}
+            rightAddon={pick && (
+              <Tooltip content={t("stepDetails.pickUnavailable")} disabled={pick.available}>
+                <Button
+                  size="3xsmall" variant="neutral" mode="ghost"
+                  // Inside the field's frame: its ring sits inside the button.
+                  className="-mr-1 focus-ring-inset"
+                  aria-pressed={pick.active}
+                  disabled={!pick.available}
+                  onClick={pick.onToggle}
+                >
+                  {pick.active ? t("stepDetails.pickCancel") : t("stepDetails.pick")}
+                </Button>
+              </Tooltip>
+            )}
+          />
+          {!sel && hasXY && (
+            <div className="flex flex-col gap-1">
+              <p className="m-0 text-secondary font-medium text-warning-text">
+                {t("stepDetails.byPosition", {
+                  x: Math.round(Number(block.params.x)),
+                  y: Math.round(Number(block.params.y)),
+                })}
+              </p>
+              <p className="m-0 text-secondary text-text-soft-400">{t("stepDetails.noSelectorHelp")}</p>
+              {tried.length > 0 && (
+                <ul className="m-0 flex list-none flex-col gap-0.5 p-0 font-mono text-micro font-normal text-text-soft-400">
+                  {tried.map((line, i) => (
+                    <li key={i} className="wrap-anywhere">{line}</li>
+                  ))}
+                </ul>
+              )}
             </div>
-            <div className="text-[11px] text-text-soft-400">
-              {t("stepDetails.noSelectorHelp")}
-            </div>
-            {Array.isArray(block.params._tried) && block.params._tried.length > 0 && (
-              <ul className="mt-1 list-none space-y-0.5 p-0 font-mono text-[10px] text-text-soft-400">
-                {(block.params._tried as string[]).map((t, i) => (
-                  <li key={i} className="break-all">{t}</li>
-                ))}
-              </ul>
-            )}
-          </div>
-        );
-      })()}
+          )}
+        </div>
+      )}
 
-      <button
-        type="button"
-        className="self-start text-paragraph-xs text-text-soft-400 hover:text-text-strong-950"
-        onClick={() => onToggle(block.id)}
-      >
-        {block.enabled ? t("stepDetails.enabledToggle") : t("stepDetails.skippedToggle")}
-      </button>
+      <div className="flex items-center justify-between gap-2">
+        <label htmlFor={`${uid}-run`} className="text-body text-text-strong-950">{t("stepDetails.runThisStep")}</label>
+        <Switch id={`${uid}-run`} checked={block.enabled} onChange={() => onToggle(block.id)} />
+      </div>
 
-      {(spec?.params ?? []).map((prm) => (
-        <label key={prm.name} className="flex flex-col gap-1">
-          <span className="text-subheading-2xs text-text-soft-400">{t(prm.label)}</span>
-          <div className="flex items-center gap-1.5">
-            {prm.kind === "project" ? (
-              <ProjectField block={block} name={prm.name} onParam={onParam} />
-            ) : prm.kind === "projectStep" ? (
-              <ProjectStepField
-                block={block}
-                name={prm.name}
-                of={prm.of ?? "project"}
-                onParam={onParam}
-              />
-            ) : prm.kind === "resiloc" ? (
-              <ResiLocField
-                source={prm.name as "country" | "region" | "city" | "isp"}
-                block={block}
-                onChange={(v) => onParam(block.id, prm.name, v)}
-              />
-            ) : prm.kind === "textarea" ? (
-              <textarea
-                className="min-h-20 flex-1 rounded-8 bg-bg-white-0 p-2 font-mono text-[11px] text-text-strong-950 ring-1 ring-inset ring-stroke-soft-200 outline-none placeholder:text-text-soft-400 focus:ring-primary-base"
-                placeholder={prm.hint ? t(prm.hint) : undefined}
-                value={String(block.params[prm.name] ?? prm.default ?? "")}
-                onChange={(e) => onParam(block.id, prm.name, e.target.value)}
-              />
-            ) : prm.kind === "select" && prm.options ? (
-              <select
-                className="h-8 flex-1 rounded-8 bg-bg-white-0 px-2 text-paragraph-sm text-text-strong-950 ring-1 ring-inset ring-stroke-soft-200 outline-none focus:ring-primary-base"
-                value={String(block.params[prm.name] ?? prm.default ?? "")}
-                onChange={(e) => onParam(block.id, prm.name, e.target.value)}
-              >
-                {prm.options.map((o) => (
-                  <option key={o} value={o}>{o === "" ? t("stepDetails.anyOption") : o}</option>
-                ))}
-              </select>
-            ) : (
-              <input
-                type={prm.kind === "number" ? "number" : "text"}
-                className="h-8 flex-1 rounded-8 bg-bg-white-0 px-2 text-paragraph-sm text-text-strong-950 ring-1 ring-inset ring-stroke-soft-200 outline-none placeholder:text-text-soft-400 focus:ring-primary-base"
-                placeholder={prm.hint ? t(prm.hint) : undefined}
-                value={String(block.params[prm.name] ?? prm.default ?? "")}
-                onChange={(e) =>
-                  onParam(
-                    block.id,
-                    prm.name,
-                    prm.kind === "number" ? Number(e.target.value) : e.target.value,
-                  )
-                }
-              />
-            )}
-            {prm.secret && (
-              <button
-                type="button"
-                title={
-                  block.secrets.includes(prm.name)
-                    ? t("stepDetails.secretOn")
-                    : t("stepDetails.secretOff")
-                }
-                className={`rounded-8 px-1.5 py-1 text-[10px] ring-1 ring-inset ${
-                  block.secrets.includes(prm.name)
-                    ? "bg-warning-alpha-16 text-warning-base ring-warning-base"
-                    : "text-text-soft-400 ring-stroke-soft-200 hover:text-text-strong-950"
-                }`}
-                onClick={() => onSecret(block.id, prm.name)}
-              >
-                {t("stepDetails.secretButton")}
-              </button>
-            )}
-          </div>
-        </label>
-      ))}
-
-      <div className="mt-1 flex flex-col gap-2 border-t border-stroke-soft-200 pt-2">
-        <BranchField
+      <div role="group" aria-labelledby={`${uid}-next`} className="flex flex-col gap-1.5">
+        <span id={`${uid}-next`} className={CAPTION}>{t("stepDetails.next")}</span>
+        <BranchRow
           title={t("stepDetails.onDoneTitle")}
           value={block.on_done}
           steps={steps}
           self={block.id}
           onChange={(v) => onBranch(block.id, "on_done", v)}
         />
-        <BranchField
+        <BranchRow
           title={t("stepDetails.onFailTitle")}
           value={block.on_fail}
           steps={steps}
@@ -409,6 +556,12 @@ export function StepDetails({ block, steps, onParam, onSecret, onBranch, onToggl
           onChange={(v) => onBranch(block.id, "on_fail", v)}
         />
       </div>
+
+      {params
+        .filter((prm) => prm.name !== "selector")
+        .map((prm) => (
+          <ParamField key={prm.name} block={block} prm={prm} onParam={onParam} onSecret={onSecret} />
+        ))}
     </div>
   );
 }

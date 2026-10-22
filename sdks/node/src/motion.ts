@@ -2,13 +2,17 @@
 // and turning the handset — produced inside the browser process, with no
 // script injected into the page.
 //
-// The domain lives on the BROWSER target and is deliberately absent from
-// /json/protocol and Schema.getDomains, so a page that enumerates the protocol
-// cannot find it.
+// The domain is deliberately absent from /json/protocol and
+// Schema.getDomains, so a page that enumerates the protocol cannot find it.
+//
+// Attach it to a PAGE. Everything it does happens to the page's widget, and
+// the handler reaches that widget through the target's own web contents — a
+// browser target has none, so every command on a browser session answered
+// "no live frame". It used to open one, and Motion never worked from the SDK.
 //
 // Pointer and touch are exclusive: a profile claiming a touchscreen refuses
 // every pointer command, and one that does not refuses every finger command.
-import type { Browser as PatchrightBrowser, CDPSession } from "patchright";
+import type { CDPSession, Page } from "patchright";
 
 export type MouseButton = "left" | "middle" | "right";
 
@@ -26,9 +30,9 @@ export interface OrientationResult {
 export class Motion {
   private constructor(private readonly session: CDPSession) {}
 
-  /** Open a browser-level CDP session for the domain. */
-  static async attach(browser: PatchrightBrowser): Promise<Motion> {
-    return new Motion(await browser.newBrowserCDPSession());
+  /** Open a CDP session on `page` for the domain. */
+  static async attach(page: Page): Promise<Motion> {
+    return new Motion(await page.context().newCDPSession(page));
   }
 
   private async call<T = Record<string, unknown>>(

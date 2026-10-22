@@ -95,24 +95,41 @@ impl Tracker {
                     }
                 }
             }
+            // The process we started is gone — which is not the same as the
+            // browser being gone.
+            //
+            // On Windows a launcher running as administrator makes Chromium
+            // restart itself without those rights, and the process we hold
+            // exits within a second while the real browser carries on. The
+            // same shape appears when a browser from a previous run of the
+            // launcher is still up: the new process hands its command line to
+            // that one through Chromium's singleton and exits. Either way the
+            // entry was dropped here, the profile went back to Idle with its
+            // window open, Stop was no longer offered, and starting it again
+            // just repeated the handover.
+            //
+            // The profile's own lock says which it is, and it is the same
+            // answer Chromium itself reads. While it is held the profile is
+            // running, whoever owns it, so the entry stays and the status
+            // stays honest; `after_exit` waits for the browser that is really
+            // there rather than for the shell that launched it.
+            if let Ok(udd) = crate::profile::user_data_dir(&profile_id) {
+                let mut waited = std::time::Duration::ZERO;
+                let step = std::time::Duration::from_secs(2);
+                while crate::reset::lock_is_live(&udd) {
+                    tokio::time::sleep(step).await;
+                    waited += step;
+                    // A lock nobody releases must not pin a profile to
+                    // Running for the rest of the session.
+                    if waited >= std::time::Duration::from_secs(12 * 60 * 60) {
+                        break;
+                    }
+                }
+            }
             if let Ok(mut g) = Self::shared().inner.lock() {
                 g.remove(&profile_id);
             }
-            // Bump the persisted total runtime; non-temporary only (temp
-            // profiles get deleted next line so their counter is moot).
-            if !temporary {
-                let elapsed_ms = started_at.elapsed().as_millis() as u64;
-                if let Err(e) = crate::profile::add_runtime(&profile_id, elapsed_ms) {
-                    eprintln!("[launcher] add_runtime({profile_id}) failed: {e}");
-                }
-            }
-            // Tear down temporary profile (config + udd) on close.
-            if temporary {
-                match crate::profile::delete(&profile_id) {
-                    Ok(()) => eprintln!("[launcher] temporary profile {profile_id} deleted on close"),
-                    Err(e) => eprintln!("[launcher] temporary profile {profile_id} cleanup failed: {e}"),
-                }
-            }
+            after_exit(&profile_id, temporary, started_at.elapsed().as_millis() as u64);
         });
 
         pid
@@ -171,6 +188,34 @@ impl Tracker {
     }
 }
 
+/// The bookkeeping after a browser closes: its total run time, or a
+/// temporary profile's own removal. Skipped while the data is being moved
+/// or reset (the lock in migrate.rs): a write then would land in a folder
+/// that is on its way out, or bring a removed profile back. A temporary
+/// profile left behind is swept at the next start (`purge_temporary`).
+/// Returns whether it ran.
+fn after_exit(profile_id: &str, temporary: bool, elapsed_ms: u64) -> bool {
+    if crate::migrate::in_progress() {
+        eprintln!("[launcher] {profile_id} closed while the data is being moved or reset; nothing written");
+        return false;
+    }
+    // Bump the persisted total runtime; non-temporary only (temp profiles
+    // are deleted below, so their counter is moot).
+    if !temporary {
+        if let Err(e) = crate::profile::add_runtime(profile_id, elapsed_ms) {
+            eprintln!("[launcher] add_runtime({profile_id}) failed: {e}");
+        }
+    }
+    // Tear down temporary profile (config + udd) on close.
+    if temporary {
+        match crate::profile::delete(profile_id) {
+            Ok(()) => eprintln!("[launcher] temporary profile {profile_id} deleted on close"),
+            Err(e) => eprintln!("[launcher] temporary profile {profile_id} cleanup failed: {e}"),
+        }
+    }
+    true
+}
+
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct RunningProfile {
     pub profile_id: String,
@@ -180,4 +225,17 @@ pub struct RunningProfile {
     /// Milliseconds since the engine was spawned; frontend formats as
     /// "1h 23m" / "12m 30s" / "45s".
     pub uptime_ms: u64,
+}
+
+#[cfg(test)]
+mod tests {
+    /// I3: while a reset holds the lock, a browser's exit writes nothing.
+    #[test]
+    fn a_close_during_a_reset_writes_nothing() {
+        let _serial = crate::migrate::serial();
+        assert!(crate::migrate::hold());
+        let ran = super::after_exit("not-a-profile", false, 5);
+        crate::migrate::release();
+        assert!(!ran);
+    }
 }

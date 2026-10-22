@@ -1,34 +1,34 @@
-import { Button, Modal } from "@proxyshard/shardx-ui-kit";
+import { Button, Modal, useLatched } from "@proxyshard/shardx-ui-kit";
 import { useConfirmStore } from "../../shared/model/confirm";
 
 /// Global confirm dialog — UI-kit Modal fed by the zustand confirm store.
 export function ConfirmHost() {
   const req = useConfirmStore((s) => s.req);
-  if (!req) return null;
-  const done = (v: any) => req.resolve(v);
+  // The question stays on screen while the dialog leaves.
+  const shown = useLatched(req);
+  if (!shown) return null;
+  const done = (v: unknown) => { if (req) req.resolve(v); };
+  const danger = shown.buttons.some((b) => b.danger);
   return (
     <Modal
-      open
-      onClose={() => done(null)}
-      title={req.title ?? "Confirm"}
-      maxWidthClassName="max-w-md"
-      footer={
-        <div className="flex justify-end gap-2">
-          {req.buttons.map((b, i) => (
-            <Button
-              key={i}
-              size="small"
-              variant={b.danger ? "error" : b.primary ? "primary" : "neutral"}
-              mode={b.danger || b.primary ? "filled" : "stroke"}
-              onClick={() => done(b.value)}
-            >
-              {b.label}
-            </Button>
-          ))}
-        </div>
-      }
-    >
-      <p className="m-0 text-paragraph-sm text-text-sub-600">{req.message}</p>
-    </Modal>
+      open={req != null}
+      onOpenChange={(o) => { if (!o) done(null); }}
+      // A destructive or irreversible question is read with its consequence on open (A11Y-07).
+      role={danger || shown.alert ? "alertdialog" : "dialog"}
+      size="sm"
+      title={shown.title}
+      description={shown.message}
+      footer={shown.buttons.map((b, i) => (
+        <Button
+          key={i}
+          size="xsmall"
+          variant={b.danger ? "error" : b.primary ? "primary" : "neutral"}
+          mode={b.danger || b.primary ? "filled" : "stroke"}
+          onClick={() => done(b.value)}
+        >
+          {b.label}
+        </Button>
+      ))}
+    />
   );
 }

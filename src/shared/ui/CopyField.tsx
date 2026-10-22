@@ -1,35 +1,48 @@
-import { Input } from "@proxyshard/shardx-ui-kit";
-import { CopyIcon } from "../icons";
+import { CopyButton, Input } from "@proxyshard/shardx-ui-kit";
 import { useT } from "../i18n";
-import { clip } from "../lib/clipboard";
+import { clip, copySecret } from "../lib/clipboard";
 import { toast } from "../model/toast";
 
 /// Read-only value with inline copy button — UI-kit Input + icon action.
-export function CopyField({ value, secret }: { value: string; secret?: boolean }) {
+/// `label` is the kit's field label; `mono` sets an address or a key in the
+/// mono face (TYPE-08). The copy says "Copied" where the click was (EMIL-18);
+/// a secret also says, in a toast, that it leaves the clipboard in a minute
+/// (SEC-11): news the button cannot carry. A failure is a toast.
+export function CopyField({ value, secret, label, mono, labelledBy, describedBy }: {
+  value: string;
+  secret?: boolean;
+  label?: string;
+  mono?: boolean;
+  /** The id of a caption elsewhere that names it (a setting row's title). */
+  labelledBy?: string;
+  describedBy?: string;
+}) {
   const t = useT();
+  const copy = async () => {
+    try {
+      if (secret) {
+        await copySecret(value);
+        toast.ok(t("clipboard.copiedSecret"));
+      } else {
+        await clip.write(value);
+      }
+    } catch (e) {
+      toast.fail({ title: t("copyField.failed"), detail: e });
+      throw e;
+    }
+  };
   return (
     <Input
       readOnly
-      inputSize="small"
+      label={label}
+      aria-labelledby={labelledBy}
+      aria-describedby={describedBy}
+      className={mono ? "mono" : undefined}
+      inputSize="xsmall"
       type={secret ? "password" : "text"}
+      secret={secret}
       value={value}
-      rightIcon={
-        <button
-          type="button"
-          className="pointer-events-auto flex size-6 cursor-pointer items-center justify-center rounded-6 border-0 bg-transparent text-icon-soft-400 transition-colors hover:bg-bg-weak-50 hover:text-icon-strong-950"
-          title={t("copyField.copyTitle")}
-          onClick={async () => {
-            try {
-              await clip.write(value);
-              toast.ok(t("copyField.copied"));
-            } catch (e) {
-              toast.err(String(e));
-            }
-          }}
-        >
-          <CopyIcon className="size-4" />
-        </button>
-      }
+      rightIcon={<CopyButton size="3xsmall" className="pointer-events-auto" onCopy={copy} />}
     />
   );
 }

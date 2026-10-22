@@ -15,10 +15,12 @@ export const defaultForm = (): ProfileForm => ({
   refresh_rate: 60,
   screen_w: 0,
   screen_h: 0,
+  screen_custom: false,
   cookies_file: "",
 
   // Empty until snapped to gpusForOs[0] by useEffect.
   gpu_preset_id: "",
+  real_gpu: false,
   user_agent:
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/152.0.0.0 Safari/537.36",
   hardware_concurrency: 8,
@@ -63,11 +65,15 @@ export function fromStored(stored: any): ProfileForm {
   f.android_media = stored?._meta?.android_media === true;
   // Empty for legacy profiles; snapped by useEffect.
   f.gpu_preset_id = stored?._meta?.gpu_preset_id ?? "";
+  f.real_gpu = stored?._meta?.real_gpu === true;
   f.user_agent = stored?.navigator?.user_agent ?? f.user_agent;
   f.hardware_concurrency = stored?.navigator?.hardware_concurrency ?? 8;
   f.refresh_rate = stored?.screen?.refresh_rate ?? 60;
   f.screen_w = stored?.screen?.width ?? 0;
   f.screen_h = stored?.screen?.height ?? 0;
+  // Every profile has a screen, so its size alone says nothing about who chose
+  // it. Only the marker does, and only it may travel back to disk.
+  f.screen_custom = stored?._meta?.screen_custom === true;
   f.device_memory = stored?.navigator?.device_memory ?? 16;
   f.timezone = stored?.timezone ?? AUTO_TZ;
   f.language = stored?.navigator?.language ?? AUTO_LANG;
@@ -101,9 +107,17 @@ export function fromStored(stored: any): ProfileForm {
   return f;
 }
 
-/// Build on-disk FingerprintConfig from library payload + user-edited fields.
-export function toStored(f: ProfileForm, lib: FingerprintEntry | null): any {
-  const base: any = lib && lib.payload ? JSON.parse(JSON.stringify(lib.payload)) : {};
+/// Build on-disk FingerprintConfig from the user-edited fields on top of a
+/// base: the profile as stored (`prev`), when its template stays the same, so
+/// the parts the form doesn't show (set by the API, or kept from a template no
+/// longer in the library) survive an edit; else the library payload.
+export function toStored(f: ProfileForm, lib: FingerprintEntry | null, prev?: any): any {
+  const keep = prev && (prev._meta?.gpu_preset_id ?? "") === f.gpu_preset_id;
+  const source = keep ? prev : lib?.payload;
+  const base: any = source ? JSON.parse(JSON.stringify(source)) : {};
+  delete base._meta;
+  // Noise seeds the stored profile already has stay; 0 asks the backend for one.
+  const seedOf = (k: string): number => (keep ? prev.noise?.[k]?.seed : 0) ?? 0;
 
   base._meta = {
     id: f.id,
@@ -111,11 +125,25 @@ export function toStored(f: ProfileForm, lib: FingerprintEntry | null): any {
     proxy_id: f.proxy_id,
     last_launched_at: null,
     gpu_preset_id: f.gpu_preset_id,
+    ...(f.real_gpu ? { real_gpu: true } : {}),
     // Absent, not empty: that is what "derive it" means on disk.
     ...(f.color ? { color: f.color } : {}),
     extensions: f.extensions,
     ...(f.android_media ? { android_media: true } : {}),
+    // The operator picked a resolution rather than taking the template's. The
+    // launcher reads this to leave the global screen setting out of the launch:
+    // that setting exists for macOS profiles, and applying it on top of a
+    // deliberate choice would silently overrule it.
+    ...(f.screen_custom && f.screen_w > 0 && f.screen_h > 0 ? { screen_custom: true } : {}),
   };
+  // "This computer's graphics card": the profile simply carries no graphics
+  // block, and the browser then reports what is really here. Nothing else
+  // about the profile changes — the template it was built on stays named, so
+  // turning this off puts that card back.
+  if (f.real_gpu) {
+    delete base.webgl;
+    delete base.webgpu;
+  }
   base.name = f.name || "untitled";
   base.notes = f.notes;
   // "auto" sentinel: resolver replaces at launch; persists across edits.
@@ -154,17 +182,42 @@ export function toStored(f: ProfileForm, lib: FingerprintEntry | null): any {
   // own insets — the menubar or taskbar strip — instead of being invented,
   // because a screen whose avail equals its full height is a screen with no
   // system chrome, which no ordinary desktop has.
-  if (f.screen_w > 0 && f.screen_h > 0) {
+  if (f.screen_custom && f.screen_w > 0 && f.screen_h > 0) {
     const tpl = (base.screen || {}) as Record<string, number>;
     const insetW = Math.max((tpl.width ?? f.screen_w) - (tpl.avail_width ?? tpl.width ?? f.screen_w), 0);
     const insetH = Math.max((tpl.height ?? f.screen_h) - (tpl.avail_height ?? tpl.height ?? f.screen_h), 0);
+    const availW = Math.max(f.screen_w - insetW, 1);
+    const availH = Math.max(f.screen_h - insetH, 1);
     base.screen = {
       ...base.screen,
       width: f.screen_w,
       height: f.screen_h,
-      avail_width: Math.max(f.screen_w - insetW, 1),
-      avail_height: Math.max(f.screen_h - insetH, 1),
+      avail_width: availW,
+      avail_height: availH,
     };
+    // The window has to move with it. Without a window block the engine has no
+    // --window-size to pass, and Chromium then sizes the window from the REAL
+    // monitor's work area — which is how a profile claiming 1920x1080 ends up
+    // in a window that does not fit inside its own claimed screen. Only for a
+    // picked resolution: a window the template or the API captured stays.
+    //
+    // Shape follows the library's own desktop entries: the window fills the
+    // work area, one pixel short, and the viewport is 87 px shorter than that
+    // — the browser's own chrome.
+    const outerH = Math.max(availH - 1, 1);
+    base.window = {
+      ...(base.window || {}),
+      outer_width: availW,
+      outer_height: outerH,
+      inner_width: availW,
+      inner_height: Math.max(outerH - 87, 1),
+    };
+  } else if (!(f.screen_w > 0) && lib?.payload?.screen) {
+    // "As in the fingerprint": the template's own screen and window come back.
+    // Building on the stored profile would otherwise keep the old pick.
+    base.screen = { ...JSON.parse(JSON.stringify(lib.payload.screen)), refresh_rate: f.refresh_rate };
+    if (lib.payload.window) base.window = JSON.parse(JSON.stringify(lib.payload.window));
+    else delete base.window;
   }
 
   base.media_devices = {
@@ -184,12 +237,12 @@ export function toStored(f: ProfileForm, lib: FingerprintEntry | null): any {
   // for new profiles (no id yet) and previously collapsed every new profile
   // onto one shared seed, giving them all an identical fingerprint.
   base.noise = {
-    canvas:       { enabled: f.noise_canvas === "auto",       seed: 0 },
-    webgl:        { enabled: f.noise_webgl === "auto",        seed: 0, intensity: f.noise_webgl === "auto" ? WEBGL_NOISE_INTENSITY : 0 },
-    audio:        { enabled: f.noise_audio === "auto",        seed: 0 },
-    client_rects: { enabled: f.noise_client_rects === "auto", seed: 0, max_offset: f.noise_client_rects === "auto" ? CLIENT_RECTS_MAX_OFFSET : 0 },
-    sensors:      { enabled: f.noise_sensors === "auto",      seed: 0 },
-    fonts:        { enabled: f.noise_fonts === "auto",        seed: 0 },
+    canvas:       { enabled: f.noise_canvas === "auto",       seed: seedOf("canvas") },
+    webgl:        { enabled: f.noise_webgl === "auto",        seed: seedOf("webgl"), intensity: f.noise_webgl === "auto" ? WEBGL_NOISE_INTENSITY : 0 },
+    audio:        { enabled: f.noise_audio === "auto",        seed: seedOf("audio") },
+    client_rects: { enabled: f.noise_client_rects === "auto", seed: seedOf("client_rects"), max_offset: f.noise_client_rects === "auto" ? CLIENT_RECTS_MAX_OFFSET : 0 },
+    sensors:      { enabled: f.noise_sensors === "auto",      seed: seedOf("sensors") },
+    fonts:        { enabled: f.noise_fonts === "auto",        seed: seedOf("fonts") },
   };
   base.blocked_ports = [...f.blocked_ports].sort((a, b) => a - b);
 

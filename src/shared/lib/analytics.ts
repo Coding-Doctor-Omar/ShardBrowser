@@ -1,4 +1,5 @@
 import { getVersion } from "@tauri-apps/api/app";
+import { randomId } from "./utils";
 
 // Launcher-window analytics only: never the panels, never a profile's browser.
 //
@@ -14,6 +15,33 @@ const APP_URL = "https://launcher.proxyshard.com/";
 
 const CLIENT_ID_KEY = "shardx-analytics-client-id";
 const SESSION_COUNT_KEY = "shardx-analytics-session-count";
+const ENABLED_KEY = "shardx.analytics";
+
+/** Whether usage statistics are on (Settings > General). On unless the user
+ *  turned them off: an install that never touched the switch, including every
+ *  one from before it existed, keeps reporting as it always did. Only the
+ *  launcher window reports, never a profile's browser. */
+export function analyticsEnabled(): boolean {
+  try { return localStorage.getItem(ENABLED_KEY) !== "off"; } catch { return true; }
+}
+
+/** Turns usage statistics on or off. Off also forgets this install's id and
+ *  session count; on starts counting from the next page. */
+export function setAnalyticsEnabled(on: boolean): void {
+  try {
+    if (on) localStorage.setItem(ENABLED_KEY, "on");
+    else {
+      // "off" written down: a missing key means on.
+      localStorage.setItem(ENABLED_KEY, "off");
+      localStorage.removeItem(CLIENT_ID_KEY);
+      localStorage.removeItem(SESSION_COUNT_KEY);
+    }
+  } catch { /* private mode: nothing is kept either way */ }
+  ready = null;
+  session = "";
+  first = true;
+  lastSection = "";
+}
 
 /** One id per install; without it every launch would count as a new user. */
 function clientId(): string {
@@ -57,15 +85,6 @@ function nextSessionOrdinal(): number | null {
   }
 }
 
-/// `crypto.randomUUID` needs a secure context, which a custom-scheme window is
-/// not guaranteed to be.
-function randomId(): string {
-  try {
-    if (typeof crypto?.randomUUID === "function") return crypto.randomUUID();
-  } catch { /* not a secure context */ }
-  return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 12)}`;
-}
-
 function hostOs(): string {
   const ua = navigator.userAgent;
   if (/Windows/i.test(ua)) return "Windows";
@@ -78,7 +97,10 @@ function hostOs(): string {
 type Status = { sent: boolean; reason: string; client_id?: string; version?: string };
 
 function report(status: Status): void {
-  (window as any).__shardxAnalytics = status;
+  // Development only: a release build has neither the global (it held the
+  // install id) nor the log (SEC-05).
+  if (!import.meta.env.DEV) return;
+  (window as unknown as { __shardxAnalytics: Status }).__shardxAnalytics = status;
   console.info("[analytics]", status);
 }
 
@@ -95,6 +117,7 @@ let lastSection = "";
 let lastSectionAt = 0;
 
 export function initAnalytics(): Promise<void> {
+  if (!analyticsEnabled()) return Promise.resolve();
   if (!ready) {
     ready = (async () => {
       version = await getVersion().catch(() => "dev");
@@ -112,6 +135,7 @@ export function initAnalytics(): Promise<void> {
 /** Which part of the launcher is on screen. Sections only — nothing a profile
  *  visits is ever seen here, let alone reported. */
 export async function trackSection(section: string): Promise<void> {
+  if (!analyticsEnabled()) return;
   const now = Date.now();
   if (section === lastSection && now - lastSectionAt < 1000) return;
   lastSection = section;
@@ -126,7 +150,7 @@ export async function send(
   params: Record<string, string | number> = {},
   section = "",
 ): Promise<void> {
-  if (!MEASUREMENT_ID || !session) return;
+  if (!analyticsEnabled() || !MEASUREMENT_ID || !session) return;
   const cid = clientId();
   const now = Date.now();
   // Engagement time since the previous hit; without it GA reports sessions as
@@ -151,7 +175,7 @@ export async function send(
     npa: "1",
     en: name,
     dl: section ? `${APP_URL}${section}` : APP_URL,
-    dt: section ? `ShardX Launcher — ${section}` : "ShardX Launcher",
+    dt: section ? `ShardBrowser Launcher — ${section}` : "ShardBrowser Launcher",
     ul: (navigator.language || "en").toLowerCase(),
     sr: `${screen.width}x${screen.height}`,
     "ep.app_version": version,

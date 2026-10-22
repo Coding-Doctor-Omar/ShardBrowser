@@ -206,10 +206,57 @@ const server = new McpServer({ name: "shardx", version: "0.1.0" });
 // ================= API tools =================
 
 server.tool(
+  "health_check",
+  "Whether the launcher's API is reachable and the token is right. Returns what it found rather than throwing, so this is the first thing to try when another tool fails.",
+  {},
+  async () => {
+    // /health is deliberately open: a 401 here means the server is up and the
+    // token is wrong, which is a different problem from nothing listening,
+    // and the two were impossible to tell apart from a failing tool call.
+    try {
+      const res = await fetch(API + "/health");
+      if (!res.ok) {
+        return text({ ok: false, api: API, reason: `the API answered HTTP ${res.status}` });
+      }
+    } catch (e) {
+      return text({
+        ok: false, api: API,
+        reason: "nothing answered — is the launcher running, and is SHARDX_API right?",
+        detail: String(e && e.message ? e.message : e),
+      });
+    }
+    try {
+      const profiles = await api("/profiles");
+      return text({ ok: true, api: API, tokenAccepted: true, profiles: profiles.length });
+    } catch (e) {
+      return text({
+        ok: false, api: API, tokenAccepted: false,
+        reason: "the API is up but refused this token — check SHARDX_TOKEN",
+        detail: String(e && e.message ? e.message : e),
+      });
+    }
+  },
+);
+
+server.tool(
   "list_profiles",
   "List persistent profiles with their running state and CDP endpoint.",
   {},
   async () => text(await api("/profiles")),
+);
+
+server.tool(
+  "find_profile_by_name",
+  "Find profiles whose name contains `name`, case-insensitively. Saves listing everything to turn a name into an id.",
+  { name: z.string() },
+  async ({ name }) => {
+    const needle = name.trim().toLowerCase();
+    const profiles = await api("/profiles");
+    const hit = profiles.filter((p) => String(p.name || "").toLowerCase().includes(needle));
+    // The whole match, not just the id: the caller usually wants the running
+    // state or the CDP endpoint next, and would otherwise ask again.
+    return text({ query: name, found: hit.length, profiles: hit });
+  },
 );
 
 server.tool(

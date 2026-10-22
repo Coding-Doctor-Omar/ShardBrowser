@@ -13,7 +13,6 @@ export {
   Slider,
   Tabs,
   SegmentControl,
-  Breadcrumb,
   ProgressBar,
   Tooltip,
   Modal,
@@ -27,19 +26,17 @@ export type {
   SelectOption,
   SegmentItem,
   TabItem,
-  BreadcrumbItem,
 } from "@proxyshard/shardx-ui-kit";
 
-export { default as Badge } from "./Badge";
-export type { BadgeProps, BadgeColor, BadgeVariant, BadgeSize } from "./Badge";
+export { Badge } from "@proxyshard/shardx-ui-kit";
+export type { BadgeProps, BadgeColor, BadgeVariant, BadgeSize } from "@proxyshard/shardx-ui-kit";
 
 export { Field } from "./Field";
 export { NumField } from "./NumField";
 export { SelectField } from "./SelectField";
-export { CSSelect } from "./CSSelect";
 export { Pair } from "./Pair";
 export { PortList } from "./PortList";
 export { CopyField } from "./CopyField";
 export { CountryFlag } from "./CountryFlag";
-export { Metric } from "./Metric";
-export { Topbar } from "./Topbar";
+export { ProxyFlag } from "./ProxyFlag";
+export { RowHoverActions } from "./RowHoverActions";

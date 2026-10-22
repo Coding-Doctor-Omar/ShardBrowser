@@ -21,9 +21,9 @@ import {
   Textarea,
   Tooltip,
 } from '@/components'
-import type { AlertModalStatus, BadgeStatus, ButtonMode, ButtonVariant } from '@/components'
+import type { AlertModalStatus, BadgeColor, ButtonMode, ButtonVariant } from '@/components'
 import ThemeToggle from '@/theme/ThemeToggle'
-import { InfoIcon, SearchIcon } from '@/lib/icons'
+import { ICON_STROKE, InfoIcon, SearchIcon } from '@/lib/icons'
 import { HugeiconsIcon } from '@hugeicons/react'
 import { Link01Icon, ArrowRight01Icon } from '@hugeicons/core-free-icons'
 import Section, { Row } from './demo/Section'
@@ -33,12 +33,10 @@ import { ALL_COUNTRIES } from './lib/allCountries'
 
 const buttonModes: ButtonMode[] = ['filled', 'stroke', 'lighter', 'ghost']
 const buttonVariants: ButtonVariant[] = ['primary', 'neutral', 'error']
-const badgeStatuses: BadgeStatus[] = [
-  'success', 'pending', 'error', 'paid', 'unpaid', 'active', 'on-hold', 'cancelled',
-]
+const badgeColors: BadgeColor[] = ['success', 'warning', 'error', 'primary', 'information', 'gray']
 
 function Arrow() {
-  return <HugeiconsIcon icon={ArrowRight01Icon} className="size-5" aria-hidden />
+  return <HugeiconsIcon icon={ArrowRight01Icon} strokeWidth={ICON_STROKE} className="size-4" aria-hidden />
 }
 
 export default function App() {
@@ -69,11 +67,11 @@ export default function App() {
   return (
     <div className="min-h-screen bg-bg-weak-50 px-4 py-8 md:px-8">
       <div className="mx-auto flex max-w-5xl flex-col gap-6">
-        <header className="flex flex-col gap-4 rounded-2xl border border-stroke-soft-200 bg-bg-white-0 p-6 sm:flex-row sm:items-center sm:justify-between">
+        <header className="flex flex-col gap-4 rounded-surface border border-stroke-soft-200 bg-bg-white-0 p-6 sm:flex-row sm:items-center sm:justify-between">
           <div className="flex flex-col gap-1">
-            <h1 className="text-title-h4 text-text-strong-950">Shardx UI Kit</h1>
-            <p className="text-paragraph-sm text-text-sub-600">
-              React + Tailwind CSS v4 · built from the Proxy Shard Figma · light &amp; dark aware
+            <h1 className="text-page-title text-text-strong-950">Shardx UI Kit</h1>
+            <p className="text-body text-text-sub-600">
+              React + Tailwind CSS v4, built from the Proxy Shard Figma, light &amp; dark aware
             </p>
           </div>
           <ThemeToggle />
@@ -95,6 +93,7 @@ export default function App() {
             <Button size="small">Small</Button>
             <Button size="xsmall">X-Small</Button>
             <Button size="2xsmall">2X-Small</Button>
+            <Button size="3xsmall">3X-Small</Button>
             <Button fullRadius rightIcon={<Arrow />}>Pill</Button>
             <Button disabled>Disabled</Button>
           </Row>
@@ -102,8 +101,11 @@ export default function App() {
 
         <Section title="Badges & Tags" description="Status badges and removable tags.">
           <Row label="status badges">
-            {badgeStatuses.map((s) => (
-              <Badge key={s} status={s} />
+            {badgeColors.map((c) => (
+              <Badge key={c} color={c} dot>{c}</Badge>
+            ))}
+            {badgeColors.map((c) => (
+              <Badge key={`${c}-stroke`} color={c} variant="stroke">{c}</Badge>
             ))}
           </Row>
           <Row label="tags">
@@ -131,7 +133,7 @@ export default function App() {
 
         <Section title="Inputs" description="Text fields, textarea and select.">
           <div className="grid w-full gap-4 sm:grid-cols-2">
-            <Input label="Email" placeholder="you@example.com" leftIcon={<SearchIcon className="size-5" />} value={email} onChange={(e) => setEmail(e.target.value)} hint="We'll never share it." />
+            <Input label="Email" placeholder="you@example.com" leftIcon={<SearchIcon className="size-4" />} value={email} onChange={(e) => setEmail(e.target.value)} hint="We'll never share it." />
             <Input label="With error" placeholder="Invalid" error="This field is required" defaultValue="bad@" />
             <Select
               label="Product"
@@ -201,7 +203,7 @@ export default function App() {
           <Slider label="Bandwidth" valueLabel={`${slider} GB`} value={slider} onChange={setSlider} />
           <Row label="tooltip & modal">
             <Tooltip content="More information">
-              <Button mode="stroke" variant="neutral" leftIcon={<InfoIcon className="size-5" />}>Hover me</Button>
+              <Button mode="stroke" variant="neutral" leftIcon={<InfoIcon className="size-4" />}>Hover me</Button>
             </Tooltip>
             <Button onClick={() => setModal(true)}>Open modal</Button>
           </Row>
@@ -230,8 +232,8 @@ export default function App() {
             ))}
           </div>
         </Section>
-        <footer className="pb-6 text-center text-paragraph-xs text-text-soft-400">
-          Shardx UI Kit — {new Set(badgeStatuses).size} status badges · Inter type scale · light &amp; dark.
+        <footer className="pb-6 text-center text-secondary text-text-soft-400">
+          Shardx UI Kit — {badgeColors.length} badge colors, Inter type scale, light &amp; dark.
         </footer>
       </div>
 
@@ -268,7 +270,7 @@ export default function App() {
       <DialogModal
         open={dialogOpen}
         onClose={() => setDialogOpen(false)}
-        icon={<HugeiconsIcon icon={Link01Icon} className="size-5" />}
+        icon={<HugeiconsIcon icon={Link01Icon} strokeWidth={ICON_STROKE} className="size-5" />}
         title="Edit referral link"
         subtitle="Personalize your referral link"
         confirmLabel="Apply Changes"
@@ -287,9 +289,9 @@ export default function App() {
               { label: 'Referral code', value: 'referral3' },
             ]}
           />
-          <p className="text-paragraph-sm text-text-sub-600">
+          <p className="text-body text-text-sub-600">
             https://proxyshard.com?ref=
-            <span className="text-label-sm text-text-strong-950">{referral}</span>
+            <span className="text-ui text-text-strong-950">{referral}</span>
           </p>
         </div>
       </DialogModal>

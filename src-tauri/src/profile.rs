@@ -8,7 +8,9 @@ use std::sync::{Mutex, MutexGuard, OnceLock};
 
 /// Serialises every read-modify-write of a profile file: two interleaving — a
 /// launch touching last_launched_at while the editor saves — lose one change.
-fn file_lock() -> MutexGuard<'static, ()> {
+/// Also held by a reset (reset.rs) while it moves the profiles aside, so a
+/// late write either lands first or finds no profile to write to.
+pub(crate) fn file_lock() -> MutexGuard<'static, ()> {
     static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
     LOCK.get_or_init(|| Mutex::new(()))
         .lock()
@@ -123,6 +125,11 @@ pub struct StoredMeta {
     /// Extension ids from the library.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub extensions: Vec<String>,
+    /// The operator picked this profile's resolution in the editor. Without a
+    /// field here serde would drop the key on load: `_meta` is parsed into this
+    /// struct, and what it does not name never reaches the config map.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub screen_custom: bool,
     /// Answer media questions like a real Android device; phone profiles only.
     /// Blending in and playing video pull apart here, so the operator chooses.
     #[serde(default, skip_serializing_if = "is_false")]
@@ -131,6 +138,19 @@ pub struct StoredMeta {
     /// save landing on top of someone else's is refused instead of silent.
     #[serde(default)]
     pub rev: u64,
+}
+
+/// Does the profile name a window of its own? A block with no usable size is
+/// the same as no block: the engine has nothing to turn into `--window-size`.
+pub fn names_a_window(config: &serde_json::Map<String, serde_json::Value>) -> bool {
+    config
+        .get("window")
+        .and_then(|v| v.as_object())
+        .map(|w| {
+            w.get("outer_width").and_then(|v| v.as_i64()).unwrap_or(0) > 0
+                && w.get("outer_height").and_then(|v| v.as_i64()).unwrap_or(0) > 0
+        })
+        .unwrap_or(false)
 }
 
 /// The screen the profile claims, as (width, height).
@@ -342,6 +362,25 @@ fn clear_noise_seeds(config: &mut serde_json::Map<String, serde_json::Value>) {
 /// The `rev` currently on disk, or 0 when there is no such profile yet.
 pub fn current_rev(id: &str) -> u64 {
     load_raw(id).map(|p| p.meta.rev).unwrap_or(0)
+}
+
+/// Write a derived `window` block into a stored profile, once.
+///
+/// Returns `false` and touches nothing if the profile already names a window.
+/// The rev is deliberately left alone: this is the launcher correcting its own
+/// omission, not an edit, and bumping it would refuse the operator's next save
+/// with a conflict about a change they never made.
+pub fn fill_missing_window(id: &str, window: serde_json::Value) -> Result<bool> {
+    let _guard = file_lock();
+    let mut stored = load_raw(id)?;
+    if names_a_window(&stored.config) {
+        return Ok(false);
+    }
+    stored.config.insert("window".into(), window);
+    let path = path_for(id)?;
+    let body = serde_json::to_string_pretty(&stored)?;
+    write_atomic(&path, body.as_bytes())?;
+    Ok(true)
 }
 
 pub fn save_raw(stored: &mut StoredProfile) -> Result<()> {
@@ -608,6 +647,85 @@ mod tests {
         // A profile written before the setting existed reads as off.
         let old: StoredMeta = serde_json::from_str("{}").unwrap();
         assert!(!old.android_media);
+    }
+
+    /// Without a field of its own the key never survived: `_meta` is parsed
+    /// into this struct, and serde drops what the struct does not name.
+    #[test]
+    fn screen_custom_round_trips_and_stays_absent_when_off() {
+        let mut meta = StoredMeta::default();
+        assert!(!meta.screen_custom);
+        let off = serde_json::to_string(&meta).unwrap();
+        assert!(!off.contains("screen_custom"), "{off}");
+
+        meta.screen_custom = true;
+        let on = serde_json::to_string(&meta).unwrap();
+        assert!(on.contains("\"screen_custom\":true"), "{on}");
+
+        // Through a whole profile, the way the editor sends it.
+        let sent = r#"{"_meta":{"id":"p1","screen_custom":true},"screen":{"width":1920}}"#;
+        let stored: StoredProfile = serde_json::from_str(sent).unwrap();
+        assert!(stored.meta.screen_custom);
+        let back: StoredProfile =
+            serde_json::from_str(&serde_json::to_string(&stored).unwrap()).unwrap();
+        assert!(back.meta.screen_custom, "lost on the way to disk");
+
+        let old: StoredMeta = serde_json::from_str("{}").unwrap();
+        assert!(!old.screen_custom);
+    }
+
+    #[test]
+    fn a_window_with_no_size_counts_as_no_window() {
+        let w = |json: &str| -> bool {
+            let v: serde_json::Value = serde_json::from_str(json).unwrap();
+            names_a_window(v.as_object().unwrap())
+        };
+        assert!(w(r#"{"window":{"outer_width":1920,"outer_height":1031}}"#));
+        assert!(!w(r#"{"window":{}}"#));
+        assert!(!w(r#"{"window":{"outer_width":1920}}"#));
+        assert!(!w(r#"{"window":{"outer_width":0,"outer_height":0}}"#));
+        assert!(!w(r#"{}"#));
+    }
+
+    /// The one test that touches the store: it points the data root at a temp
+    /// directory of its own. Anything else reading profiles from disk in this
+    /// binary would have to agree on that root.
+    #[test]
+    fn fill_missing_window_writes_once_and_leaves_the_rev_alone() {
+        let tmp = std::env::temp_dir().join(format!("shardx-fmw-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&tmp);
+        crate::store::set_data_root(Some(tmp.clone()));
+
+        let id = "fmwtest";
+        let body = r#"{
+            "_meta": {"id": "fmwtest", "rev": 7},
+            "screen": {"width": 1920, "height": 1080,
+                       "avail_width": 1920, "avail_height": 1040}
+        }"#;
+        fs::write(path_for(id).unwrap(), body).unwrap();
+
+        let win = serde_json::json!({
+            "outer_width": 1920, "outer_height": 1039,
+            "inner_width": 1920, "inner_height": 952
+        });
+        assert!(fill_missing_window(id, win.clone()).unwrap(), "first call writes");
+
+        let back = load_raw(id).unwrap();
+        assert_eq!(back.config.get("window"), Some(&win));
+        assert_eq!(back.meta.rev, 7, "a correction is not an edit");
+        // The screen it was derived from is untouched.
+        assert_eq!(
+            back.config.get("screen").and_then(|s| s.get("width")),
+            Some(&serde_json::json!(1920))
+        );
+
+        // Second launch: the block is there, so nothing is rewritten.
+        let other = serde_json::json!({"outer_width": 800, "outer_height": 600});
+        assert!(!fill_missing_window(id, other).unwrap(), "second call is a no-op");
+        assert_eq!(load_raw(id).unwrap().config.get("window"), Some(&win));
+
+        crate::store::set_data_root(None);
+        let _ = fs::remove_dir_all(&tmp);
     }
 
     /// The launcher's rule and the core's rule must agree about what a phone is.

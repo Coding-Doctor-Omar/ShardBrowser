@@ -6,11 +6,11 @@
   </picture>
 </p>
 
-<h1 align="center">ShardX Launcher</h1>
+<h1 align="center">ShardBrowser Launcher</h1>
 
 <p align="center">
   <strong>A free, open-source anti-detect browser launcher for web scraping and multi-accounting.</strong><br>
-  Patched Chromium 152 with engine-level fingerprint spoofing, a local API, an MCP server and SDKs.
+  Patched Chromium 156 with engine-level fingerprint spoofing, a local API, an MCP server and SDKs.
 </p>
 
 <p align="center">
@@ -42,7 +42,7 @@ active **p0f TCP fingerprint spoofing** at the proxy exit. This keeps the
 operating system presented by the proxy consistent with the SYN/ACK shape
 seen by websites. ShardX is the anti-detect browser stack built to use
 those capabilities. The launcher manages profiles, binds proxies and
-ships a patched **Chromium 152** build that applies fingerprint changes
+ships a patched **Chromium 156** build that applies fingerprint changes
 inside the browser engine.
 
 <p align="center">
@@ -82,7 +82,7 @@ Configuration details are available in [Usage](#usage).
     <picture>
       <source media="(prefers-color-scheme: dark)" srcset="docs/screenshots/00-launcher-dark.png">
       <source media="(prefers-color-scheme: light)" srcset="docs/screenshots/00-launcher-light.png">
-      <img src="docs/screenshots/00-launcher-light.png" alt="ShardX Launcher with active browser profiles" width="920">
+      <img src="docs/screenshots/00-launcher-light.png" alt="ShardBrowser Launcher with active browser profiles" width="920">
     </picture>
   </kbd>
 </p>
@@ -154,7 +154,7 @@ iframes, web workers, developer tools and headless mode.
   exit IP. Host GPS and Wi-Fi data are never used.
 * **Network capability:** connection type, downlink, RTT, save-data,
   storage quota, JS heap limit, battery state, media-device counts.
-* **TLS ClientHello:** Chrome 152 cipher suites and signature algorithms
+* **TLS ClientHello:** Chrome 156 cipher suites and signature algorithms
   with extension shuffling. JA4, Akamai and Peetprint
   fingerprints match the browser version.
 * **HTTP-3 over the proxy's UDP relay:** QUIC works end to end through
@@ -204,7 +204,7 @@ iframes, web workers, developer tools and headless mode.
   crash-restore bubble), bulk import, folder / tag organization, pin
   to top, clone.
 * **Fingerprint library:** 220 starter profiles shipped via CDN
-  (36 mac-arm64 / 131 windows-x64 / 19 linux-x64 / 50 android). Profile
+  (31 mac-arm64 / 120 windows-x64 / 19 linux-x64 / 50 android). Profile
   editor randomizes CPU / RAM / platform-version when you change the
   GPU, and the OS selector includes Android.
 * **Proxy manager:** SOCKS5 / HTTP / HTTPS, bulk paste-import,
@@ -314,7 +314,7 @@ iframes, web workers, developer tools and headless mode.
 The QUIC handshake completes end to end through the SOCKS5 UDP relay.
 Twilio's UDP, TCP and TLS WebRTC tests pass without exposing the host IP.
 
-| [browserleaks.com/quic](https://browserleaks.com/quic): QUIC `True`, JA4 matches Chrome 152 | [networktest.twilio.com](https://networktest.twilio.com): every probe `Pass` |
+| [browserleaks.com/quic](https://browserleaks.com/quic): QUIC `True`, JA4 matches Chrome 156 | [networktest.twilio.com](https://networktest.twilio.com): every probe `Pass` |
 |-------------------------------------------------------------|------------------------------------------------------------|
 | <kbd><img src="docs/screenshots/01-browserleaks-quic.jpg" alt="QUIC over SOCKS5 UDP relay" width="100%"></kbd> | <kbd><img src="docs/screenshots/04-twilio-webrtc.jpg" alt="Twilio WebRTC network test" width="100%"></kbd> |
 
@@ -359,7 +359,7 @@ the browser engine.
 | Client Hints (Sec-CH-UA-* full stack with GREASE)             | ✅ full                       | ❌ partial / inconsistent     | ✅ full on Multilogin / AdsPower, ❌ Dolphin     |
 | Font enumeration pinned per profile                           | ✅ system-level               | ❌ JS-only, host fonts still leak via CSS / canvas font-render | ⚠️ partial          |
 | V8 / CDP side-channel hardening (preview-getters, inspector)  | ✅ closed                     | ❌ open, CDP automation detectable | ⚠️ partial                                |
-| TLS ClientHello fingerprint (JA4)                             | ✅ matches real Chrome 152    | ⚠️ static, may drift after browser updates | ✅ matches the forked Chrome version            |
+| TLS ClientHello fingerprint (JA4)                             | ✅ matches real Chrome 156    | ⚠️ static, may drift after browser updates | ✅ matches the forked Chrome version            |
 | QUIC / HTTP-3 over SOCKS5                                     | ✅ stable end to end via UDP relay | ⚠️ unstable, falls back to TCP or drops mid-session | ❌ disabled when proxy is set |
 | WebRTC over SOCKS5 (no real-IP leak via STUN)                 | ✅ proxy UDP relay or synth candidates | ⚠️ same UDP relay path, same instability | ⚠️ disable-only            |
 | Consistency of generated profiles                             | ✅ coherent device (GPU, CPU, RAM, UA and fonts) | ❌ frequent contradictions (Win UA + Mac GPU, mobile UA + desktop screen, etc.) | ⚠️ varies |
@@ -426,7 +426,7 @@ so the operating system may show a warning on first launch:
   and should be moved to the Trash. Both messages can be resolved by
   removing the quarantine attribute once in Terminal:
   ```bash
-  xattr -dr com.apple.quarantine "/Applications/ShardX Launcher.app"
+  xattr -dr com.apple.quarantine "/Applications/ShardBrowser Launcher.app"
   ```
   The app should then open normally. For the developer verification
   warning, right-click the app, select *Open* and confirm once.
@@ -835,7 +835,7 @@ React UI and Rust source, is available under the **MIT License**. See
 [LICENSE](LICENSE). You may use, fork, modify and distribute the launcher,
 including for commercial projects.
 
-The **browser engine** (the patched Chromium 152 binary that the
+The **browser engine** (the patched Chromium 156 binary that the
 launcher downloads from our CDN on first run) is distributed as a
 **closed-source binary**. Its source is not published in this
 repository or elsewhere, and the following are explicitly **not

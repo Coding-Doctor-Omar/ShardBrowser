@@ -1,295 +1,172 @@
-import { useEffect, useState } from "react";
-import { open } from "@tauri-apps/plugin-dialog";
-import { openUrl } from "@tauri-apps/plugin-opener";
-import { Button, Input, Select, Switch, Textarea } from "@proxyshard/shardx-ui-kit";
-import { DownloadIcon } from "../../shared/icons";
-import { Topbar } from "../../shared/ui/Topbar";
-import { CopyField } from "../../shared/ui/CopyField";
-import { toast } from "../../shared/model/toast";
-import { withUtm } from "../../shared/lib/utils";
-import type { Settings, ApiInfo } from "../../entities/settings";
-import { HELPER_KINDS } from "../../entities/settings";
-import { settingsGet, settingsSave, settingsLoadError, apiInfo, apiRegenerateToken, mcpDownload } from "../../entities/settings";
-import { DataRootCard } from "../../features/manage-profiles/ui/DataRootCard";
-import { useT, useLang, LANG_OPTIONS, type Lang } from "../../shared/i18n";
+import { useEffect, useLayoutEffect, useRef, useState, type ComponentType } from "react";
+import { Card, TabPanel, Tabs } from "@proxyshard/shardx-ui-kit";
+import { PageBody, PageHeader } from "../../widgets/PageHeader";
+import { useNav, type SettingsTab } from "../../shared/model/navigation";
+import type { ApiInfo, Settings } from "../../entities/settings";
+import { settingsLoadError, apiInfo } from "../../entities/settings";
+import { LoadError, LoadingRows } from "../../shared/ui/ListStates";
+import { useT } from "../../shared/i18n";
+import { useUnsaved } from "../../shared/model/unsaved";
+import { isMod, overlayHasKeyboard } from "../../shared/lib/keyboard";
+import { commitFocusedField } from "../../shared/lib/commitField";
+import { useSettingsDraft } from "./useSettingsDraft";
+import { SaveBar } from "./SaveBar";
+import { GeneralSection } from "./sections/General";
+import { AppearanceSection } from "./sections/Appearance";
+import { ProfileDefaultsSection } from "./sections/ProfileDefaults";
+import { TagsSection } from "./sections/Tags";
+import { ViewsSection } from "./sections/Views";
+import { ApiSection } from "./sections/Api";
+import { HelperSection } from "./sections/Helper";
+import { StorageSection } from "./sections/Storage";
+import { OtherSection } from "./sections/Other";
+import { AboutSection } from "./sections/About";
+import type { SettingsProps } from "./SettingRow";
+import { showMeAround } from "../../features/tour";
 
-function SettingsCard({ title, children }: { title: string; children: React.ReactNode }) {
-  return (
-    <div className="mb-3.5 rounded-lg bg-bg-white-0 p-[18px] shadow-[var(--shadow-xs)] ring-1 ring-inset ring-stroke-soft-200">
-      <h3 className="m-0 mb-1.5 text-label-sm text-text-strong-950">{title}</h3>
-      {children}
-    </div>
-  );
-}
+type SectionProps = SettingsProps & {
+  /** What is on disk, for what speaks of saved settings (the restart note). */
+  saved: Settings;
+  api: ApiInfo | null;
+  setApi: (api: ApiInfo) => void;
+  /** Why the API details couldn't be read, and a way to read them again. */
+  apiError: string | null;
+  retryApi: () => void;
+};
+
+const SECTIONS: Record<SettingsTab, ComponentType<SectionProps>> = {
+  general: GeneralSection,
+  appearance: AppearanceSection,
+  profiles: ProfileDefaultsSection,
+  tags: TagsSection,
+  views: ViewsSection,
+  api: ApiSection,
+  helper: HelperSection,
+  storage: StorageSection,
+  other: OtherSection,
+  about: AboutSection,
+};
+
+// The open section's name, over its blocks (TYPE-10: the page's h1, then this
+// h2, then the blocks' h3). The same keys as the tabs.
+const TAB_LABEL: Record<SettingsTab, string> = {
+  general: "settings.tabGeneral",
+  appearance: "settings.tabAppearance",
+  profiles: "settings.tabProfiles",
+  tags: "settings.tabTags",
+  views: "settings.tabViews",
+  api: "settings.tabApi",
+  helper: "settings.tabHelper",
+  storage: "settings.tabStorage",
+  other: "settings.tabOther",
+  about: "settings.tabAbout",
+};
 
 export function SettingsPage() {
   const t = useT();
-  const lang = useLang((st) => st.lang);
-  const setLang = useLang((st) => st.setLang);
-  const [s, setS] = useState<Settings>({
-    browser_path: null,
-    theme: "dark",
-    geo_checker: "ip-api.com",
-    screen_resolution_mode: "fingerprint",
-    helper_enabled: true,
-    helper_triggers: [],
-    extra_args: "",
-    api_enabled: true,
-    api_port: 40325,
-  });
+  const tab = useNav((st) => st.settingsTab);
+  const openSettings = useNav((st) => st.openSettings);
+  // The page's draft: nothing is written until Save; nothing shows until the
+  // settings are read (LAYOUT-21).
+  const draft = useSettingsDraft();
+  // Leaving Settings with changes asks first (Save, Don't save, Cancel).
+  useUnsaved(draft.dirty ? { id: "settings", label: t("settings.title"), save: draft.save, discard: draft.discard } : null);
+  // Cmd/Ctrl+S saves. An app command cannot run in a field or a dialog, so
+  // the page listens for it itself; with nothing to save, nothing happens.
+  const latest = useRef(draft);
+  useLayoutEffect(() => { latest.current = draft; });
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (!isMod(e) || e.altKey || e.shiftKey || e.key.toLowerCase() !== "s") return;
+      // Never the browser's own Save page.
+      e.preventDefault();
+      if (e.repeat || overlayHasKeyboard()) return;
+      // The field that has the keyboard commits first: the save reads what the screen shows.
+      commitFocusedField();
+      const d = latest.current;
+      if (!d.dirty || d.held || d.state === "saving") return;
+      void d.save();
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, []);
   const [api, setApi] = useState<ApiInfo | null>(null);
-  const refreshApi = () => apiInfo().then(setApi).catch(() => {});
+  const [apiError, setApiError] = useState<string | null>(null);
+  const refreshApi = () => apiInfo().then((a) => { setApi(a); setApiError(null); }).catch((e) => setApiError(String(e)));
   const [loadError, setLoadError] = useState<string | null>(null);
   useEffect(() => {
-    settingsGet().then(setS);
     settingsLoadError().then(setLoadError).catch(() => {});
     refreshApi();
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- once, on open
   }, []);
-  const regenToken = async () => {
-    try { setApi(await apiRegenerateToken()); toast.ok(t("settings.tokenRegenerated")); }
-    catch (e) { toast.err(String(e)); }
-  };
+  // A saved API switch or port shows in the API details at once.
+  useEffect(() => {
+    if (draft.saves > 0) refreshApi();
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- on each save
+  }, [draft.saves]);
 
-  const [mcpBusy, setMcpBusy] = useState(false);
-  // Download MCP server source; user manages install + client setup.
-  const downloadMcp = async () => {
-    const dir = await open({ directory: true, title: t("settings.mcpDownloadDialogTitle") });
-    if (typeof dir !== "string") return;
-    setMcpBusy(true);
-    try {
-      const path = await mcpDownload(dir);
-      toast.ok(t("settings.mcpDownloaded", { path }));
-    } catch (e) { toast.err(t("settings.mcpDownloadFailed", { err: String(e) })); }
-    finally { setMcpBusy(false); }
-  };
-  const save = async () => {
-    try { await settingsSave(s); toast.ok(t("settings.saved")); }
-    catch (e) { toast.err(String(e)); }
-  };
+  const Section = SECTIONS[tab];
+
   return (
-    <section className="flex flex-col">
-      <Topbar crumbs={[t("settings.crumbSystem"), t("settings.crumbSettings")]} search="" onSearch={() => {}} />
-      <div className="mb-3.5 flex items-end justify-between gap-4">
-        <h1 className="m-0 text-title-h5 text-text-strong-950">{t("settings.title")}</h1>
-      </div>
+    <>
+      {/* The tour points at the Save bar while it shows (SaveBar), else at the title. */}
+      <PageHeader
+        title={t("settings.title")}
+        titleTour={draft.dirty ? undefined : "settings-save"}
+        help={{ title: t("pageHelp.settings.title"), body: t("pageHelp.settings.body"), onTour: () => showMeAround("settings") }}
+      />
+      {/* Each tab keeps its own place (WIG-06). */}
+      <PageBody scrollKey={`settings:${tab}`}>
+        {draft.getError && (
+          <Card className="mb-3.5">
+            <LoadError what={t("otherStates.settings")} error={draft.getError} onRetry={draft.retry} />
+          </Card>
+        )}
+        {loadError && (
+          // The one card look (UI-14), a tile in the error tint (no ring, no
+          // stripe, borderless owner 2026-10-01); its bold title is the word.
+          // `!`: the kit's cn does not merge, so the tile's own fill would
+          // tie with this one on stylesheet order. The detail takes the sub
+          // text, since the soft one falls under 4.5:1 on the tint.
+          <Card padding="md" className="mb-3.5 bg-error-tint! text-body text-text-strong-950">
+            <strong>{t("settings.loadErrorTitle")}</strong> {t.rich("settings.loadErrorBody", { code: (s) => <code>{s}</code> })}
+            <div className="mt-1 text-secondary text-text-sub-600">{loadError}</div>
+          </Card>
+        )}
 
-      {loadError && (
-        <div className="mb-3.5 rounded-lg bg-bg-white-0 p-[18px] text-paragraph-sm text-text-strong-950 shadow-[var(--shadow-xs)] ring-1 ring-inset ring-error-base">
-          <strong>{t("settings.loadErrorTitle")}</strong>{t("settings.loadErrorBody1")}<code>settings.json.bad</code>{t("settings.loadErrorBody2")}<code>Set-Content -Encoding UTF8</code>{t("settings.loadErrorBody3")}
-          <div className="mt-1 text-paragraph-xs text-text-soft-400">{loadError}</div>
-        </div>
-      )}
-
-      <SettingsCard title={t("settings.languageTitle")}>
-        <p className="m-0 mb-2 text-paragraph-xs text-text-soft-400">
-          {t("settings.languageHelp")}
-        </p>
-        <Select
-          label={t("settings.interfaceLanguageLabel")}
-          size="small"
-          value={lang}
-          onChange={(v) => setLang(v as Lang)}
-          options={LANG_OPTIONS.map((o) => ({ value: o.value, label: o.label }))}
-        />
-      </SettingsCard>
-
-      <SettingsCard title={t("settings.geoCheckerTitle")}>
-        <p className="m-0 mb-2 text-paragraph-xs text-text-soft-400">
-          {t("settings.geoCheckerHelp1")}<strong>{t("settings.geoCheckerTestWord")}</strong>{t("settings.geoCheckerHelp2")}
-        </p>
-        <Select
-          label={t("settings.providerLabel")}
-          size="small"
-          value={s.geo_checker ?? "ip-api.com"}
-          onChange={(v) => setS({ ...s, geo_checker: v })}
-          options={[
-            { value: "ip-api.com", label: t("settings.geoIpApiCom") },
-            { value: "ipapi.co", label: t("settings.geoIpapiCo") },
-            { value: "ipwho.is", label: t("settings.geoIpwhoIs") },
-          ]}
-        />
-      </SettingsCard>
-
-      <SettingsCard title={t("settings.screenTitle")}>
-        <p className="m-0 mb-2 text-paragraph-xs text-text-soft-400">
-          <strong>{t("settings.screenFromFingerprintWord")}</strong>{t("settings.screenHelp1")}
-          <strong>{t("settings.screenRealWord")}</strong>{t("settings.screenHelp2")}
-        </p>
-        <Select
-          label={t("settings.screenModeLabel")}
-          size="small"
-          value={s.screen_resolution_mode ?? "fingerprint"}
-          onChange={(v) => setS({ ...s, screen_resolution_mode: v })}
-          options={[
-            { value: "fingerprint", label: t("settings.screenModeFingerprint") },
-            { value: "real", label: t("settings.screenModeReal") },
-          ]}
-        />
-      </SettingsCard>
-
-      <SettingsCard title={t("settings.helperTitle")}>
-        <p className="m-0 mb-2 text-paragraph-xs text-text-soft-400">
-          {t("settings.helperHelp1")}
-          <strong>{t("settings.helperOffersWord")}</strong>{t("settings.helperHelp2")}
-          <br />
-          <strong>{t("settings.helperNeverSync")}</strong>{t("settings.helperHelp3")}
-        </p>
-        <div className="flex flex-col gap-3">
-          <Switch
-            label={t("settings.helperEnableLabel")}
-            checked={s.helper_enabled ?? true}
-            onChange={(checked) => setS({ ...s, helper_enabled: checked })}
+        {/* One content column of 640 px beside the tabs (6.2, ruling 15). */}
+        <div className="grid grid-cols-[180px_minmax(0,640px)] items-start gap-6">
+          <Tabs
+            idBase="settings"
+            aria-label={t("settings.sectionsLabel")}
+            orientation="vertical"
+            className="sticky top-0"
+            value={tab}
+            onChange={(v) => openSettings(v as SettingsTab)}
+            items={[
+              { value: "general", label: t("settings.tabGeneral") },
+              { value: "appearance", label: t("settings.tabAppearance") },
+              { value: "profiles", label: t("settings.tabProfiles") },
+              { value: "tags", label: t("settings.tabTags") },
+              { value: "views", label: t("settings.tabViews") },
+              { value: "api", label: t("settings.tabApi") },
+              { value: "helper", label: t("settings.tabHelper") },
+              { value: "storage", label: t("settings.tabStorage") },
+              { value: "other", label: t("settings.tabOther") },
+              { value: "about", label: t("settings.tabAbout") },
+            ]}
           />
-          {(s.helper_enabled ?? true) && (
-            <div>
-              <div className="mb-1.5 text-label-xs text-text-sub-600">
-                {t("settings.helperReactTo")}
-              </div>
-              <p className="m-0 mb-2 text-paragraph-xs text-text-soft-400">
-                {t("settings.helperTriggersHelp")}
-              </p>
-              <div className="flex flex-wrap gap-1.5">
-                {HELPER_KINDS.map((k) => {
-                  const picked = (s.helper_triggers ?? []).includes(k.value);
-                  return (
-                    <button
-                      key={k.value}
-                      type="button"
-                      onClick={() => {
-                        const cur = s.helper_triggers ?? [];
-                        setS({
-                          ...s,
-                          helper_triggers: picked
-                            ? cur.filter((x) => x !== k.value)
-                            : [...cur, k.value],
-                        });
-                      }}
-                      className={`rounded-6 px-2 py-1 text-paragraph-xs ring-1 ring-inset transition-colors ${
-                        picked
-                          ? "bg-primary-alpha-10 text-primary-base ring-primary-alpha-24"
-                          : "text-text-sub-600 ring-stroke-soft-200 hover:bg-bg-weak-50"
-                      }`}
-                    >
-                      {t(k.label)}
-                    </button>
-                  );
-                })}
-              </div>
-            </div>
-          )}
+          {/* The open section, named by its tab (A11Y-08; F8 keeps it). */}
+          <TabPanel tabsId="settings" value={tab} className="flex max-w-[640px] flex-col gap-3.5">
+            <h2 className="m-0 text-panel-title text-text-strong-950">{t(TAB_LABEL[tab])}</h2>
+            {draft.s && draft.saved
+              // Keyed by the discards, so a field that holds text of its own starts over.
+              ? <Section key={draft.epoch} s={draft.s} saved={draft.saved} setS={draft.set} p={draft.p} setP={draft.setP} api={api} setApi={setApi} apiError={apiError} retryApi={refreshApi} />
+              : !draft.getError && <LoadingRows rows={4} rowHeight={56} />}
+          </TabPanel>
         </div>
-      </SettingsCard>
-
-      <SettingsCard title={t("settings.cameraTitle")}>
-        <p className="m-0 mb-2 text-paragraph-xs text-text-soft-400">
-          {t("settings.cameraHelp1")}
-          <strong>{t("settings.cameraLeaveOn")}</strong>{t("settings.cameraHelp2")}
-        </p>
-        <Switch
-          label={t("settings.cameraSwitchLabel")}
-          checked={s.camera_enabled ?? true}
-          onChange={(checked) => setS({ ...s, camera_enabled: checked })}
-        />
-      </SettingsCard>
-
-      <SettingsCard title={t("settings.dataLocationTitle")}>
-        <DataRootCard />
-      </SettingsCard>
-
-      <SettingsCard title={t("settings.extraArgsTitle")}>
-        <p className="m-0 mb-2 text-paragraph-xs text-text-soft-400">
-          {t("settings.extraArgsHelp1")}<strong>{t("settings.extraArgsLastWord")}</strong>{t("settings.extraArgsHelp2")}
-          <br />
-          {t("settings.extraArgsHelp3")}
-        </p>
-        <Textarea
-          rows={3}
-          className="mono"
-          value={s.extra_args ?? ""}
-          onChange={(e) => setS({ ...s, extra_args: e.target.value })}
-          placeholder={"--disable-background-timer-throttling\n--window-size=1280,800"}
-        />
-      </SettingsCard>
-
-      <SettingsCard title={t("settings.apiTitle")}>
-        <p className="m-0 mb-2 text-paragraph-xs text-text-soft-400">
-          {t("settings.apiHelp1")}<strong>127.0.0.1</strong>{t("settings.apiHelp2")}{" "}
-          <a
-            href="#"
-            className="text-primary-base hover:underline"
-            onClick={(e) => {
-              e.preventDefault();
-              openUrl(withUtm("https://docs.proxyshard.com/eng/shardx-launcher-api/binding-and-lifecycle?fallback=true")).catch(() => {});
-            }}
-          >
-            {t("settings.apiRefLink")}
-          </a>
-        </p>
-        <div className="flex flex-col gap-3">
-          <Switch
-            label={t("settings.apiEnableLabel")}
-            checked={s.api_enabled ?? true}
-            onChange={(checked) => setS({ ...s, api_enabled: checked })}
-          />
-          <Input
-            label={t("settings.apiPortLabel")}
-            inputSize="small"
-            type="number"
-            value={s.api_port ?? 40325}
-            onChange={(e) => setS({ ...s, api_port: Number(e.target.value) || 40325 })}
-          />
-          {api && (
-            <>
-              <label className="flex flex-col gap-1.5">
-                <span className="text-label-xs text-text-sub-600">{t("settings.apiBaseUrlLabel")}</span>
-                <CopyField value={api.base_url} />
-              </label>
-              <label className="flex flex-col gap-1.5">
-                <span className="text-label-xs text-text-sub-600">{t("settings.apiTokenLabel")}</span>
-                <CopyField value={api.token} secret />
-              </label>
-              <div className="mt-1 flex items-center gap-2.5">
-                <Button variant="neutral" mode="stroke" size="small" onClick={regenToken}>
-                  {t("settings.apiRegenerateBtn")}
-                </Button>
-                <span className="text-paragraph-xs text-text-soft-400">{t("settings.apiRegenerateHint")}</span>
-              </div>
-              <p className="m-0 text-paragraph-xs text-text-soft-400">
-                {t("settings.apiAuthHeaderHint")}<code>Authorization: Bearer &lt;token&gt;</code>.
-              </p>
-            </>
-          )}
-        </div>
-      </SettingsCard>
-
-      <SettingsCard title={t("settings.mcpTitle")}>
-        <p className="m-0 mb-2 text-paragraph-xs text-text-soft-400">
-          {t("settings.mcpHelp1")}<strong>MCP</strong>{t("settings.mcpHelp2")}
-        </p>
-        <Button
-          variant="neutral"
-          mode="stroke"
-          size="small"
-          leftIcon={<DownloadIcon className="size-4" />}
-          onClick={downloadMcp}
-          disabled={mcpBusy}
-          isLoading={mcpBusy}
-        >
-          {mcpBusy ? t("settings.mcpDownloading") : t("settings.mcpDownloadBtn")}
-        </Button>
-      </SettingsCard>
-
-      <div className="mt-3.5">
-        <Button
-          variant="primary"
-          mode="filled"
-          size="small"
-      //    leftIcon={<ShardMini />}
-          onClick={async () => { await save(); refreshApi(); }}
-        >
-          {t("settings.saveBtn")}
-        </Button>
-      </div>
-    </section>
+      </PageBody>
+      <SaveBar dirty={draft.dirty} saving={draft.state === "saving"} error={draft.error} held={draft.held} onSave={() => { commitFocusedField(); void draft.save(); }} onDiscard={draft.discard} />
+    </>
   );
 }

@@ -1,25 +1,30 @@
 import { useMemo } from "react";
-import { filterProxies, useProxy } from "./useProxy";
+import { filterProxies, sortProxies, useProxy, usedByProxy } from "./useProxy";
 
-/// Search-filtered proxies, matching name/host/port/country/notes/user + geo snapshot.
+/// The proxies the list shows, in Display's order: the search (name, host,
+/// port, country, notes, user, geo snapshot) and the Filters menu.
 export function useFilteredProxies() {
     const proxies = useProxy((s) => s.proxies);
     const snapshots = useProxy((s) => s.snapshots);
     const search = useProxy((s) => s.search);
+    const filters = useProxy((s) => s.filters);
+    const sort = useProxy((s) => s.sort);
+    const used = useProfileCountByProxy();
     return useMemo(
-        () => filterProxies(proxies, snapshots, search),
-        [proxies, snapshots, search],
+        () => sortProxies(filterProxies(proxies, snapshots, search, filters, used), sort, snapshots, used),
+        [proxies, snapshots, search, filters, sort, used],
     );
 }
 
 /// proxy_id → bound-profile count (O(n) tally; n is small).
 export function useProfileCountByProxy() {
     const profiles = useProxy((s) => s.profiles);
-    return useMemo(() => {
-        const out: Record<string, number> = {};
-        for (const p of profiles) {
-            if (p.proxy_id) out[p.proxy_id] = (out[p.proxy_id] ?? 0) + 1;
-        }
-        return out;
-    }, [profiles]);
+    return useMemo(() => usedByProxy(profiles), [profiles]);
+}
+
+/// The selected proxies the list shows, in its order: what bulk actions act on.
+export function useSelectedVisibleProxies() {
+    const visible = useFilteredProxies();
+    const sel = useProxy((s) => s.proxySel);
+    return useMemo(() => visible.filter((p) => sel.has(p.id)), [visible, sel]);
 }

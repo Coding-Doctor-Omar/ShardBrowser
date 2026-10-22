@@ -12,9 +12,9 @@ import { spawnSync } from "node:child_process";
 import AdmZip from "adm-zip";
 
 export const PUB_BASE = "https://pub-e57a7c60f6934eb09a6600bf2fc59cdc.r2.dev";
-export const CHROMIUM_VERSION = "152.0.7977.65";
+export const CHROMIUM_VERSION = "156.0.8078.48";
 /** This SDK's own version, compared against the manifest's `min_sdk_version`. */
-export const SDK_VERSION = "2.0.3";
+export const SDK_VERSION = "2.1.0";
 // Version manifest (GitHub raw) — one tiny GET yields every archive's current
 // etag, so we never poll R2/S3 (no per-archive HEAD). Changed archives are then
 // pulled from PUB_BASE.
@@ -231,7 +231,12 @@ export class Runtime {
     const local = this.loadManifest();
     const remote = await this.fetchManifest();
     // Remember the engine version + grease so launch can normalise profiles.
-    this._chromiumVersion = remote.chromiumVersion ?? CHROMIUM_VERSION;
+    // Without the manifest, what is ALREADY installed — not the version this
+    // SDK was published with. Falling back to the constant made an offline
+    // run record 152 over an engine that is 156, and profiles then declared
+    // a version the engine does not have.
+    this._chromiumVersion =
+      remote.chromiumVersion ?? local.installed_chromium_version ?? CHROMIUM_VERSION;
     this._greaseBrand = remote.greaseBrand;
     this._greaseVersion = remote.greaseVersion;
     this._tls = remote.tls;
@@ -251,11 +256,16 @@ export class Runtime {
     // Manifest unreachable → don't force a re-download.
     const needBrowser = force || !this.installed || this.engineOutdated(local, remote);
     if (needBrowser) {
-      // Wipe the old engine tree first so a leftover `<old>.manifest` / stale
-      // libs can't linger beside the new ones (that pinned the detected version
-      // → endless re-download). binarySubpath[0] is the engine root dir.
+      // Download BEFORE wiping. The old tree has to go — a leftover
+      // `<old>.manifest` or a stale lib beside the new ones pinned the
+      // detected version and the SDK re-downloaded for ever — but doing it
+      // first meant a download that failed left no engine at all, and the
+      // next run had nothing to fall back to. The archive is on disk by the
+      // time anything is removed.
+      const { tmp, etag } = await this.download(this.spec.browser, this.root);
       rmSync(join(this.root, this.spec.binarySubpath[0]), { recursive: true, force: true });
-      local.browser_etag = await this.downloadAndExtract(this.spec.browser, this.root);
+      this.extractArchive(tmp, this.root);
+      local.browser_etag = etag;
       if (remote.engineBuild) local.installed_engine_build = remote.engineBuild;
     }
     if (this.spec.widevine && (needBrowser || !local.widevine_etag)) {
@@ -311,7 +321,8 @@ export class Runtime {
     } catch { return { archives: {} }; }
   }
 
-  private async downloadAndExtract(arch: Archive, dest: string): Promise<string> {
+  /** Downloads `arch` beside `dest` and returns where it landed, with its etag. */
+  private async download(arch: Archive, dest: string): Promise<{ tmp: string; etag: string }> {
     const url = `${PUB_BASE}/${arch.key}`;
     mkdirSync(dest, { recursive: true });
     const tmp = join(dest, `.${arch.key}.tmp`);
@@ -338,7 +349,11 @@ export class Runtime {
       stream.on("data", () => this.progress!(arch.label, received, total));
     }
     await pipeline(stream, out);
+    return { tmp, etag };
+  }
 
+  /** Unpacks an archive `download` left behind, and removes it. */
+  private extractArchive(tmp: string, dest: string): void {
     // Extract.  IMPORTANT: on macOS/Linux shell out to the system
     // `unzip` instead of adm-zip — adm-zip writes symlinks as ordinary
     // text files (every `Versions/Current/...` link in a `.app`
@@ -351,6 +366,12 @@ export class Runtime {
       systemUnzip(tmp, dest);
     }
     rmSync(tmp, { force: true });
+  }
+
+  /** Downloads and unpacks in one step, for everything that has nothing to lose. */
+  private async downloadAndExtract(arch: Archive, dest: string): Promise<string> {
+    const { tmp, etag } = await this.download(arch, dest);
+    this.extractArchive(tmp, dest);
     return etag;
   }
 
