@@ -2,6 +2,8 @@
 *
 !crates/team-model/Cargo.toml
 !crates/team-model/src
+!crates/team-wire/Cargo.toml
+!crates/team-wire/src
 !team-server/Cargo.toml
 !team-server/Cargo.lock
 !team-server/src
