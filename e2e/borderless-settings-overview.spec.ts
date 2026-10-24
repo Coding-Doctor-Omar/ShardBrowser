@@ -132,7 +132,10 @@ test("Overview: a problem card's sentence and detail sit centered between its ti
       const fix = el.lastElementChild!.getBoundingClientRect();
       const group = el.children[1].firstElementChild!.getBoundingClientRect();
       const last = (el.querySelector("[data-card-usage]") ?? el.querySelector("[data-card-detail]"))!.getBoundingClientRect();
-      return { above: group.top - title.bottom, below: fix.top - last.bottom };
+      // A wide card sets its fix beside the text: the text's room then ends at the card's padding.
+      const beside = fix.left >= group.right;
+      const end = el.getBoundingClientRect().bottom - parseFloat(getComputedStyle(el).paddingBottom) * Number(getComputedStyle(document.documentElement).zoom || 1);
+      return { above: group.top - title.bottom, below: (beside ? end : fix.top) - last.bottom };
     });
     // Centered: the two gaps match within a pixel, and neither is a stretch.
     expect(Math.abs(gaps.above - gaps.below), `card ${i}: balanced ${JSON.stringify(gaps)}`).toBeLessThanOrEqual(1);

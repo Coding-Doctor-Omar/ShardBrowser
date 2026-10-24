@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { Button, Combobox, IconButton, Tooltip, cn } from "@proxyshard/shardx-ui-kit";
 import { ChevronDownIcon, CloseIcon } from "../../../shared/icons";
-import { extensionName, iconSrc, useExtensions, type ExtensionEntry } from "../../../entities/extension";
+import { canUpdate, extensionName, iconSrc, useExtensionUpdates, useExtensions, type ExtensionEntry } from "../../../entities/extension";
 import { useNav } from "../../../shared/model/navigation";
 import { useT } from "../../../shared/i18n";
 
@@ -36,6 +36,7 @@ export function ExtensionPicker({
   const t = useT();
   const items = useExtensions((s) => s.items);
   const init = useExtensions((s) => s.init);
+  const updates = useExtensionUpdates((s) => s.byId);
   const go = useNav((s) => s.setSection);
   const [open, setOpen] = useState(false);
 
@@ -70,7 +71,8 @@ export function ExtensionPicker({
       options={items.map((e) => ({
         value: e.id,
         label: extensionName(e),
-        hint: e.version || undefined,
+        // An update the Web Store offers, in words beside the version (never a dot alone).
+        hint: canUpdate(updates[e.id]) ? t("extensionPicker.updateHint", { version: e.version }) : e.version || undefined,
         keywords: [e.description],
         icon: <Icon e={e} className="size-3.5" />,
       }))}

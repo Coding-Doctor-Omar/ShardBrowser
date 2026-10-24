@@ -1,18 +1,19 @@
 import { useEffect, useRef } from "react";
 import { Button, IconSwap, Tooltip, usePresence, useLatched } from "@proxyshard/shardx-ui-kit";
-import { EditIcon, PlayIcon, SpinnerIcon, StopIcon } from "../../shared/icons";
+import { EditIcon, PeekIcon, PlayIcon, SpinnerIcon, StopIcon } from "../../shared/icons";
 import { focusProfileRow } from "../../shared/lib/focusRow";
 import { useNow } from "../../shared/lib/useNow";
 import { LoadError, LoadingRows } from "../../shared/ui/ListStates";
 import { StatusPill } from "../../shared/ui/StatusPill";
 import { PeekBody, PeekHeader, PeekPanel, PeekSection, PropertySheet } from "../../shared/ui/peek";
 import { useLang, useT } from "../../shared/i18n";
-import { profileStatus, proxyMissing, useProfile, useProfileUi, type ProfileMeta } from "../../entities/profile";
+import { may, profileStatus, proxyMissing, settingsRefusal, startRefusal, useProfile, useProfileUi, useSaving, type ProfileMeta } from "../../entities/profile";
 import { usePeekForm } from "./usePeekForm";
 import { FingerprintDetails, ProfileDetails } from "./rows/DetailRows";
 import { ActivityLine } from "./rows/ActivityLine";
 import { capOf, command, labelOf, menuItemsFor } from "../../features/commands";
 import { openProfileForm, type ProfileFormTab } from "../../features/profile-form";
+import { openHereInstead } from "../../features/profile-sync";
 
 /// The side panel that shows one profile while the list stays in view
 /// (CONTEXT: Peek). It only shows: the header's Edit, and each section's,
@@ -47,9 +48,13 @@ export function ProfilePeek() {
     focusProfileRow(shown.id, { ifLost: !inside });
   };
   // A section's "Edit" opens the profile form on its tab; the section's title describes it.
-  const edit = (tab: ProfileFormTab) => (titleId: string) => (
+  // Without Edit on a team's profile the form opens to read, and the button says View.
+  const canEdit = may(shown, "edit");
+  // A team row's settings the server sends only with a right that uses it (cache.rs).
+  const hidden = settingsRefusal(shown);
+  const edit = (tab: ProfileFormTab) => hidden && tab !== "basics" ? undefined : (titleId: string) => (
     <Button variant="neutral" mode="ghost" size="3xsmall" className="-my-1 -mr-1.5" data-section-edit={tab} aria-describedby={titleId} onClick={() => openProfileForm({ mode: "edit", id: shown.id, tab })}>
-      {t("peek.edit")}
+      {canEdit ? t("peek.edit") : t("peek.view")}
     </Button>
   );
   // The form of the profile shown, not of the one Peek left a moment ago.
@@ -64,7 +69,9 @@ export function ProfilePeek() {
             <ProfileDetails profile={shown} />
           </PeekSection>
           <PeekSection id="fingerprint" title={t("peek.fingerprint")} action={edit("fingerprint")}>
-            {fingerprint ? (
+            {hidden ? (
+              <p data-settings-hidden className="m-0 px-1 text-help text-text-sub-600">{hidden}</p>
+            ) : fingerprint ? (
               <FingerprintDetails form={fingerprint} />
             ) : loadError ? (
               <LoadError headingLevel={3} what={t("otherStates.profile")} error={loadError} onRetry={retry} />
@@ -97,7 +104,9 @@ function ProfilePeekHeader({ profile, onClose }: { profile: ProfileMeta; onClose
   const cancelStart = useProfile((s) => s.cancelStart);
   // Task 5d's one function, reused here (Task 5f): the same word, dot and
   // pill the Profiles list's Status column shows (Live layer, spec 4.2).
-  const runStatus = profileStatus(profile, { starting: isStarting, cancelled, stopping, runningSince, failedAt, now, lang, proxyMissing: proxyMissing(profile, proxies) });
+  // Its session still being sent: Saving…, and Start says why it waits (startRefusal reads it).
+  const saving = useSaving((s) => s.ids.has(profile.id));
+  const runStatus = profileStatus(profile, { starting: isStarting, cancelled, stopping, runningSince, failedAt, saving, now, lang, proxyMissing: proxyMissing(profile, proxies) });
   // A running profile's note is its status's tooltip, not a line (CRAFT-01);
   // any other state's tooltip is its exact detail, as in the list. A screen
   // reader reads it with the word, as the list's Status cell does.
@@ -106,8 +115,14 @@ function ProfilePeekHeader({ profile, onClose }: { profile: ProfileMeta; onClose
   // items for this profile, with their icons and keys. Start and Stop are the
   // header's own button. Built each render, so Import cookies… reads Running.
   const menuItems = menuItemsFor("peekMenu", "profiles", { ids: [profile.id] });
+  // Open on another computer (personal sync): Start would be refused, so the button takes it here instead.
+  const held = !isRunning && !isStarting && runStatus.tone === "elsewhere" && !!profile.sync?.open_on;
+  // A team's: no Start, or another device has it open. The button says why and does nothing.
+  const blocked = !isRunning && !isStarting ? startRefusal(profile) : null;
+  const canEdit = may(profile, "edit");
   const pill = (
-    <span data-peek-run-status className="flex min-w-0 shrink-0">
+    // Open elsewhere: the device name is cut before the profile's; the Sync row has it whole.
+    <span data-peek-run-status className={runStatus.tone === "elsewhere" ? "flex min-w-[4.5rem] shrink-[100]" : "flex min-w-0 shrink-0"}>
       <StatusPill status={runStatus} />
       {note && <span className="sr-only">{note}</span>}
     </span>
@@ -118,17 +133,21 @@ function ProfilePeekHeader({ profile, onClose }: { profile: ProfileMeta; onClose
       title={<h2 className="m-0 min-w-0 truncate text-panel-title text-text-strong-950">{profile.name}</h2>}
       status={note ? <Tooltip content={note}>{pill}</Tooltip> : pill}
       extra={
-        <Button
-          variant="neutral" mode="stroke" size="3xsmall" data-peek-edit
-          leftIcon={<EditIcon className="size-3.5" />}
-          onClick={() => openProfileForm({ mode: "edit", id: profile.id })}
-        >
-          {t("peek.edit")}
-        </Button>
+        // Its word goes first when the header is tight (PeekHeader): the tooltip says it then.
+        <Tooltip content={canEdit ? t("peek.edit") : t("peek.view")} whenTruncated>
+          <Button
+            variant="neutral" mode="stroke" size="3xsmall" data-peek-edit
+            leftIcon={canEdit ? <EditIcon className="size-3.5" /> : <PeekIcon className="size-3.5" />}
+            onClick={() => openProfileForm({ mode: "edit", id: profile.id })}
+          >
+            {canEdit ? t("peek.edit") : t("peek.view")}
+          </Button>
+        </Tooltip>
       }
       primary={
         // Starting says Cancel and spins in place, keeping focus; pressed, it
         // says Cancelling and waits (busy). Stop comes once the launch returns.
+        <Tooltip content={blocked ?? undefined}>
         <Button
           variant={isStarting ? "neutral" : isRunning ? "error" : "primary"}
           mode="lighter"
@@ -137,10 +156,14 @@ function ProfilePeekHeader({ profile, onClose }: { profile: ProfileMeta; onClose
           leftIcon={isStarting
             ? <SpinnerIcon className="size-3.5 animate-spin" />
             : <IconSwap on={isRunning} onIcon={<StopIcon className="size-3.5" />} offIcon={<PlayIcon className="size-3.5" />} />}
-          onClick={() => void (isStarting ? cancelStart(profile.id) : startStop(profile))}
+          data-blocked={blocked ? "" : undefined}
+          disabled={!!blocked}
+          aria-description={blocked ?? undefined}
+          onClick={() => { if (!blocked) void (isStarting ? cancelStart(profile.id) : held ? openHereInstead(profile) : startStop(profile)); }}
         >
-          {isCancelling ? t("profileRowActions.cancelling") : isStarting ? labelOf("profile.cancelStart") : labelOf(isRunning ? "profile.stop" : "profile.start")}
+          {isCancelling ? t("profileRowActions.cancelling") : isStarting ? labelOf("profile.cancelStart") : held ? t("profileSync.takeConfirm") : labelOf(isRunning ? "profile.stop" : "profile.start")}
         </Button>
+        </Tooltip>
       }
       menuItems={menuItems}
       menuLabel={t("pageHeader.more")}

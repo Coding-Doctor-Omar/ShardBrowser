@@ -18,6 +18,9 @@ import {
   ShardLogo,
   ShardMini,
   SidebarIcon,
+  SpacePersonalIcon,
+  SpaceTeamIcon,
+  UnfoldMoreIcon,
 } from "../../shared/icons";
 import { FOLDER_CAP, useSidebarPrefs, type GroupId } from "./prefs";
 import { useRailKey } from "./useRailKey";
@@ -30,12 +33,13 @@ import { useKeyPrefs } from "../../shared/model/keyPrefs";
 import { useWhatsNew } from "../../shared/model/whatsNew";
 import { useLang, useT } from "../../shared/i18n";
 import {
-  leaveList, profileStatus, proxyMissing, useAllViews, useFolderLook, useFolders, useProfile, useProfileUi, useRunningCount,
+  leaveList, profileStatus, proxyMissing, useAllViews, useFolderLook, useFolders, useProfile, useProfileUi, useRunningCount, useSaving,
   useViewCounts, useViews, viewName,
 } from "../../entities/profile";
 import { useProxy } from "../../entities/proxy";
 import { leaveEditor } from "../../entities/automation";
 import { useFingerprint } from "../../entities/fingerprint";
+import { updatableCount, useExtensionUpdates } from "../../entities/extension";
 import { apiInfo } from "../../entities/settings";
 import { clip } from "../../shared/lib/clipboard";
 import { toast } from "../../shared/model/toast";
@@ -53,6 +57,12 @@ import { initialsOf } from "../../shared/lib/initials";
 import { StatusDot } from "../../shared/ui/StatusDot";
 import { ViewIcon } from "../../shared/ui/ViewIcon";
 import type { ProfileMeta } from "../../entities/profile";
+import { PERSONAL, activeTeam, adminRefusal, useInTeam, useRightsChange, useSpace, type Space, type TeamLink } from "../../entities/space";
+import { teamError } from "../../entities/team";
+import { JoinTeamHost, useJoinTeam } from "../../features/join-team";
+import { CreateTeamHost, useCreateTeam } from "../../features/create-team";
+import { useTeamTrashShown } from "../../features/team-trash";
+import { confirmModal } from "../../shared/model/confirm";
 
 /// The rail as drawn (`rail`): the user's choice (Mod+\ or the sidebar's
 /// own button), or while Peek is open below 1280 px, where the list needs
@@ -170,7 +180,9 @@ function Group({ id, label, action, compact, children }: {
   );
 }
 
-function PageItem({ id, label, icon, compact }: { id: Section; label: string; icon: ReactNode; compact: boolean }) {
+function PageItem({ id, label, icon, compact, badge, badgeLabel }: {
+  id: Section; label: string; icon: ReactNode; compact: boolean; badge?: ReactNode; badgeLabel?: string;
+}) {
   const section = useNav((s) => s.section);
   const setSection = useNav((s) => s.setSection);
   // Its Go to key from the registry, in the rail's tooltip, as Search's
@@ -189,6 +201,8 @@ function PageItem({ id, label, icon, compact }: { id: Section; label: string; ic
       shortcut={go ? capOf(go) : undefined}
       aria-keyshortcuts={go ? ariaOf(go) : undefined}
       active={section === id}
+      badge={badge}
+      badgeLabel={badgeLabel}
       // A keyboard press (a click with no pointer, detail 0) puts the
       // keyboard on the page; a pointer click leaves it here (A11Y-04).
       // Automation, pressed on its own page, is the way back from a project
@@ -198,6 +212,30 @@ function PageItem({ id, label, icon, compact }: { id: Section; label: string; ic
         if (id === "automation" && section === "automation") { void leaveEditor().then((ok) => { if (ok) void setSection(id, { focus }); }); return; }
         void setSection(id, { focus });
       }}
+    />
+  );
+}
+
+/// Extensions, with how many Web Store updates wait for the person (§3.7):
+/// not the ones waiting for profiles or marked harmful. The rail has no room
+/// for the badge: the count sits on the icon, and its name says it in words.
+function ExtensionsItem({ compact }: { compact: boolean }) {
+  const t = useT();
+  const n = useExtensionUpdates((s) => updatableCount(s.byId));
+  const rail = compact && n > 0;
+  return (
+    <PageItem
+      id="extensions"
+      label={rail ? (n === 1 ? t("sidebar.extensionsRailOne", { n }) : t("sidebar.extensionsRailMany", { n })) : t("sidebar.navExtensions")}
+      icon={rail ? (
+        <span className="relative flex">
+          <NavExtensionsIcon className="size-3.5" />
+          <Badge data-update-count aria-hidden="true" color="warning" size="small" shape="pill" className="absolute -top-2 left-2 min-w-[14px] px-[3px]! leading-none">{n}</Badge>
+        </span>
+      ) : <NavExtensionsIcon className="size-3.5" />}
+      compact={compact}
+      badge={n > 0 ? <Badge data-update-count color="warning" size="small">{n}</Badge> : undefined}
+      badgeLabel={n > 0 ? (n === 1 ? t("sidebar.extensionUpdatesOne", { n }) : t("sidebar.extensionUpdatesMany", { n })) : undefined}
     />
   );
 }
@@ -300,6 +338,10 @@ function FoldersGroup({ compact }: { compact: boolean }) {
   const setFolderDialog = useProfileUi((s) => s.setFolderDialog);
   const folders = useFolders();
   const ready = useProfile((s) => s.status === "ready");
+  // In a team only its admin makes a folder: the button says so and does nothing.
+  useRightsChange();
+  const noNewFolder = adminRefusal();
+  const newFolder = () => { if (!noNewFolder) setFolderDialog({ mode: "create" }); };
   const open = useSidebarPrefs((s) => s.foldersOpen);
   const setOpen = useSidebarPrefs((s) => s.setFoldersOpen);
   const ctx = useContextMenu();
@@ -334,7 +376,7 @@ function FoldersGroup({ compact }: { compact: boolean }) {
       compact={compact}
       action={
         <IconButton
-          label={t("sidebar.newFolder")}
+          label={noNewFolder ? t("rights.labelWhy", { label: t("sidebar.newFolder"), why: noNewFolder }) : t("sidebar.newFolder")}
           // Owner feedback 5r: a folder glyph, not a bare + (which reads as
           // "new profile"). Fix round 1, finding 4: the same row-button
           // hover rule as the list rows (the hover and active roles, with
@@ -342,7 +384,9 @@ function FoldersGroup({ compact }: { compact: boolean }) {
           icon={<FolderAddIconApp className="size-3.5" />}
           className={rowButtonHoverClass}
           size="3xsmall"
-          onClick={() => setFolderDialog({ mode: "create" })}
+          disabled={!!noNewFolder}
+          data-new-folder=""
+          onClick={newFolder}
         />
       }
     >
@@ -377,9 +421,10 @@ function FoldersGroup({ compact }: { compact: boolean }) {
         <NavItem
           size="small"
           icon={<FolderAddIconApp className="size-3.5" />}
-          label={t("sidebar.newFolder")}
+          label={noNewFolder ? t("rights.labelWhy", { label: t("sidebar.newFolder"), why: noNewFolder }) : t("sidebar.newFolder")}
           collapsed
-          onClick={() => setFolderDialog({ mode: "create" })}
+          aria-disabled={noNewFolder ? true : undefined}
+          onClick={newFolder}
         />
       )}
       {ctx.node}
@@ -480,6 +525,7 @@ function PinnedItem({ profile: p, compact, onMenu }: {
   const cancelled = useProfile((s) => s.cancelled.has(p.id));
   const stopping = useProfile((s) => s.pending[p.id]?.kind === "stop");
   const failedAt = useProfile((s) => s.startFailed[p.id]);
+  const saving = useSaving((s) => s.ids.has(p.id));
   const proxies = useProfile((s) => s.proxies);
   const startStop = useProfile((s) => s.startStop);
   const show = () => {
@@ -498,7 +544,7 @@ function PinnedItem({ profile: p, compact, onMenu }: {
   };
   // Fix round 1, finding 3: the same `profileStatus` the Profiles list and
   // Peek use, so a starting or idle pinned profile reads as its row does.
-  const status = profileStatus(p, { starting: startBusy, cancelled, stopping, runningSince, failedAt, now, lang, proxyMissing: proxyMissing(p, proxies) });
+  const status = profileStatus(p, { starting: startBusy, cancelled, stopping, runningSince, failedAt, saving, now, lang, proxyMissing: proxyMissing(p, proxies) });
   return (
     <div data-pinned={p.id} className="group/pin relative">
       <NavItem
@@ -719,6 +765,123 @@ function ApiStatus({ compact }: { compact: boolean }) {
   );
 }
 
+const hostOf = (url: string) => { try { return new URL(url).host; } catch { return url; } };
+
+/** Which space the launcher works in, the person's own or a team's, and the
+ *  way to switch: always in view, the folded rail too (team initials there). */
+function SpaceItem({ compact }: { compact: boolean }) {
+  const t = useT();
+  const st = useSpace((s) => s.state);
+  const menu = useContextMenu();
+  useEffect(() => { void useSpace.getState().load().catch(() => {}); }, []);
+  const team = activeTeam(st);
+  const onTeamPage = useNav((s) => s.section === "team");
+
+  // A refusal is said, never lost: the team may have changed since the menu read it.
+  // Re-read first, so the menu opened after the toast already shows why.
+  const choose = async (space: Space, name: string) => {
+    try {
+      await useSpace.getState().choose(space);
+    } catch (e) {
+      await useSpace.getState().load().catch(() => {});
+      toast.fail({ title: t("sidebar.spaceSwitchFailed", { name }), detail: teamError(e) });
+    }
+  };
+  const drop = async (x: TeamLink, title: string) => {
+    try {
+      await useSpace.getState().leave(x.id);
+    } catch (e) {
+      toast.fail({ title, detail: teamError(e) });
+    }
+  };
+
+  const leave = async () => {
+    if (!team) return;
+    const ok = await confirmModal({
+      title: t("team.leaveTitle", { name: team.name }),
+      // The admin token is shown once, when the server first starts: no invite brings its admin back.
+      message: team.admin ? t("team.leaveAdminMessage") : t("team.leaveMessage"),
+      confirmLabel: t("team.leaveConfirm"),
+      danger: true,
+    });
+    if (ok) await drop(team, t("sidebar.spaceLeaveFailed", { name: team.name }));
+  };
+
+  // A team that withdrew this launcher cannot be worked in, only forgotten.
+  const forget = async (x: TeamLink) => {
+    const ok = await confirmModal({
+      title: t("team.withdrawnTitle", { name: x.name }),
+      message: t("team.withdrawnMessage"),
+      confirmLabel: t("team.withdrawnForget"),
+    });
+    if (ok) await drop(x, t("sidebar.spaceForgetFailed", { name: x.name }));
+  };
+
+  // A team whose token its admin replaced waits for the new invite (Join opens with its address in),
+  // or is forgotten when none is coming.
+  const reinvite = async (x: TeamLink) => {
+    const choice = await confirmModal({
+      title: t("team.replacedTitle", { name: x.name }),
+      message: t("team.replacedMessage"),
+      buttons: [
+        { label: t("confirm.cancel"), value: null },
+        { label: t("team.withdrawnForget"), value: "forget" },
+        { label: t("team.replacedPaste"), value: "paste", primary: true },
+      ],
+    });
+    if (choice === "paste") requestAnimationFrame(() => useJoinTeam.getState().openFor(x.server));
+    if (choice === "forget") await drop(x, t("sidebar.spaceForgetFailed", { name: x.name }));
+  };
+
+  const items: MenuItem[] = [
+    { type: "radio", label: t("sidebar.spacePersonal"), checked: !team, onSelect: () => void choose(PERSONAL, t("sidebar.spacePersonal")) },
+    ...(st?.teams ?? []).map((x): MenuItem => x.revoked
+      ? { label: x.name, hint: t("sidebar.spaceWithdrawn"), onSelect: () => void forget(x) }
+      : x.needs_invite
+        ? { label: x.name, hint: t("sidebar.spaceNeedsInvite"), onSelect: () => void reinvite(x) }
+        : {
+            type: "radio",
+            label: x.name,
+            hint: hostOf(x.server),
+            checked: team?.id === x.id,
+            onSelect: () => void choose({ kind: "team", team_id: x.id }, x.name),
+          }),
+    { type: "separator" },
+    // The team in hand: its page (its admin's tools, or a member's own access).
+    ...(team ? [{ label: team.admin ? t("sidebar.spaceManage") : t("sidebar.spaceAccess"), onSelect: () => void useNav.getState().setSection("team") } as MenuItem] : []),
+    // A frame later: the menu first gives the keyboard back to this row, where the dialog returns it.
+    { label: t("sidebar.spaceJoin"), onSelect: () => requestAnimationFrame(() => useJoinTeam.getState().setOpen(true)) },
+    { label: t("sidebar.spaceCreate"), onSelect: () => requestAnimationFrame(() => useCreateTeam.getState().setOpen(true)) },
+    ...(team ? [{ type: "separator" } as MenuItem, { label: t("sidebar.spaceLeave"), danger: true, onSelect: () => void leave() } as MenuItem] : []),
+  ];
+
+  return (
+    <>
+      <NavItem
+        size="small"
+        data-nav="space"
+        data-space={team ? "team" : "personal"}
+        icon={team
+          ? compact
+            ? <span data-initials aria-hidden="true" className="text-micro text-text-sub-600">{initialsOf(team.name)}</span>
+            : <SpaceTeamIcon className="size-3.5" />
+          : <SpacePersonalIcon className="size-3.5" />}
+        label={team?.name ?? t("sidebar.spacePersonal")}
+        // Up and down: a switch between spaces, not a page.
+        badge={<UnfoldMoreIcon aria-hidden="true" className="size-3.5 text-icon-soft-400" />}
+        collapsed={compact}
+        active={onTeamPage}
+        aria-haspopup="menu"
+        aria-description={t("sidebar.spaceSwitch")}
+        onClick={(e) => menu.openFrom(e.currentTarget, items, { heading: t("sidebar.spaceHeading") })}
+      />
+      {menu.node}
+      <JoinTeamHost />
+      <CreateTeamHost />
+    </>
+  );
+}
+
 /** The launcher version; opens What's new and flags an available update. */
 function VersionItem({ compact }: { compact: boolean }) {
   const t = useT();
@@ -785,6 +948,8 @@ const currentItem = (items: HTMLElement[]) => items.find((el) => el.getAttribute
 export function Sidebar() {
   const t = useT();
   const { rail: compact, byPeek } = useRailState();
+  const team = useInTeam();
+  const teamTrash = useTeamTrashShown();
   // One Tab stop for the whole sidebar, on the current page's item (A11Y-14:
   // 20 stops before the filter): the arrows, Home, End and a typed letter
   // move among its items, the folding group headings, their buttons and the
@@ -888,7 +1053,7 @@ export function Sidebar() {
           <AllProfilesItem compact={compact} />
           <PageItem id="proxies" label={t("sidebar.navProxies")} icon={<RouteIcon className="size-3.5" />} compact={compact} />
           <PageItem id="fingerprints" label={t("sidebar.navFingerprints")} icon={<NavFingerprintsIcon className="size-3.5" />} compact={compact} />
-          <PageItem id="extensions" label={t("sidebar.navExtensions")} icon={<NavExtensionsIcon className="size-3.5" />} compact={compact} />
+          <ExtensionsItem compact={compact} />
           <PageItem id="bookmarks" label={t("sidebar.navBookmarks")} icon={<NavBookmarksIcon className="size-3.5" />} compact={compact} />
           <PageItem id="automation" label={t("sidebar.navProjects")} icon={<NavAutomationIcon className="size-3.5" />} compact={compact} />
           <PageItem id="proxyshard" label={t("sidebar.navAccountShop")} icon={<NavShopIcon className="size-3.5" />} compact={compact} />
@@ -908,7 +1073,9 @@ export function Sidebar() {
       {/* No rule over the footer (borderless): the hairline above the API
           row is its one line. */}
       <div data-sidebar-footer className="flex shrink-0 flex-col gap-0.5 p-2">
-        <PageItem id="trash" label={t("sidebar.navTrash")} icon={<NavTrashIcon className="size-3.5" />} compact={compact} />
+        <SpaceItem compact={compact} />
+        {/* In a team its Trash is the team's, for its admin and a member who sees rows in it. */}
+        {(!team || teamTrash) && <PageItem id="trash" label={t("sidebar.navTrash")} icon={<NavTrashIcon className="size-3.5" />} compact={compact} />}
         <PageItem id="settings" label={t("sidebar.navSettings")} icon={<NavSettingsIcon className="size-3.5" />} compact={compact} />
         <VersionItem compact={compact} />
         <ApiStatus compact={compact} />

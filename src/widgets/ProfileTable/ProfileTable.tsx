@@ -1,4 +1,5 @@
 import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties } from "react";
+import { useOnRightsMoved } from "../../entities/space";
 import { Checkbox, clientScale, cn, layoutRect, layoutToPointer, useContextMenu, useInputModality, useLatched, useVirtualList, type ContextMenuApi, type MenuItem } from "@proxyshard/shardx-ui-kit";
 import { ListStateCenter, LoadError, LoadingRows } from "../../shared/ui/ListStates";
 import { ProfileListEmpty } from "./ProfileListEmpty";
@@ -15,7 +16,7 @@ import { useScrollMemory, useScrollReset } from "../../shared/model/scrollMemory
 import { rowActionsCoverPx } from "../../shared/ui/RowHoverActions";
 import { ProfileRow } from "./ProfileRow";
 import { TagPicker } from "../../features/manage-tags";
-import { FolderPicker } from "../../features/manage-profiles";
+import { FolderPicker, RunButtonProbe } from "../../features/manage-profiles";
 import { useProfileListKeys } from "./useProfileListKeys";
 import { focusCellButton, focusProfileRow } from "../../shared/lib/focusRow";
 import { useMinuteClock } from "../../shared/lib/useNow";
@@ -61,6 +62,8 @@ export function ProfileTable({ loading }: { loading: boolean }) {
   const { list: visible, indexById } = useVisible();
   const proxyMap = useProxyMap();
   const ctx = useContextMenu();
+  // A row's menu built from rights that moved since closes (a new permission, told live).
+  useOnRightsMoved(ctx.close);
 
   const scrollRef = useRef<HTMLDivElement>(null);
   // The box that holds the list's minimum width (a column resize grows it, Task 6).
@@ -345,6 +348,7 @@ export function ProfileTable({ loading }: { loading: boolean }) {
         )
       )}
       {ctx.node}
+      <RunButtonProbe />
       {listPickerLife.mounted && listPickerShown && (
         <TagPicker
           key={listPickerLife.session}

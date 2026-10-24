@@ -16,8 +16,9 @@ export function extensionName(e: Pick<ExtensionEntry, "name" | "path" | "id">): 
   return noExtension(baseName(name || e.path)) || e.id;
 }
 
-/** Two entries with the same name and version are one extension installed twice. */
-export const extensionKey = (e: ExtensionEntry) => `${extensionName(e).toLowerCase()}\n${e.version.trim()}`;
+/** One extension installed twice: the same Web Store item, else the same name and version. */
+export const extensionKey = (e: ExtensionEntry) =>
+  e.source?.kind === "webstore" ? `store:${e.source.id}` : `${extensionName(e).toLowerCase()}\n${e.version.trim()}`;
 
 /** How many times each name-and-version is installed (see `extensionKey`). */
 export function installCounts(items: readonly ExtensionEntry[]): Map<string, number> {

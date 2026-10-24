@@ -46,7 +46,9 @@ test("a stored set from anywhere is made whole: junk, unknown and repeated ids, 
   expect(out.mixed).toEqual({ order: ["name", "status", "notes", "created", "tags"], hidden: ["tags", "created"] });
 });
 
-test("widths are clamped to each column's range; junk is dropped (Review Focus 1)", async ({ page }) => {
+// A wide row can draw a column past its max, and a person keep it there:
+// up to four times the max (owner, 2026-10-23).
+test("widths are clamped to each column's range, up to four times its max; junk is dropped (Review Focus 1)", async ({ page }) => {
   await load(page);
   const out = await page.evaluate(() => {
     const { __cols: m, __defs: d } = window as unknown as Win;
@@ -55,7 +57,7 @@ test("widths are clamped to each column's range; junk is dropped (Review Focus 1
       junk: m.normalizeWidths(d, "x"),
     };
   });
-  expect(out.mixed).toEqual({ tags: 64, notes: 640, created: 100 });
+  expect(out.mixed).toEqual({ tags: 64, notes: 2560, created: 100 });
   expect(out.junk).toEqual({});
 });
 
@@ -115,8 +117,8 @@ test("the grid template and the list's minimum width: every chosen column kept, 
       noLead: m.layoutColumns(d, s, {}, { ...row, lead: 0, available: null }),
     };
   }, ROW);
-  // Only Notes (the fill column) takes the spare room; every other column
-  // keeps its own width (owner, 2026-09-30).
+  // Not measured yet: Notes (the fill column) takes any room. Once the list's
+  // width is known, every column stretches (tableColumns.test.ts).
   expect(out.plain.template).toBe("28px var(--col-name,150px) var(--col-status,92px) var(--col-tags,96px) var(--col-notes,minmax(100px,1fr)) 108px");
   expect(out.plain).toMatchObject({ minWidth: 648, pinFirst: true });
   // Narrower than the columns: every chosen one stays; they give way to
@@ -127,9 +129,8 @@ test("the grid template and the list's minimum width: every chosen column kept, 
   expect(out.narrow).toMatchObject({ shown: ["name", "status", "tags", "notes", "created"], minWidth: 662, pinFirst: true });
   expect(out.narrow.template).toBe("28px var(--col-name,150px) var(--col-status,92px) var(--col-tags,64px) var(--col-notes,minmax(64px,1fr)) var(--col-created,72px) 108px");
   // A column the person sized keeps its width, and the minimum grows with
-  // it. A sized Notes is not the fill column any more, and no other column
-  // takes the room: it stays empty at the row's end, in the row actions'
-  // track, which keeps them at the card's right edge (Pair 24 fix round, I3).
+  // it. Too wide for the list, nothing stretches; the row actions' track
+  // keeps them at the card's right edge (Pair 24 fix round, I3).
   expect(out.sized).toMatchObject({ shown: ["name", "status", "tags", "notes", "created"], minWidth: 998 });
   expect(out.sized.template).toBe("28px var(--col-name,150px) var(--col-status,92px) var(--col-tags,64px) var(--col-notes,400px) var(--col-created,72px) minmax(108px,1fr)");
   expect(out.floor.template).toContain("var(--col-notes,minmax(141px,1fr))");
@@ -167,9 +168,10 @@ test("too wide for the list, the columns no one sized give way before it scrolls
     const at = (available: number, widths = {}) => m.layoutColumns(d, s, widths, { ...row, available, auto });
     return { room: at(800), tagsOnly: at(732), both: at(682), sized: at(682, { tags: 200 }), ended: at(700, { tags: 200 }) };
   }, ROW);
-  // Room for all: each at its content's width.
-  expect(out.room).toMatchObject({ minWidth: 782 });
-  expect(out.room.template).toBe("28px var(--col-name,180px) var(--col-status,92px) var(--col-tags,200px) var(--col-notes,minmax(100px,1fr)) 108px");
+  // Room for all: each at its content's width, and the 18 px left over the
+  // same to each (owner, 2026-10-23).
+  expect(out.room).toMatchObject({ minWidth: 782, stretched: true });
+  expect(out.room.template).toBe("28px var(--col-name,minmax(180px,184.5fr)) var(--col-status,minmax(92px,96.5fr)) var(--col-tags,minmax(200px,204.5fr)) var(--col-notes,minmax(100px,104.5fr)) 108px");
   // 50 px over: Notes gives its 36 px down to its minimum first, then Tags
   // (104 px over its need, Name 30) the 14 px left.
   expect(out.tagsOnly).toMatchObject({ minWidth: 732 });
@@ -217,11 +219,11 @@ test("a folding column gives way no further than its folded form; Name gives the
 // Controller ruling (merge point 3): short of room, the part of a column
 // that gives way first (the Proxies Test result's IP) moves into its
 // tooltip, whole, before any column is cut; a column a person made too
-// narrow for it does the same. And the room left over grows only a cut
-// column it can make whole, the nearest first: a long name that stays cut
-// anyway keeps the short names' width ("OK 56 ms 2…" and a Name grown past
+// narrow for it does the same. And the room left over first makes whole only
+// a cut column it can, the nearest first: a long name that stays cut anyway
+// stretches from the short names' width ("OK 56 ms 2…" and a Name grown past
 // its fit were both read at merge point 3).
-test("short of room, a column's part that gives way goes whole before any column is cut; the room left over grows only a column it makes whole", async ({ page }) => {
+test("short of room, a column's part that gives way goes whole before any column is cut; the room left over first makes whole only a column it can", async ({ page }) => {
   await load(page);
   const out = await page.evaluate((row) => {
     const { __cols: m, __defs: d } = window as unknown as Win;
@@ -248,10 +250,13 @@ test("short of room, a column's part that gives way goes whole before any column
   expect(out.sized.shortened).toEqual(["tags"]);
   expect(out.sized.template).toContain("var(--col-tags,150px)");
   expect(out.sizedWide.shortened).toEqual([]);
-  // 146 px to spare: Created (34 px from whole) grows, Name (260) does not.
-  expect(out.nearest.template).toBe("28px var(--col-name,160px) var(--col-status,92px) var(--col-tags,96px) var(--col-created,minmax(96px,130px)) minmax(108px,1fr)");
-  // 346 px: both.
-  expect(out.both.template).toBe("28px var(--col-name,minmax(160px,420px)) var(--col-status,92px) var(--col-tags,96px) var(--col-created,minmax(96px,130px)) minmax(108px,1fr)");
+  // 146 px to spare: Created (34 px from whole) grows, Name (260, past twice
+  // the 112 px left) does not; the 112 px over every column but the last,
+  // which keeps its own at the actions (owner, 2026-10-23).
+  expect(out.nearest.drawn).toEqual({ name: 197.33, status: 129.33, tags: 133.33, created: 130 });
+  // 346 px: both, and 17.33 to each but the last.
+  expect(out.both.drawn).toEqual({ name: 437.33, status: 109.33, tags: 113.33, created: 130 });
+  expect(out.both.template).toBe("28px var(--col-name,minmax(160px,437.33fr)) var(--col-status,minmax(92px,109.33fr)) var(--col-tags,minmax(96px,113.33fr)) var(--col-created,minmax(96px,130fr)) 108px");
 });
 
 test("a column's width from its content: nine rows in ten fit and a near miss too, a lone long one never sets it, the header label is a floor, inside its range (owner, 2026-09-30)", async ({ page }) => {
@@ -294,7 +299,7 @@ test("a column's width from its content: nine rows in ten fit and a near miss to
   expect(out.widths).toEqual({ name: 171, tags: 64, created: 82, notes: 640, nearMiss: 261, pastIt: 201, sparse: 81, empty: 31 });
 });
 
-test("measured widths feed the grid: a column's own width wins over its content's; the spare room lets a cut column show whole, then goes to Notes, else stays empty (owner, 2026-09-30)", async ({ page }) => {
+test("measured widths feed the grid: a column's own width wins over its content's; before the list is measured the spare room lets a cut column show whole, then goes to Notes or the row actions' track (owner, 2026-09-30)", async ({ page }) => {
   await load(page);
   const out = await page.evaluate((row) => {
     const { __cols: m, __defs: d } = window as unknown as Win;
@@ -327,8 +332,8 @@ test("measured widths feed the grid: a column's own width wins over its content'
   expect(out.auto.template).toBe("28px var(--col-name,180px) var(--col-status,92px) var(--col-tags,70px) var(--col-notes,minmax(100px,1fr)) 108px");
   expect(out.auto.minWidth).toBe(648 - 150 + 180 - 96 + 70);
   expect(out.mine.template).toContain("var(--col-name,300px)");
-  // Notes hidden: the room stays empty at the row's end, in the row
-  // actions' track, never spread over the columns that show all they hold.
+  // Not measured yet, Notes hidden: the row actions' track takes any room
+  // until the list's width is known.
   expect(out.noNotes.template).toBe("28px var(--col-name,180px) var(--col-status,92px) var(--col-tags,70px) var(--col-created,90px) minmax(108px,1fr)");
   // The room left over: first a cut column up to its whole content, then Notes.
   expect(out.grow.template).toBe("28px var(--col-name,minmax(180px,260px)) var(--col-status,92px) var(--col-tags,70px) var(--col-notes,minmax(100px,1fr)) 108px");
@@ -404,10 +409,11 @@ test("1,000 profiles measure fast (5 to 9 ms alone), each text once, in the cell
   expect(out.cold).toBeLessThan(20);
   expect(out.showAll).toBeLessThan(25);
   expect(out.warm).toBeLessThanOrEqual(out.cold);
-  // Every column with text; Notes (the fill) keeps its width. Status sizes to
-  // its widest pill, which in English is under its 96 px minimum.
-  expect(Object.keys(out.widths.fit).sort()).toEqual(["folder", "name", "proxy", "status", "tags"]);
-  expect(Object.keys(out.all.fit).sort()).toEqual(["created", "device", "extensions", "folder", "lastRun", "name", "proxy", "runTime", "status", "tags"]);
+  // Every column with text, Notes too (the fill keeps its width; its text
+  // only feeds the room left over: owner, 2026-10-23). Status sizes to its
+  // widest pill, which in English is under its 96 px minimum.
+  expect(Object.keys(out.widths.fit).sort()).toEqual(["folder", "name", "notes", "proxy", "status", "tags"]);
+  expect(Object.keys(out.all.fit).sort()).toEqual(["created", "device", "extensions", "folder", "lastRun", "name", "notes", "proxy", "runTime", "status", "tags"]);
   expect(out.widths.fit.status).toBe(96);
   // The canvas ranks within a few percent of the page's layout (the rows
   // that decide a width are laid out by the page itself: useAutoWidths).

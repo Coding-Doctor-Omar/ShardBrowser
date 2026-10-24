@@ -1,4 +1,4 @@
-import { invoke } from "@tauri-apps/api/core";
+import { invoke } from "../../../shared/api/invoke";
 import type { ProfileMeta } from "../../profile/model/types";
 import type { TrashEntry } from "./types";
 

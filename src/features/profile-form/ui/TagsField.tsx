@@ -17,8 +17,8 @@ export function TagsField({ value, newNames, onChange, onNewNamesChange, onCreat
   newNames: string[];
   onChange: (tagIds: string[]) => void;
   onNewNamesChange: (names: string[]) => void;
-  /** A typed name: the tag of that name, or a new one kept by the form. */
-  onCreate: (name: string) => void;
+  /** A typed name: the tag of that name, or a new one kept by the form; absent where no tag may be made. */
+  onCreate?: (name: string) => void;
 }) {
   const t = useT();
   const tags = useTags((s) => s.tags);
@@ -58,16 +58,16 @@ export function TagsField({ value, newNames, onChange, onNewNamesChange, onCreat
             <Combobox
               multiple
               aria-label={t("tagPicker.find")}
-              placeholder={t("tagPicker.find")}
+              placeholder={onCreate ? t("tagPicker.find") : t("tagPicker.findOnly")}
               options={options}
               value={[...value, ...pending.map((tag) => tag.id)]}
               query={query}
               // The name a tag would get, cleaned as the store cleans it (PC-085).
               onQueryChange={(q) => setQuery(q.replace(/\s+/g, " ").slice(0, TAG_NAME_MAX))}
               onChange={toggle}
-              onCreate={(name) => { onCreate(name); setQuery(""); }}
+              onCreate={onCreate && ((name) => { onCreate(name); setQuery(""); })}
               createLabel={(name) => t("tagPicker.create", { name })}
-              emptyText={tags.length === 0 && pending.length === 0 ? t("tagPicker.empty") : undefined}
+              emptyText={tags.length === 0 && pending.length === 0 ? (onCreate ? t("tagPicker.empty") : t("tagPicker.emptyNoCreate")) : undefined}
             />
           </Popover>
         </>

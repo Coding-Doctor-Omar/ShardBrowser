@@ -208,9 +208,16 @@ export function folderNamesOf(profiles: ProfileMeta[], registry: string[]): stri
 /** A profile bound to a proxy that no longer exists: deleted here, through
  *  the API or in another window. It must never pass for a chosen direct
  *  connection, and the backend would start it on this computer's own IP
- *  (backend B1). */
-export function proxyMissing(p: { proxy_id: string | null }, proxies: readonly { id: string }[]): boolean {
-  return !!p.proxy_id && !proxies.some((x) => x.id === p.proxy_id);
+ *  (backend B1). A team's row is never so: its proxy may be one this member
+ *  cannot see, which comes with the session (`proxyHidden`). */
+export function proxyMissing(p: { proxy_id: string | null; origin?: ProfileMeta["origin"] }, proxies: readonly { id: string }[]): boolean {
+  return !!p.proxy_id && p.origin !== "team" && !proxies.some((x) => x.id === p.proxy_id);
+}
+
+/** A team profile bound to a proxy not on this member's list: the server sends it
+ *  with the session on Start (team-server api.rs); one gone the start refuses. */
+export function proxyHidden(p: { proxy_id: string | null; origin?: ProfileMeta["origin"] }, proxies: readonly { id: string }[]): boolean {
+  return !!p.proxy_id && p.origin === "team" && !proxies.some((x) => x.id === p.proxy_id);
 }
 
 /** The proxies two or more of `list` are on (a proxy that is gone is none):

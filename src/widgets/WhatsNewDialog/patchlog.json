@@ -3,6 +3,361 @@
   "repoUrl": "https://github.com/ProxyShard/ShardBrowser",
   "releases": [
     {
+      "version": "2.1.1",
+      "date": "2026-10-24",
+      "entries": [
+        {
+          "id": "teams",
+          "title": "Teams",
+          "lead": "Share profiles with the people you work with, through a server you run yourself.",
+          "tag": "new",
+          "scope": "launcher",
+          "blocks": [
+            {
+              "type": "p",
+              "text": "Run the team server on any Linux machine and invite members from the Team page. Rights are given per team, folder or profile: see, start, edit, delete, cookies, take out. A profile is open on one computer at a time; when it closes, its cookies and logins return to the server for the next person."
+            },
+            {
+              "type": "p",
+              "text": "The admin doesn't need to be online. Removing a member ends their access at once. Deleted items stay in the team's Trash for 30 days."
+            }
+          ]
+        },
+        {
+          "id": "sync",
+          "title": "Sync between your computers",
+          "lead": "Your own profiles, proxies and the rest follow you to your other computers.",
+          "tag": "new",
+          "scope": "launcher",
+          "blocks": [
+            {
+              "type": "p",
+              "text": "Connect it in Settings to your own server or your team's, then turn it on for the profiles you want. They travel with their sessions, proxies, folders, tags, bookmarks, extensions and automation projects. Launcher settings and the fingerprint library stay on each computer."
+            },
+            {
+              "type": "p",
+              "text": "A profile open on one computer can't start on another until it closes there. Offline changes go out when the server is back; if a profile changed on two computers, both versions are kept."
+            }
+          ]
+        },
+        {
+          "id": "extension-updates",
+          "title": "Extension updates",
+          "lead": "Extensions added from the Chrome Web Store show when a new version is out and update in place.",
+          "tag": "new",
+          "scope": "launcher",
+          "blocks": [
+            {
+              "type": "p",
+              "text": "The launcher checks every few hours, or now with Check for updates. Updating keeps the extension's data, such as wallets and logins. If profiles using it are running, the update waits until they close, and a version asking for more access asks you first."
+            },
+            {
+              "type": "p",
+              "text": "Extensions added earlier need one Link to Web Store… from their menu."
+            },
+            {
+              "type": "note",
+              "text": "The check uses this computer's own connection, as Chrome does. It can be turned off in Settings."
+            }
+          ]
+        },
+        {
+          "id": "bookmarks-from-chrome",
+          "title": "Bookmarks from Chrome",
+          "lead": "Import the Bookmarks file of a Chrome profile into the launcher's bookmarks.",
+          "tag": "new",
+          "scope": "launcher",
+          "blocks": [
+            {
+              "type": "p",
+              "text": "Choose the file on the Bookmarks page, pick which profiles the bookmarks show in, and import. Folders from Chrome come in as one list, duplicates and bookmarklets are skipped, and importing the same file again adds nothing. Chrome shows where its Bookmarks file is on chrome://version."
+            }
+          ]
+        },
+        {
+          "id": "wide-screens",
+          "title": "Large screens",
+          "lead": "Lists and pages use the whole window, and the interface size can follow the screen.",
+          "tag": "new",
+          "scope": "launcher",
+          "blocks": [
+            {
+              "type": "p",
+              "text": "Tables stretch across the window instead of leaving an empty band on the right, and the Team, Settings and ProxyShard pages are no longer a narrow column. The new Auto interface size picks a larger size on large screens such as 4K."
+            }
+          ]
+        },
+        {
+          "id": "screen-of-this-computer",
+          "title": "Screen size for new Windows and Linux profiles",
+          "lead": "A new Windows or Linux profile starts with this computer's screen size.",
+          "tag": "new",
+          "scope": "launcher",
+          "blocks": [
+            {
+              "type": "p",
+              "text": "On these systems the screen depends on the monitor, so the profile's window now matches the screen it reports. macOS and Android profiles keep the screen of their device. Any size can still be picked by hand, and existing profiles keep theirs."
+            }
+          ]
+        },
+        {
+          "id": "ui-language",
+          "title": "Browser interface language",
+          "lead": "Each profile can show the browser's menus in your language or in the profile's.",
+          "tag": "new",
+          "scope": "launcher",
+          "blocks": [
+            {
+              "type": "p",
+              "text": "Fingerprint › Browser interface language: System language (the default) or Same as the profile language. Pages see the profile's language either way."
+            }
+          ]
+        },
+        {
+          "id": "engine-update-failed",
+          "title": "An engine update that did not finish",
+          "lead": "A failed engine update no longer leaves the launcher without a browser engine.",
+          "tag": "fix",
+          "scope": "launcher",
+          "blocks": [
+            {
+              "type": "p",
+              "text": "If the download breaks, the disk is full, or profiles are still running, the current engine stays and keeps working. A notice at the top says what stopped the update and offers to try again; when profiles are in the way it can close them and finish. An update that already downloaded finishes without downloading again."
+            }
+          ]
+        },
+        {
+          "id": "stop-keeps-cookies",
+          "title": "Cookies kept when a profile stops",
+          "lead": "Stopping a profile could lose cookies set in its last half-minute.",
+          "tag": "fix",
+          "scope": "launcher",
+          "blocks": [
+            {
+              "type": "p",
+              "text": "Stop now closes the browser the normal way on every system, so everything it had is saved, even when a page asks “Leave site?”. The same goes for profiles closed when you quit the launcher."
+            }
+          ]
+        },
+        {
+          "id": "new-profile-loading",
+          "title": "Creating a profile",
+          "lead": "On some computers New profile kept loading and never opened the form.",
+          "tag": "fix",
+          "scope": "launcher",
+          "blocks": [
+            {
+              "type": "p",
+              "text": "The form no longer waits for the graphics check of this computer. The check runs once in the background, and the compatibility badges appear when it finishes."
+            }
+          ]
+        },
+        {
+          "id": "external-drive",
+          "title": "Data folder on an external drive",
+          "lead": "With the data folder on an external drive, the list of profiles could fail to load.",
+          "tag": "fix",
+          "scope": "launcher",
+          "blocks": [
+            {
+              "type": "p",
+              "text": "macOS leaves hidden service files on such drives, and the launcher tried to read them as profiles. They are now skipped everywhere."
+            }
+          ]
+        },
+        {
+          "id": "view-menu-windows",
+          "title": "Sort order on Windows",
+          "lead": "On Windows the sort list in the Display menu did not open.",
+          "tag": "fix",
+          "scope": "launcher",
+          "blocks": [
+            {
+              "type": "p",
+              "text": "Clicks inside the Display and Filters menus could start moving the window instead. They now reach the menu. In Russian, the column hint “appears when a tag is created” no longer covers the column name."
+            }
+          ]
+        },
+        {
+          "id": "lists-scroll",
+          "title": "Long lists in pickers",
+          "lead": "At 90% interface size a list did not scroll to the selected or last item, and a notice could cover the bottom rows of the proxy list.",
+          "tag": "fix",
+          "scope": "launcher",
+          "blocks": [
+            {
+              "type": "p",
+              "text": "Lists scroll to where they should at every interface size, and notices move out of the way of an open list. Arrow keys move through a list even while the pointer rests on it."
+            }
+          ]
+        },
+        {
+          "id": "bookmark-in-folder-tab",
+          "title": "New bookmark from a folder tab",
+          "lead": "A bookmark created on a folder tab was saved so that no profile showed it.",
+          "tag": "fix",
+          "scope": "launcher",
+          "blocks": [
+            {
+              "type": "p",
+              "text": "It is now saved for that folder, the same as when the folder is picked in the form."
+            }
+          ]
+        },
+        {
+          "id": "site-and-names",
+          "title": "ShardBrowser everywhere",
+          "lead": "The launcher and the browser's start page now say ShardBrowser, and About links to shardbrowser.com.",
+          "tag": "new",
+          "scope": "launcher",
+          "blocks": [
+            {
+              "type": "p",
+              "text": "The Russian translation was also reworded where it read like a word-for-word translation; Views are now called «Сохранённые фильтры» in Russian."
+            }
+          ]
+        },
+        {
+          "id": "mac-last-tab",
+          "title": "Closing the last tab on macOS",
+          "lead": "Closing a profile's last tab on macOS no longer stops the profile.",
+          "tag": "fix",
+          "scope": "browser",
+          "blocks": [
+            {
+              "type": "p",
+              "text": "The browser stays open in the Dock, the way Chrome does on a Mac, and the launcher keeps showing it as running. Quit, Cmd+Q or Stop in the launcher end it. Show the window in the launcher opens a new window when none is left."
+            }
+          ]
+        },
+        {
+          "id": "extension-first-run",
+          "title": "Extension welcome pages",
+          "lead": "Extensions such as MetaMask and Authenticator opened their welcome page at every start.",
+          "tag": "fix",
+          "scope": "browser",
+          "blocks": [
+            {
+              "type": "p",
+              "text": "The browser treated them as freshly installed each time. Now that happens once per profile, and what extensions set up for later, such as reminders, survives a restart. Their data was never lost."
+            },
+            {
+              "type": "note",
+              "text": "Welcome tabs that piled up before this update stay until you close them once."
+            }
+          ]
+        },
+        {
+          "id": "store-extensions-alongside",
+          "title": "Extensions installed inside a profile",
+          "lead": "Extensions installed from the Web Store inside a profile were hidden while the profile also had extensions from the launcher.",
+          "tag": "fix",
+          "scope": "browser",
+          "blocks": [
+            {
+              "type": "p",
+              "text": "Both kinds now work side by side. Extensions installed inside a profile were not removed before, only hidden, so they come back with their data."
+            }
+          ]
+        },
+        {
+          "id": "host-extensions",
+          "title": "Extensions from other programs",
+          "lead": "Programs on this computer that add extensions to Chrome could add them to profiles too.",
+          "tag": "fix",
+          "scope": "browser",
+          "blocks": [
+            {
+              "type": "p",
+              "text": "Profiles now ignore extensions registered for Chrome on this computer. Only extensions you add in the launcher or inside the profile are used."
+            }
+          ]
+        },
+        {
+          "id": "language-everywhere",
+          "title": "One language for the whole profile",
+          "lead": "Some parts of the browser still answered in this computer's language instead of the profile's.",
+          "tag": "fix",
+          "scope": "browser",
+          "blocks": [
+            {
+              "type": "p",
+              "text": "Extensions now see the profile's languages, so MetaMask and Phantom agree. Pages without a declared text encoding, dates and numbers follow the profile's language the way Chrome in that language does. On macOS profiles speech voices are named in the profile's language."
+            },
+            {
+              "type": "note",
+              "text": "MetaMask and Phantom keep the language they picked at first start. If already installed, switch it once in their settings — don't reinstall them, that removes the wallet."
+            }
+          ]
+        },
+        {
+          "id": "audio",
+          "title": "Sound a page plays back",
+          "lead": "Audio protection also changed sound a page had written itself and read back unchanged.",
+          "tag": "fix",
+          "scope": "browser",
+          "blocks": [
+            {
+              "type": "p",
+              "text": "Some checks compare a sound before and after the browser handles it. Sound a page wrote is now returned exactly as written, and protection applies only to sound the browser computes itself."
+            }
+          ]
+        },
+        {
+          "id": "chrome-runtime",
+          "title": "An extension-only object on web pages",
+          "lead": "Web pages could see an object that ordinary Chrome shows only to extensions.",
+          "tag": "fix",
+          "scope": "browser",
+          "blocks": [
+            {
+              "type": "p",
+              "text": "Detection services look for it. It is no longer available to web pages; extensions keep it."
+            }
+          ]
+        },
+        {
+          "id": "mobile-human-type",
+          "title": "Human Type on mobile profiles",
+          "lead": "On mobile profiles the right-click menu had no Human Type and fill items.",
+          "tag": "fix",
+          "scope": "browser",
+          "blocks": [
+            {
+              "type": "p",
+              "text": "A long press now offers them, and they type into the field you pressed on."
+            }
+          ]
+        },
+        {
+          "id": "helper-dropdowns",
+          "title": "Dropdowns filled by Shard Helper on Windows and Linux",
+          "lead": "Fill left standard dropdowns empty on Windows and Linux.",
+          "tag": "fix",
+          "scope": "browser",
+          "blocks": [
+            {
+              "type": "p",
+              "text": "Shard Helper now picks the option the way a person does: it opens the list, moves to the option and confirms it, then checks the field took the value. If the page moves while it fills, it aims at where each field is now."
+            }
+          ]
+        },
+        {
+          "id": "linux-freeze",
+          "title": "Freezes on Linux",
+          "lead": "With Shard Helper on, the browser on Linux could freeze while starting and left a crash report on every start.",
+          "tag": "fix",
+          "scope": "browser",
+          "blocks": [
+            {
+              "type": "p",
+              "text": "Both are gone. Real crashes are still recorded as before."
+            }
+          ]
+        }
+      ]
+    },
+    {
       "version": "2.1.0",
       "date": "2026-10-21",
       "entries": [

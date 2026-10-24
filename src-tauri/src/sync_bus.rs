@@ -1,7 +1,6 @@
 //! Loopback broker for window sync: one TCP connection per browser, one JSON
-//! line per input event, copied to the group's other members. The payload is
-//! never parsed here — the launcher brokers only because a listener is cheap
-//! on this side.
+//! line per input event, copied to the group's other members. Read only for
+//! its "t", which marks an action: nothing else a member sends is passed on.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -21,6 +20,8 @@ struct Member {
     excluded: bool,
     /// The box this window may occupy: the layout's only input besides the screen.
     win: WindowBox,
+    /// Its greeting said it knows `{"quit":true}`; an older engine would ignore the line.
+    quits: bool,
     tx: mpsc::UnboundedSender<String>,
 }
 
@@ -75,6 +76,9 @@ struct Hello {
     /// that member is laid out the way it always was.
     #[serde(default)]
     win: WindowBox,
+    /// Absent from an older engine, which is then never sent `{"quit":true}`.
+    #[serde(default)]
+    quit: bool,
 }
 
 /// The size a member's window may be. Reported by the browser: only it knows
@@ -122,6 +126,12 @@ pub enum Layout {
     Grid,
     /// Overlapping, offset down-right; every title bar stays clickable.
     Cascade,
+}
+
+/// A mirrored action: a JSON object naming its type in "t". A control never does, which is how
+/// the engine tells them apart.
+fn is_action(line: &str) -> bool {
+    serde_json::from_str::<serde_json::Map<String, serde_json::Value>>(line).is_ok_and(|m| m.contains_key("t"))
 }
 
 impl Bus {
@@ -185,6 +195,7 @@ impl Bus {
                 profile: hello.profile.clone(),
                 excluded: false,
                 win: hello.win,
+                quits: hello.quit,
                 tx,
             });
             // A member joining a suspended group must not start acting.
@@ -232,7 +243,11 @@ impl Bus {
                     continue;
                 }
             }
-            self.fan_out(&group, id, &line);
+            // Only actions go to the group. Anything else would reach every other member as an
+            // instruction from the panel, and every lone browser shares the "default" group.
+            if is_action(&line) {
+                self.fan_out(&group, id, &line);
+            }
         }
 
         // EOF: the browser closed or died. No heartbeats, no stale entries.
@@ -244,8 +259,11 @@ impl Bus {
                     st.groups.remove(&group);
                 }
             }
-            // The window is gone, so its offer goes with it.
-            st.helper.remove(&hello.profile);
+            // The window is gone, so its offer goes with it; unless the browser is still here on
+            // a newer connection, as after it greeted again for a new group.
+            if !st.groups.values().flatten().any(|m| m.profile == hello.profile) {
+                st.helper.remove(&hello.profile);
+            }
         }
         writer.abort();
     }
@@ -459,6 +477,35 @@ impl Bus {
         None
     }
 
+    /// Asks one profile's browser to quit as its Quit menu does, cookies written out.
+    /// False when that browser is not on the bus (an engine without the quit joins it only
+    /// with the helper or a group).
+    pub fn close(&self, profile: &str) -> bool {
+        let st = self.state.lock().unwrap();
+        let mut sent = false;
+        for m in st.groups.values().flatten().filter(|m| m.profile == profile) {
+            sent |= m.tx.send("{\"close\":true}\n".to_string()).is_ok();
+        }
+        sent
+    }
+
+    /// Whether one profile's browser is on the bus and said it knows `{"quit":true}`.
+    pub fn quits(&self, profile: &str) -> bool {
+        let st = self.state.lock().unwrap();
+        st.groups.values().flatten().any(|m| m.profile == profile && m.quits)
+    }
+
+    /// Stop's ask: quits one profile's browser as `close` does, but past a "Leave site?"
+    /// prompt. Only to an engine that said it knows it; false when none on the bus did.
+    pub fn quit(&self, profile: &str) -> bool {
+        let st = self.state.lock().unwrap();
+        let mut sent = false;
+        for m in st.groups.values().flatten().filter(|m| m.profile == profile && m.quits) {
+            sent |= m.tx.send("{\"quit\":true}\n".to_string()).is_ok();
+        }
+        sent
+    }
+
     /// Tells one profile's window to fill what its helper found.
     pub fn fill(&self, profile: &str) {
         let st = self.state.lock().unwrap();
@@ -537,6 +584,19 @@ impl Bus {
             for m in members {
                 let _ = m.tx.send(line.clone());
             }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn only_an_object_naming_its_type_is_an_action() {
+        assert!(is_action(r#"{"t":"mouse","n":1}"#));
+        for line in [r#"{"quit":true}"#, r#"{"close":true,"x":"\"t\":1"}"#, r#"["t"]"#, "t", ""] {
+            assert!(!is_action(line), "{line}");
         }
     }
 }

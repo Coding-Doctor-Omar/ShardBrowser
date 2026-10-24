@@ -1,5 +1,6 @@
 import { Button, Popover } from "@proxyshard/shardx-ui-kit";
 import { useProfile, type ProfileMeta } from "../../../entities/profile";
+import { teamRefusal, useRightsChange } from "../../../entities/space";
 import { useT } from "../../../shared/i18n";
 import { AddIcon } from "../../../shared/icons";
 import { openProfileForm } from "../../profile-form/model/useProfileForm";
@@ -20,6 +21,8 @@ export function ProxyCellPopover({ open, profile, anchorRef, onClose }: {
   const t = useT();
   const proxies = useProfile((s) => s.proxies);
   const bindProxy = useProfile((s) => s.bindProxy);
+  useRightsChange();
+  const noCreate = !!teamRefusal("create");
   return (
     <Popover
       open={open}
@@ -38,15 +41,18 @@ export function ProxyCellPopover({ open, profile, anchorRef, onClose }: {
           if (id !== profile.proxy_id) void bindProxy(profile.id, id).then((ok) => { if (ok) toast.saved(t("cellEdit.saved", { name: profile.name })); });
         }}
       />
-      <div className="p-1">
-        <Button
-          variant="neutral" mode="ghost" size="3xsmall" contentAlign="start" className="w-full"
-          leftIcon={<AddIcon className="size-3.5" />}
-          onClick={() => { onClose(); openProfileForm({ mode: "edit", id: profile.id, tab: "proxy" }); }}
-        >
-          {t("profileForm.addNewProxy")}
-        </Button>
-      </div>
+      {/* A team's new proxy needs Create on it (doors.rs InlineProxy). */}
+      {!noCreate && (
+        <div className="p-1">
+          <Button
+            variant="neutral" mode="ghost" size="3xsmall" contentAlign="start" className="w-full"
+            leftIcon={<AddIcon className="size-3.5" />}
+            onClick={() => { onClose(); openProfileForm({ mode: "edit", id: profile.id, tab: "proxy" }); }}
+          >
+            {t("profileForm.addNewProxy")}
+          </Button>
+        </div>
+      )}
     </Popover>
   );
 }

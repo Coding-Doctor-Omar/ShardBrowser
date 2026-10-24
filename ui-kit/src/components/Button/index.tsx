@@ -45,10 +45,10 @@ const sizes: Record<ButtonSize, { base: string; radius: string; onlyIcon: string
 // together with its twin.
 const looks: Record<ButtonMode, Record<ButtonVariant, string>> = {
   filled: {
-    primary: 'bg-primary-base text-static-white hover:bg-primary-darker aria-disabled:hover:bg-primary-base',
-    neutral: 'bg-[var(--btn-neutral-bg)] text-[var(--btn-neutral-fg)] hover:bg-[var(--btn-neutral-bg-hover)] aria-disabled:hover:bg-[var(--btn-neutral-bg)]',
+    primary: 'bg-primary-base text-static-white hover:bg-primary-darker aria-disabled:hover:bg-primary-base forced-edge',
+    neutral: 'bg-[var(--btn-neutral-bg)] text-[var(--btn-neutral-fg)] hover:bg-[var(--btn-neutral-bg-hover)] aria-disabled:hover:bg-[var(--btn-neutral-bg)] forced-edge',
     // COLOR-05: the danger fill keeps a 5.07:1 white label (the old base was 3.66:1 in dark).
-    error: 'bg-error-fill text-static-white hover:bg-error-fill-hover aria-disabled:hover:bg-error-fill',
+    error: 'bg-error-fill text-static-white hover:bg-error-fill-hover aria-disabled:hover:bg-error-fill forced-edge',
   },
   stroke: {
     // An open trigger (Filters or Display with a filter on) steps past its hover tint, as neutral steps past its hover fill.
@@ -61,10 +61,10 @@ const looks: Record<ButtonMode, Record<ButtonVariant, string>> = {
     error: 'bg-bg-white-0 text-error-text ring-1 ring-inset ring-error-base hover:bg-error-tint aria-disabled:hover:bg-bg-white-0 forced-edge',
   },
   lighter: {
-    primary: 'bg-primary-tint text-primary-text hover:bg-primary-tint-hover aria-disabled:hover:bg-primary-tint aria-expanded:bg-primary-tint-hover aria-pressed:bg-primary-tint-hover',
+    primary: 'bg-primary-tint text-primary-text hover:bg-primary-tint-hover aria-disabled:hover:bg-primary-tint aria-expanded:bg-primary-tint-hover aria-pressed:bg-primary-tint-hover forced-edge',
     // The resting fill is the 4% weak fill, so its hover steps to the 8% active fill.
-    neutral: 'bg-bg-weak-50 text-text-sub-600 hover:bg-bg-active aria-disabled:hover:bg-bg-weak-50 aria-expanded:bg-bg-active aria-pressed:bg-bg-active not-aria-disabled:active:bg-bg-active',
-    error: 'bg-error-tint text-error-text hover:bg-error-tint-hover aria-disabled:hover:bg-error-tint',
+    neutral: 'bg-bg-weak-50 text-text-sub-600 hover:bg-bg-active aria-disabled:hover:bg-bg-weak-50 aria-expanded:bg-bg-active aria-pressed:bg-bg-active not-aria-disabled:active:bg-bg-active forced-edge',
+    error: 'bg-error-tint text-error-text hover:bg-error-tint-hover aria-disabled:hover:bg-error-tint forced-edge',
   },
   ghost: {
     primary: 'bg-transparent text-primary-text hover:bg-primary-tint aria-disabled:hover:bg-transparent aria-expanded:bg-primary-tint-hover aria-pressed:bg-primary-tint-hover',
@@ -84,8 +84,8 @@ const looks: Record<ButtonMode, Record<ButtonVariant, string>> = {
 // (weak fill, soft text), not a washed accent fill. Only `disabled` does this;
 // a busy button keeps its accent look. The hover twins stay so it answers no hover.
 const disabledAccent: Record<ButtonMode, string> = {
-  filled: 'bg-bg-weak-50 text-text-soft-400 aria-disabled:hover:bg-bg-weak-50',
-  lighter: 'bg-bg-weak-50 text-text-soft-400 aria-disabled:hover:bg-bg-weak-50',
+  filled: 'bg-bg-weak-50 text-text-soft-400 aria-disabled:hover:bg-bg-weak-50 forced-edge',
+  lighter: 'bg-bg-weak-50 text-text-soft-400 aria-disabled:hover:bg-bg-weak-50 forced-edge',
   stroke: 'bg-[var(--control-fill,var(--bg-weak-50))] text-text-soft-400 aria-disabled:hover:bg-[var(--control-fill,var(--bg-weak-50))] forced-edge',
   ghost: 'bg-transparent text-text-soft-400 aria-disabled:hover:bg-transparent',
   link: 'bg-transparent text-text-soft-400 aria-disabled:hover:no-underline',

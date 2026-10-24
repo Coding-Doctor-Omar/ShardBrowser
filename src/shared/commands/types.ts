@@ -35,6 +35,8 @@ export type Command = {
   label: (n: number) => string;
   /** The palette's words for its subject, when they name it ("Edit Profile 7"); else `label`. */
   paletteLabel?: (s: Subject) => string;
+  /** A menu's words for its subject, when they differ from `label` ("View" for a profile only read). */
+  menuLabel?: (s: Subject) => string;
   /** Every binding matches; the first is the one surfaces print. */
   keys?: readonly string[];
   /** How the sheet joins several bindings: "or" ("Enter / Space"), "to" ("⌘1–⌘9"); default side by side ("↑ ↓"). */

@@ -12,6 +12,7 @@ type Mock = {
     state: {
       profiles: Record<string, unknown>; proxies: unknown[]; bookmarks: unknown[]; automation: unknown[];
       extensions: unknown[]; psKey: string; fingerprints: { builtin: boolean }[];
+      tags?: unknown; folders?: unknown;
     };
   };
 };
@@ -37,6 +38,11 @@ const counts = (page: Page) => page.evaluate(() => {
 test("Delete all data counts what goes, asks twice, keeps a backup and starts over", async ({ page }) => {
   await storage(page);
   await page.evaluate(() => { localStorage.setItem("shardx.e2eMarker", "1"); localStorage.setItem("elsewhere.keep", "1"); });
+  // tags.json and folders.json, which go to the backup with the settings.
+  await page.evaluate(() => Object.assign((window as unknown as Mock).__shardxMock.state, {
+    tags: { tags: [{ id: "t-vip", name: "VIP", color: "violet" }], by_profile: {} },
+    folders: { registry: ["Empty1"], meta: { Empty1: { color: "green", icon: "cart" } } },
+  }));
   const row = page.locator("[data-setting='delete-all-data']");
   await expect(row).toContainText("Moves every profile, proxy and setting out of ShardBrowser into a backup folder. The browser engine stays installed.");
   // No reset yet: no backup to show.
@@ -99,9 +105,10 @@ test("Delete all data counts what goes, asks twice, keeps a backup and starts ov
       profiles: Object.keys(s.profiles).length, proxies: s.proxies.length, bookmarks: s.bookmarks.length,
       projects: s.automation.length, psKey: s.psKey, imported: s.fingerprints.filter((f) => !f.builtin).length,
       library: s.fingerprints.length, marker: localStorage.getItem("shardx.e2eMarker"), other: localStorage.getItem("elsewhere.keep"),
+      tags: s.tags ?? null, folders: s.folders ?? null,
     };
   });
-  expect(after).toMatchObject({ profiles: 0, proxies: 0, bookmarks: 0, projects: 0, psKey: "", imported: 0, marker: null, other: "1" });
+  expect(after).toMatchObject({ profiles: 0, proxies: 0, bookmarks: 0, projects: 0, psKey: "", imported: 0, marker: null, other: "1", tags: null, folders: null });
   expect(after.library).toBeGreaterThan(0);
 
   // Settings > Storage now has a quiet way to the backup.

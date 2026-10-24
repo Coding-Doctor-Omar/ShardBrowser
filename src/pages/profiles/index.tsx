@@ -1,4 +1,5 @@
 import { useEffect, useRef, type ComponentProps } from "react";
+import { activeTeam, useSpace } from "../../entities/space";
 import { countActiveFilters, useCurrentView, useListTotal, useProfileUi, useVisibleProfiles, viewName } from "../../entities/profile";
 import { loadSignalSources } from "../../entities/signals";
 import { ViewBar } from "../../features/manage-views";
@@ -47,7 +48,13 @@ export function ProfilesPage() {
   // give way together, not up to 400 ms apart.
   const empty = !loading && status === "ready" && !hasProfiles && !narrowed;
   // Until the list is in, the table shows it loading (or why it failed).
-  const showSetup = setup.active && status === "ready" && !loading;
+  // Not a team's member's, nor a team's never read: its list is the team's to fill (ProfileListEmpty says so).
+  const teamWaits = useSpace((s) => {
+    const team = activeTeam(s.state);
+    const st = s.state?.team_status;
+    return !!team && (!team.admin || (!!st && st.state !== "ready" && !st.synced_at));
+  });
+  const showSetup = setup.active && status === "ready" && !loading && !teamWaits;
   // The problem cards read the proxies' last tests, the timezones those
   // judge and the ProxyShard plans: once per app session, when this page
   // first opens.

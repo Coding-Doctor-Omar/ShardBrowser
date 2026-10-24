@@ -5,6 +5,7 @@ export { OsField } from "./OsField";
 export { TemplateField } from "./TemplateField";
 export { HardwareFields } from "./HardwareFields";
 export { ScreenField, useScreenChoice } from "./ScreenField";
+export { WindowFields } from "./WindowFields";
 export { LocaleFields } from "./LocaleFields";
 export { NoiseFields } from "./NoiseFields";
 export { PrivacyFields } from "./PrivacyFields";

@@ -44,7 +44,11 @@ export function BlockPicker({ open, modulesSeen = 0, onPick, onManageModules, on
   const extra = new Map<string, { id: string; label: string; blocks: BlockSpec[] }>();
   for (const m of modules) {
     if (m.error || !m.blocks.length) continue;
+    // A module's blocks() is its own text: a kind it lists twice (or leaves out) shows once.
+    const seen = new Set<string>();
     for (const b of m.blocks) {
+      if (typeof b.kind !== "string" || !b.kind || seen.has(b.kind)) continue;
+      seen.add(b.kind);
       const spec: BlockSpec = {
         kind: `module:${m.id}:${b.kind}`,
         label: b.label ?? b.kind,

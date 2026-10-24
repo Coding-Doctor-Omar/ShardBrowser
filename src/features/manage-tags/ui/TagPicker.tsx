@@ -3,6 +3,7 @@ import { Combobox, Popover, type ComboboxOption } from "@proxyshard/shardx-ui-ki
 import { useT } from "../../../shared/i18n";
 import { toast } from "../../../shared/model/toast";
 import { TAG_NAME_MAX, useTags } from "../../../entities/tag";
+import { teamRefusal, useRightsChange } from "../../../entities/space";
 import { TagChip } from "../../../shared/ui/TagChip";
 
 /// Gives and takes tags for one or many profiles (EMIL-08): type to filter, the
@@ -24,6 +25,9 @@ export function TagPicker({ open, profileIds, anchorRef, anchorPoint, triggerRef
   onClose: () => void;
 }) {
   const t = useT();
+  // A team's tags are made with Create in the team.
+  useRightsChange();
+  const noCreate = !!teamRefusal("create");
   const tags = useTags((s) => s.tags);
   const byProfile = useTags((s) => s.byProfile);
   const create = useTags((s) => s.create);
@@ -66,7 +70,7 @@ export function TagPicker({ open, profileIds, anchorRef, anchorPoint, triggerRef
       <Combobox
         multiple
         aria-label={t("tagPicker.find")}
-        placeholder={t("tagPicker.find")}
+        placeholder={noCreate ? t("tagPicker.findOnly") : t("tagPicker.find")}
         options={options}
         value={all}
         mixed={some}
@@ -76,13 +80,13 @@ export function TagPicker({ open, profileIds, anchorRef, anchorPoint, triggerRef
         onQueryChange={(q) => setQuery(q.replace(/\s+/g, " ").slice(0, TAG_NAME_MAX))}
         // A mixed tag goes to every profile; a checked one comes off all.
         onChange={(id) => toggle(profileIds, id)}
-        onCreate={(name) => {
+        onCreate={noCreate ? undefined : (name) => {
           const tag = create(name);
           if (tag && count(tag.id) < profileIds.length) toggle(profileIds, tag.id);
           setQuery("");
         }}
         createLabel={(name) => t("tagPicker.create", { name })}
-        emptyText={tags.length === 0 ? t("tagPicker.empty") : undefined}
+        emptyText={tags.length === 0 ? (noCreate ? t("tagPicker.emptyNoCreate") : t("tagPicker.empty")) : undefined}
       />
     </Popover>
   );

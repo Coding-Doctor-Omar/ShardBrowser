@@ -8,6 +8,7 @@ import { ProxyAddress } from "../../../../shared/ui/ProxyAddress";
 import { PropertyButton, PropertyRow } from "../../../../shared/ui/peek";
 import { useT } from "../../../../shared/i18n";
 import { proxyMissing, useProfile } from "../../../../entities/profile";
+import { bindRefusal, teamRefusal, useInTeam, useRightsChange } from "../../../../entities/space";
 import { duplicateLabels, proxyAddressHint, proxyBulkParse, proxyLabel, type ProxyEntry } from "../../../../entities/proxy";
 
 /** The choice that stands for the form's proxy still to be added. */
@@ -51,7 +52,13 @@ export function ProxyRow({ value, onChange, newLine = "", onNewLine }: {
   const anchor = useRef<HTMLButtonElement>(null);
   const pending = useParsedLine(newLine);
   const proxy = value ? proxies.find((p) => p.id === value) : undefined;
-  const missing = !newLine && proxyMissing({ proxy_id: value }, proxies);
+  // In a team a proxy off this member's list is one they may not see: it comes with the profile.
+  const team = useInTeam();
+  useRightsChange();
+  const missing = !newLine && !team && proxyMissing({ proxy_id: value }, proxies);
+  const hidden = !newLine && team && !!value && !proxy;
+  // A team's new proxy needs Create on it (doors.rs InlineProxy).
+  const noCreate = !!teamRefusal("create");
   const addLabel = t("profileForm.addNewProxy");
   // Built only while the picker is open: 1,000 proxies are 1,000 rows (PERF-15).
   const options = useMemo(() => {
@@ -67,6 +74,8 @@ export function ProxyRow({ value, onChange, newLine = "", onNewLine }: {
         const label = proxyLabel(p);
         const isShared = shared.has(label);
         const used = n === 1 ? t("peek.proxyUsedByOne") : n > 1 ? t("peek.proxyUsedBy", { n }) : null;
+        const refused = team && p.id !== value ? bindRefusal(p.id) : null;
+        if (refused) return { value: p.id, label, hint: refused, disabled: true, icon: <ProxyFlag cc={p.country} height={14} />, keywords: [p.host, p.country, p.kind].filter(Boolean) };
         return {
           value: p.id,
           label,
@@ -80,7 +89,7 @@ export function ProxyRow({ value, onChange, newLine = "", onNewLine }: {
         };
       }),
     ];
-  }, [open, proxies, profiles, value, newLine, pending, t]);
+  }, [open, proxies, profiles, value, newLine, pending, t, team]);
   const close = () => { setOpen(false); anchor.current?.focus(); };
   return (
     <PropertyRow id="proxy" label={t("peek.proxy")}>
@@ -99,6 +108,8 @@ export function ProxyRow({ value, onChange, newLine = "", onNewLine }: {
                 <AlertIcon className="size-3.5 shrink-0 text-warning-base" />
                 <span className="truncate text-warning-text">{t("profileRow.proxyMissing")}</span>
               </>
+            ) : hidden ? (
+              <span data-proxy-hidden className="truncate">{t("profileRow.proxyHidden")}</span>
             ) : proxy ? (
               <>
                 {proxy.country && <CountryFlag cc={proxy.country} height={14} />}
@@ -137,15 +148,17 @@ export function ProxyRow({ value, onChange, newLine = "", onNewLine }: {
                       close();
                     }}
                   />
-                  <div className="border-t border-stroke-soft-200 p-1">
-                    <Button
-                      variant="neutral" mode="ghost" size="3xsmall" contentAlign="start" className="w-full"
-                      leftIcon={<AddIcon className="size-3.5" />}
-                      onClick={() => setAdding(true)}
-                    >
-                      {addLabel}
-                    </Button>
-                  </div>
+                  {!noCreate && (
+                    <div className="border-t border-stroke-soft-200 p-1">
+                      <Button
+                        variant="neutral" mode="ghost" size="3xsmall" contentAlign="start" className="w-full"
+                        leftIcon={<AddIcon className="size-3.5" />}
+                        onClick={() => setAdding(true)}
+                      >
+                        {addLabel}
+                      </Button>
+                    </div>
+                  )}
                 </>
               )}
             </div>

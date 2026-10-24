@@ -8,7 +8,7 @@ import {
   loadProfileLayout, persistProfileLayout, PROFILE_COLUMN, PROFILE_COLUMNS,
   type ProfileColumnId, type ProfileColumns, type ProfileColumnWidths,
 } from "./columns";
-import { clampWidth, defaultSet, sameWidths, type ContentWidths } from "../../../shared/lib/tableColumns";
+import { defaultSet, keptWidth, sameWidths, type ContentWidths } from "../../../shared/lib/tableColumns";
 import { setOnAssign, setOnFolderRenamed, setUiBridge, useProfile } from "./useProfile";
 import { findView, sameQuery, viewOwnFilters, viewQuery, type ViewContext, type ViewQuery } from "./views";
 import { tagsOf, useTags } from "../../tag";
@@ -18,6 +18,7 @@ import { minuteNow } from "../../../shared/lib/useNow";
 import { t } from "../../../shared/i18n";
 import { toast } from "../../../shared/model/toast";
 import { confirmLeave } from "../../../shared/model/unsaved";
+import { onSpaceMoved } from "../../../shared/api/invoke";
 import { computeVisible, needsRunning, NO_RUNNING, type Visible } from "./visible";
 import { resolveId } from "./optimistic";
 import type { AssignFrom } from "./assignment";
@@ -355,7 +356,7 @@ export const useProfileUi = create<ProfileUiStore>((set, get) => ({
     const ui = get();
     const widths = { ...ui.widths };
     if (px === null) delete widths[id];
-    else widths[id] = clampWidth(PROFILE_COLUMN[id], px);
+    else widths[id] = keptWidth(PROFILE_COLUMN[id], px);
     persistProfileLayout(ui.viewId && ui.base ? ui.base.columns : ui.columns, widths);
     set({ widths });
   },
@@ -619,5 +620,15 @@ useTags.subscribe((s) => {
   if (ui.base && gone(ui.base.filters.tag)) useProfileUi.setState({ base: { ...ui.base, filters: { ...ui.base.filters, tag: "" } } });
   if (gone(ui.filters.tag)) ui.setFilters({ tag: "" });
   else if (ui.search.trim() || ui.filters.tag) pruneSelection();
+});
+
+// Another space: nothing picked, open or narrowed in the old one carries over.
+onSpaceMoved(() => {
+  useProfileUi.getState().leaveView();
+  useProfileUi.setState({
+    folder: "all", search: "", filters: emptyFilters(), only: null, viewEdit: null,
+    selected: new Set<string>(), anchorId: null, activeId: null, activeByPointer: false, peekId: null, dropTarget: null,
+    tagPicker: null, folderPicker: null, folderDialog: null, viewDialog: null, editing: null, assign: null,
+  });
 });
 

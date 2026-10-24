@@ -1,6 +1,6 @@
 [package]
 name = "shardx"
-version = "2.1.0"
+version = "2.1.1"
 edition = "2021"
 rust-version = "1.74"
 description = "Self-contained Rust SDK for the ShardX anti-detect browser — downloads the engine + Widevine + fingerprint library on first use, launches isolated profiles."
@@ -33,6 +33,18 @@ rand = "0.8"
 chromiumoxide = { version = "0.7", default-features = false, features = ["tokio-runtime"], optional = true }
 futures-util = { version = "0.3", optional = true }
 chromiumoxide_types = { version = "0.7", optional = true }
+
+# The engine install's lock and swap ask the OS: host name, live pids, free space.
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.59", features = [
+  "Win32_Foundation",
+  "Win32_Storage_FileSystem",
+  "Win32_System_SystemInformation",
+  "Win32_System_Threading",
+] }
 
 [dev-dependencies]
 tokio = { version = "1", features = ["full"] }

@@ -1,6 +1,9 @@
+import type { ProfileSync } from "../../sync/model/types";
+
 export type NoiseMode = "real" | "auto";
 export type WebRtcMode = "auto" | "tcp_only" | "block";
 export type GeoMode = "auto" | "manual";
+export type UiLanguage = "system" | "profile";
 
 export type ProfileMeta = {
   id: string;
@@ -26,7 +29,24 @@ export type ProfileMeta = {
   extensions: string[];
   /// Phone/tablet fingerprint, decided in Rust by the core's own rule.
   mobile: boolean;
+  /// Present while personal sync is connected (entities/sync).
+  sync?: ProfileSync;
+  /** Which space the row is from (local/profile.rs `Origin`). */
+  origin?: "personal" | "team";
+  /** A team row's rights by the permission held; absent in the personal space, where all are given. */
+  rights?: ProfileRights;
+  /** A team row open on some device now. */
+  open_on?: OpenOn;
+  /** A team row's tag ids, from its card; personal rows take theirs from tag_list. */
+  tags?: string[];
 };
+
+/** What this member may do with one team profile (perm.rs `Rights`). */
+export type ProfileRights = { see: boolean; start: boolean; edit: boolean; delete: boolean; cookies: boolean; take_out: boolean };
+export type ProfileRight = keyof ProfileRights;
+
+/** Who has a team profile open, and where (local/profile.rs `OpenOn`); `since`/`until` in unix seconds. */
+export type OpenOn = { device_name: string; member_name: string; this_device: boolean; since: number; until: number };
 
 export type ProfileForm = {
   id: string;
@@ -52,6 +72,15 @@ export type ProfileForm = {
   /// Saved to `_meta`; the launcher keeps the global screen setting out of a
   /// launch that has one.
   screen_custom: boolean;
+  /// A new Windows/Linux profile's default: this computer's screen, in
+  /// screen_w/h. Form state only; saved as that size, never as a mark.
+  screen_host: boolean;
+  /// This computer's pixel ratio, saved with `screen_host`; 0 = the template's.
+  screen_dpr: number;
+  /// Report the window as focused even while another one is in front, so
+  /// `document.hasFocus()` stays true. Stored as `window.keep_focus`; off by
+  /// default, because a window that never loses focus is unusual in itself.
+  keep_focus: boolean;
   /// Cookies file picked in the editor, imported once the profile exists.
   /// Editor state, not part of the fingerprint — `toStored` does not write it.
   cookies_file: string;
@@ -68,6 +97,9 @@ export type ProfileForm = {
 
   timezone: string;
   language: string;
+  /// The browser's own menus: this computer's language, or the profile's.
+  /// Stored as top-level `ui_language: "profile"` only when chosen.
+  ui_language: UiLanguage;
 
   webrtc: WebRtcMode;
   do_not_track: boolean;

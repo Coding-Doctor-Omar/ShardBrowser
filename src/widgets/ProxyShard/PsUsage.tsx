@@ -1,4 +1,4 @@
-import { useEffect, useId, useRef, useState, type ReactNode } from "react";
+import { useEffect, useId, useLayoutEffect, useRef, useState, type ReactNode } from "react";
 import { Card, IconButton, ProgressBar, Select, cn } from "@proxyshard/shardx-ui-kit";
 import { RefreshIcon } from "../../shared/icons";
 import { appLocale, useT } from "../../shared/i18n";
@@ -20,9 +20,10 @@ import {
 /// chart, a bar or the No data ghost, so a row's cards are one height by
 /// their content; in row one the chart grows to the stacked pair's height.
 /// And no card sits alone in a row (controller, after the first shots): the
-/// lower cards take as many columns as there are cards, up to four, and
-/// more split into even rows (5 as 3 and 2). From 640 px of room; from 400
-/// two columns, where an odd last card spans both; then one.
+/// lower cards take as many columns as there are cards, as many as fit at
+/// 220 px (up to six on a wide window), and more split into even rows (5 as
+/// 3 and 2 where four fit). From 640 px of room; from 400 two columns, where
+/// an odd last card spans both; then one.
 /// Never a number the app does not know (controller): a plan or order whose
 /// usage is unknown shows what it sells (its IPs) or its days left; a card
 /// with no number at all says when one will come, over the No data ghost.
@@ -79,7 +80,7 @@ function tierName(t: ReturnType<typeof useT>, p: PlanUsage): string {
 }
 
 /** Cards into rows of at most `max`, as even as they go: 5 as 3 and 2, 7 as 4 and 3. */
-function evenRows<T>(items: T[], max = 4): T[][] {
+function evenRows<T>(items: T[], max: number): T[][] {
   const rows: T[][] = [];
   const count = Math.ceil(items.length / max);
   for (let r = 0, i = 0; r < count; r++) {
@@ -96,15 +97,16 @@ function mainPlan(plans: PlanUsage[]): PlanUsage | null {
   return metered.reduce<PlanUsage | null>((a, b) => (!a || (b.total ?? 0) > (a.total ?? 0) ? b : a), null) ?? plans[0] ?? null;
 }
 
-/** Row two's cards per row: as many as give each at least 220 px (4 at most,
- *  2 at least), from the section's own unzoomed width. */
+/** Row two's cards per row: as many as give each at least 220 px (6 at most,
+ *  2 at least), from the section's own unzoomed width; read before the first
+ *  paint, so the cards never land in rows of 4 first. */
 function useRowMax() {
   const ref = useRef<HTMLElement>(null);
   const [max, setMax] = useState(4);
-  useEffect(() => {
+  useLayoutEffect(() => {
     const el = ref.current;
     if (!el) return;
-    const read = () => setMax(Math.max(2, Math.min(4, Math.floor((el.offsetWidth + 12) / (220 + 12)))));
+    const read = () => setMax(Math.max(2, Math.min(6, Math.floor((el.offsetWidth + 12) / (220 + 12)))));
     read();
     const ro = new ResizeObserver(read);
     ro.observe(el);

@@ -49,13 +49,18 @@ test("a saved order and hidden columns come back, and every row follows its head
   expect(await cellsOf(page, "Etsy craft shop")).toEqual(["checkbox", "name", "notes", "status", "tags", "proxy", "actions"]);
 });
 
+// The row stretches to the list (owner, 2026-10-23): a set width is the one
+// the column stretches from, so the header and rows draw it a little wider.
 test("a width is the list's: header and rows take it, and it stays while a View is applied", async ({ page }) => {
   await seed(page, "shardx.profiles.layout", { v: 2, order: ["name", "status", "folder", "tags", "proxy", "notes"], hidden: [], widths: { tags: 200 } });
   await openApp(page);
-  expect(await width(header(page).locator("[data-col='tags']"))).toBe(200);
-  expect(await width(row(page, "Etsy craft shop").locator("[data-cell='tags']"))).toBe(200);
+  const template = () => header(page).evaluate((el) => (el as HTMLElement).style.gridTemplateColumns);
+  expect(await template()).toMatch(/--col-tags,(200px|minmax\(200px,)/);
+  const drawn = await width(header(page).locator("[data-col='tags']"));
+  expect(drawn).toBeGreaterThanOrEqual(200);
+  expect(await width(row(page, "Etsy craft shop").locator("[data-cell='tags']"))).toBe(drawn);
   await sidebar(page).locator("[data-view='builtin:running']").click();
-  expect(await width(header(page).locator("[data-col='tags']"))).toBe(200);
+  expect(await template()).toMatch(/--col-tags,(200px|minmax\(200px,)/);
 });
 
 test("a View keeps its own order and hidden columns; leaving it gives the list's own back", async ({ page }) => {

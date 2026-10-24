@@ -20,13 +20,17 @@ test("columns size to their content: one long name leaves Name at the others' wi
   await expect(page.getByRole("tooltip")).toHaveText(LONG);
 });
 
+// The row stretches to the list (owner, 2026-10-23): a width a key sets is
+// the width drawn, and the next column takes the px (Size, the last, sits at
+// its content and has none to give a wider Folder).
 test("a width, a hidden column and a sort are saved and come back after a restart", async ({ page }) => {
   await open(page);
   const folder = grid(page).locator("[data-col='folder']");
   const before = (await folder.boundingBox())!.width;
   await page.getByRole("separator", { name: "Resize Folder" }).focus();
-  await page.keyboard.press("Shift+ArrowRight");
-  await expect.poll(async () => Math.round((await folder.boundingBox())!.width)).toBe(Math.round(before) + 40);
+  await page.keyboard.press("ArrowLeft");
+  await page.keyboard.press("ArrowLeft");
+  await expect.poll(async () => Math.abs((await folder.boundingBox())!.width - (before - 16))).toBeLessThanOrEqual(1);
   await grid(page).getByRole("button", { name: "Columns" }).click();
   await page.getByRole("menuitemcheckbox", { name: "Size" }).click();
   await page.keyboard.press("Escape");
@@ -35,11 +39,13 @@ test("a width, a hidden column and a sort are saved and come back after a restar
   await expect(rows(page).first()).toContainText("Kilo");
 
   const stored = await page.evaluate(() => JSON.parse(localStorage.getItem("shardx.test.datalist.layout") ?? "null"));
-  expect(stored).toMatchObject({ hidden: ["size"], widths: { folder: Math.round(before) + 40 }, sort: { id: "name", dir: "descending" } });
+  expect(stored).toMatchObject({ hidden: ["size"], sort: { id: "name", dir: "descending" } });
+  expect(Object.keys(stored.widths)).toEqual(["folder"]);
+  expect(Math.abs(stored.widths.folder - (before - 16))).toBeLessThanOrEqual(1);
 
   await page.reload();
   expect(await titles(page)).toEqual(["Name", "Folder"]);
-  expect(Math.round((await grid(page).locator("[data-col='folder']").boundingBox())!.width)).toBe(Math.round(before) + 40);
+  expect(Math.round((await grid(page).locator("[data-col='folder']").boundingBox())!.width)).toBe(stored.widths.folder);
   await expect(rows(page).first()).toContainText("Kilo");
   await expect(grid(page).locator("[data-col='name']")).toHaveAttribute("aria-sort", "descending");
 });
@@ -72,8 +78,9 @@ test("a list that selects nothing keeps Name pinned at the card's left while it 
   // It scrolls as far as its columns reach past the card (about 60 px here).
   await expect.poll(() => box.evaluate((el) => el.scrollLeft)).toBeGreaterThan(30);
   expect(Math.abs((await at()) - before)).toBeLessThanOrEqual(0.5);
-  // Its fill covers the row's side padding, so what scrolls under it never shows beside it.
+  // Its fill covers the row's side padding and the tile's 4 px inset past it,
+  // so what scrolls under it never shows beside it.
   const fill = await name.evaluate((el) => { const s = getComputedStyle(el, "::before"); return { left: s.left, bg: s.backgroundColor }; });
-  expect(fill.left).toBe("-12px");
+  expect(fill.left).toBe("-16px");
   expect(fill.bg).not.toBe("rgba(0, 0, 0, 0)");
 });

@@ -93,14 +93,27 @@ test("narrow, the Residential tile takes the full row above the two small tiles"
   expect(b3.width).toBeGreaterThan(b1.width + b2.width);
 });
 
-test("the page is wide: 1120 px at most, more than a form's 760 at 1280 (owner)", async ({ page }) => {
+test("the page spans the window: tiles, Usage, Orders and the header's actions share the body's right edge (owner, 2026-10-23)", async ({ page }) => {
   await page.setViewportSize({ width: 1280, height: 800 });
   await openApp(page, { section: "proxyshard" });
-  const wide = (await page.locator("[data-page-body] > *").first().boundingBox())!;
-  expect(wide.width).toBeGreaterThan(760);
-  await page.setViewportSize({ width: 2560, height: 1440 });
-  const capped = (await page.locator("[data-page-body] > *").first().boundingBox())!;
-  expect(capped.width).toBeLessThanOrEqual(1120);
+  const edges = () => page.evaluate(() => {
+    const body = document.querySelector<HTMLElement>("[data-page-body]")!;
+    const end = body.getBoundingClientRect().right - parseFloat(getComputedStyle(body).paddingRight) * (parseFloat(getComputedStyle(document.documentElement).zoom) || 1);
+    const right = (sel: string) => document.querySelector(sel)!.getBoundingClientRect().right;
+    const actions = [...document.querySelectorAll("main header button")].map((b) => b.getBoundingClientRect().right);
+    return [right("[data-ps-tiles]"), right("[data-ps-usage]"), right("[data-ps-card='orders']"), right("[data-ps-card='orders'] [role='treegrid']"), Math.max(...actions)]
+      .map((r) => Math.round(Math.abs(r - end)));
+  });
+  expect(await edges()).toEqual([0, 0, 0, 0, 0]);
+  // 1280 as before the cap went: the body's 992 px.
+  expect(Math.round((await page.locator("[data-ps-tiles]").boundingBox())!.width)).toBe(992);
+  for (const [width, height] of [[1920, 1080], [2560, 1440]]) {
+    await page.setViewportSize({ width, height });
+    // A 2560 screen gets 125% by Auto (owner, 2026-10-23).
+    await expect.poll(() => page.evaluate(() => getComputedStyle(document.documentElement).zoom)).toBe(width > 2200 ? "1.25" : "1");
+    await expect.poll(edges).toEqual([0, 0, 0, 0, 0]);
+    expect((await page.locator("[data-ps-tiles]").boundingBox())!.width).toBeGreaterThan(1120);
+  }
 });
 
 test("in Traffic used the number, the unit and the trend share one baseline (owner)", async ({ page }) => {

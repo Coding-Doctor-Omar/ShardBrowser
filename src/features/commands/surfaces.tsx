@@ -78,7 +78,7 @@ export function menuItemsFor(
     const reason = reasonOf(c, s);
     const keyed = keyWorksOn(c, section);
     items.push({
-      label: c.label(s.ids.length),
+      label: c.menuLabel?.(s) ?? c.label(s.ids.length),
       icon: iconOf(c),
       shortcut: keyed ? capOf(c) : undefined,
       ariaKeyShortcuts: keyed ? ariaOf(c) : undefined,

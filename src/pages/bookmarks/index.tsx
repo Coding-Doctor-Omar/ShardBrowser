@@ -5,21 +5,25 @@ import { useStoreChanged } from "../../shared/hooks/useStoreChanged";
 import { useHeldLoading } from "../../shared/hooks/useHeldLoading";
 import { useArrivedIds } from "../../shared/hooks/useArrivedIds";
 import { Field } from "../../shared/ui/Field";
-import { SelectField } from "../../shared/ui/SelectField";
-import { AddIcon, NavBookmarksIcon, SearchIcon } from "../../shared/icons";
+import { AddIcon, DownloadIcon, NavBookmarksIcon, SearchIcon } from "../../shared/icons";
 import { LoadError, LoadingRows } from "../../shared/ui/ListStates";
 import { ListColumn, useListEndRoom } from "../../shared/ui/ListColumn";
 import { useListLayout, type ListColumnDef } from "../../shared/ui/listHeader";
 import { rowActionIcons } from "../../shared/ui/rowActionIcons";
 import { isFullUrl, readableUrl } from "../../shared/lib/utils";
-import { useBookmarks, emptyBookmark, bookmarkName, type Bookmark } from "../../entities/bookmark";
+import {
+  useBookmarks, emptyBookmark, bookmarkName, BookmarkFolderSelect, type Bookmark,
+  BOOKMARK_TAB_ALL as TAB_ALL, BOOKMARK_TAB_ANY as TAB_ANY, bookmarkFolderTab as folderTab, bookmarkTabFolder as tabFolder,
+} from "../../entities/bookmark";
 import { useFolders, useProfile } from "../../entities/profile";
+import { teamRefusal, useRightsChange } from "../../entities/space";
 import { translate, useLang, useT } from "../../shared/i18n";
 import { useScrollMemory } from "../../shared/model/scrollMemory";
 import { refocusPageFilter } from "../../shared/lib/focus";
 import { useDialogLife } from "../../shared/lib/useDialogLife";
 import { capOf, command, labelOf, runCommand } from "../../features/commands";
 import { showMeAround } from "../../features/tour";
+import { ImportBookmarksDialog } from "../../features/import-bookmarks";
 
 type BookmarkColumn = "name" | "address" | "shows";
 /** A bookmark as the list shows it: with the words for where it shows. */
@@ -62,6 +66,9 @@ function Editor({ open, initial, folders, onClose }: {
   const t = useT();
   const [b, setB] = useState(initial);
   const save = useBookmarks((s) => s.save);
+  // A team's: a new one needs Create, a change Edit; without it the editor only shows.
+  useRightsChange();
+  const refused = teamRefusal(initial.id ? "edit" : "create");
   // Any field other than it opened with: Esc, the close button and Cancel ask first.
   const dirty = b.url !== initial.url || b.title !== initial.title || b.folder !== initial.folder;
   // An unfinished address ("https://goog") is said on Save, in the field; the
@@ -88,10 +95,13 @@ function Editor({ open, initial, folders, onClose }: {
       title={initial.id ? t("bookmarks.editTitle") : t("bookmarks.newTitle")}
       confirmLabel={t("bookmarks.save")}
       onConfirm={submit}
+      isDisabled={!!refused}
+      footerNote={refused ?? undefined}
       cancelLabel={t("bookmarks.cancel")}
       onCancel={onClose}
     >
-      <div className="flex w-full flex-col gap-3 py-4">
+      {/* Without the right it opens to read: the fields show, nothing changes. */}
+      <fieldset disabled={!!refused} className="m-0 flex w-full min-w-0 flex-col gap-3 border-0 py-4 px-0">
         <div ref={urlRef}>
           <Field
             label={t("bookmarks.urlLabel")}
@@ -108,20 +118,16 @@ function Editor({ open, initial, folders, onClose }: {
           onChange={(v) => setB({ ...b, title: v })}
           placeholder={t("bookmarks.titlePlaceholder")}
         />
-        <SelectField
+        <BookmarkFolderSelect
           label={t("bookmarks.folderLabel")}
           value={b.folder}
+          folders={folders}
           onChange={(v) => setB({ ...b, folder: v })}
-          isSearchable={folders.length > 8}
-          options={[
-            { value: "", label: t("bookmarks.folderAnyOption") },
-            ...folders.map((f) => ({ value: f, label: f })),
-          ]}
         />
         <p className="m-0 text-secondary text-text-soft-400">
           {t.rich("bookmarks.hint", { b: (s) => <strong>{s}</strong> })}
         </p>
-      </div>
+      </fieldset>
     </DialogModal>
   );
 }
@@ -156,7 +162,7 @@ export function BookmarksPage() {
     const q = search.trim().toLowerCase();
     return items.filter(
       (b) =>
-        (folder === "all" || b.folder === (folder === "__any__" ? "" : folder)) &&
+        (folder === TAB_ALL || b.folder === (folder === TAB_ANY ? "" : tabFolder(folder))) &&
         (!q || b.title.toLowerCase().includes(q) || b.url.toLowerCase().includes(q) || readableUrl(b.url).toLowerCase().includes(q)),
     );
   }, [items, search, folder]);
@@ -176,9 +182,9 @@ export function BookmarksPage() {
   const allRows = useMemo(() => items.map((b): BookmarkRow => ({ bookmark: b, shows: showsIn(b) })), [items, showsIn]);
 
   const tabs = [
-    { id: "all", label: t("bookmarks.tabAll") },
-    { id: "__any__", label: t("bookmarks.tabEveryProfile") },
-    ...folders.map((f) => ({ id: f, label: f })),
+    { id: TAB_ALL, label: t("bookmarks.tabAll") },
+    { id: TAB_ANY, label: t("bookmarks.tabEveryProfile") },
+    ...folders.map((f) => ({ id: folderTab(f), label: f })),
   ];
 
   const loading = useHeldLoading(status === "idle" || status === "loading");
@@ -189,7 +195,7 @@ export function BookmarksPage() {
   // Folder a new bookmark goes into (Pair 3 review, Minor 9).
   useEffect(() => {
     if (!empty) return;
-    setFolder("all");
+    setFolder(TAB_ALL);
     setSearch("");
   }, [empty, setFolder, setSearch]);
   // A Folder tab whose Folder was renamed or deleted in Profiles: back to
@@ -197,8 +203,8 @@ export function BookmarksPage() {
   // checked (Pair 28 review M4, PC-083's shape). Only once the profiles are
   // loaded, so a first render with no Folders yet never resets a real choice.
   useEffect(() => {
-    if (!profilesReady || folder === "all" || folder === "__any__" || folders.includes(folder)) return;
-    setFolder("all");
+    if (!profilesReady || folder === TAB_ALL || folder === TAB_ANY || folders.includes(tabFolder(folder) ?? "")) return;
+    setFolder(TAB_ALL);
   }, [profilesReady, folder, folders, setFolder]);
 
   const list = useListLayout({
@@ -222,7 +228,13 @@ export function BookmarksPage() {
   const layout = stateShown
     ? { ...list.layout, scroll: { ...list.layout.scroll, role: "region", "aria-label": t("bookmarks.heading") } }
     : list.layout;
-  const newBookmark = () => setEditing(emptyBookmark(folder === "all" || folder === "__any__" ? "" : folder));
+  // A team's rules: making, changing and deleting a bookmark each need their right in the team.
+  useRightsChange();
+  const noCreate = teamRefusal("create");
+  const noDelete = teamRefusal("delete");
+  const newBookmark = () => { if (!noCreate) setEditing(emptyBookmark(tabFolder(folder) ?? "")); };
+  // The registry's Import from Chrome: a file picker, then its dialog.
+  const importChrome = () => void runCommand(command("bookmark.import"), { ids: [] }, { from: "pageMenu" });
 
   const emptyState = items.length > 0 && search.trim() ? (
     <EmptyState
@@ -235,7 +247,8 @@ export function BookmarksPage() {
       icon={<NavBookmarksIcon />}
       title={items.length === 0 ? t("bookmarks.emptyTitle") : t("bookmarks.emptyFolderTitle")}
       hint={t("bookmarks.emptyHint")}
-      action={{ label: t("bookmarks.emptyAction"), icon: <AddIcon />, onClick: newBookmark }}
+      action={noCreate ? undefined : { label: t("bookmarks.emptyAction"), icon: <AddIcon />, onClick: newBookmark }}
+      secondary={noCreate ? undefined : { label: labelOf("bookmark.import"), onClick: importChrome }}
     />
   );
 
@@ -247,16 +260,32 @@ export function BookmarksPage() {
         help={{ title: t("pageHelp.bookmarks.title"), body: t("pageHelp.bookmarks.body"), onTour: () => showMeAround("bookmarks") }}
         filter={empty ? undefined : { value: search, onChange: setSearch }}
         actions={
-          // The registry's New bookmark: its words, and its key (C) in the tooltip.
-          <Tooltip content={labelOf("bookmark.new")} shortcut={capOf(command("bookmark.new"))}>
-            <Button
-              variant="primary" mode="filled" size="xsmall" leftIcon={<AddIcon className="size-3.5" />}
-              data-tour="new-bookmark"
-              onClick={() => void runCommand(command("bookmark.new"), { ids: [] }, { from: "pageMenu" })}
-            >
-              {labelOf("bookmark.new")}
-            </Button>
-          </Tooltip>
+          <>
+            {/* One secondary action: a button of its own, not a menu of one (EMIL-20);
+                an icon in a narrow header, so the title keeps its room. */}
+            <span className="flex @max-[540px]:hidden">
+              <Tooltip content={noCreate ?? undefined}>
+                <Button variant="neutral" mode="stroke" size="xsmall" leftIcon={<DownloadIcon className="size-3.5" />} disabled={!!noCreate} aria-description={noCreate ?? undefined} onClick={importChrome}>
+                  {labelOf("bookmark.import")}
+                </Button>
+              </Tooltip>
+            </span>
+            <span className="flex @min-[540px]:hidden">
+              <IconButton label={noCreate ? t("rights.labelWhy", { label: labelOf("bookmark.import"), why: noCreate }) : labelOf("bookmark.import")} icon={<DownloadIcon className="size-3.5" />} mode="stroke" size="xsmall" tooltipSide="bottom" disabled={!!noCreate} onClick={importChrome} />
+            </span>
+            {/* The registry's New bookmark: its words, and its key (C) in the tooltip. */}
+            <Tooltip content={noCreate ?? labelOf("bookmark.new")} shortcut={noCreate ? undefined : capOf(command("bookmark.new"))}>
+              <Button
+                variant="primary" mode="filled" size="xsmall" leftIcon={<AddIcon className="size-3.5" />}
+                data-tour="new-bookmark"
+                disabled={!!noCreate}
+                aria-description={noCreate ?? undefined}
+                onClick={() => void runCommand(command("bookmark.new"), { ids: [] }, { from: "pageMenu" })}
+              >
+                {labelOf("bookmark.new")}
+              </Button>
+            </Tooltip>
+          </>
         }
       />
       <PageBody scroll={false} className="relative">
@@ -318,7 +347,7 @@ export function BookmarksPage() {
             menuItems={(r) => [
               { label: t("bookmarks.editTooltip"), icon: rowActionIcons.edit({ className: "size-3.5" }), onSelect: () => setEditing(r.bookmark) },
               { type: "separator" },
-              { label: t("bookmarks.delete"), icon: rowActionIcons.trash({ className: "size-3.5" }), danger: true, onSelect: () => void remove(r.bookmark) },
+              { label: t("bookmarks.delete"), icon: rowActionIcons.trash({ className: "size-3.5" }), danger: true, disabled: !!noDelete, hint: noDelete ?? undefined, onSelect: () => void remove(r.bookmark) },
             ]}
             bottomInset={endRoom}
           />
@@ -328,6 +357,7 @@ export function BookmarksPage() {
       {editLife.mounted && editingShown && (
         <Editor key={editLife.session} open={editing != null} initial={editingShown} folders={folders} onClose={() => setEditing(null)} />
       )}
+      <ImportBookmarksDialog folders={folders} />
     </>
   );
 }

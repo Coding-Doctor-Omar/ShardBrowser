@@ -2,8 +2,10 @@ import { create } from "zustand";
 import { toast } from "../../../shared/model/toast";
 import { reportLoadError } from "../../../shared/model/loadError";
 import { deferDelete, isPendingDelete } from "../../../shared/lib/deferDelete";
+import { onSpaceMoved } from "../../../shared/api/invoke";
 import { t } from "../../../shared/i18n";
 import { bookmarkDelete, bookmarkList, bookmarkSave } from "../model/api";
+import { teamRefusal } from "../../space";
 import type { Bookmark } from "../model/types";
 import { bookmarkName } from "./name";
 
@@ -17,6 +19,14 @@ export const emptyBookmark = (folder = ""): Bookmark => ({
   folder,
 });
 
+// The page's tabs: All, Every profile, one per Folder. A Folder's tab has a
+// prefix, so a Folder named "all" is still a tab of its own.
+export const BOOKMARK_TAB_ALL = "all";
+export const BOOKMARK_TAB_ANY = "any";
+export const bookmarkFolderTab = (name: string) => `folder:${name}`;
+/** The Folder a tab shows, or null on All and Every profile. */
+export const bookmarkTabFolder = (tab: string) => (tab.startsWith("folder:") ? tab.slice(7) : null);
+
 export type BookmarkStore = {
   status: "idle" | "loading" | "ready" | "error";
   /** Why the first load failed. */
@@ -25,7 +35,7 @@ export type BookmarkStore = {
   /** Open editor, or null. */
   editing: Bookmark | null;
   search: string;
-  /** Folder tab; "all" shows everything. */
+  /** The page's tab (BOOKMARK_TAB_ALL shows everything), not a bookmark's folder. */
   folder: string;
 
   init: () => Promise<void>;
@@ -43,7 +53,7 @@ export const useBookmarks = create<BookmarkStore>((set, get) => ({
   items: [],
   editing: null,
   search: "",
-  folder: "all",
+  folder: BOOKMARK_TAB_ALL,
 
   init: async () => {
     if (get().status === "loading" || get().status === "ready") return;
@@ -65,6 +75,9 @@ export const useBookmarks = create<BookmarkStore>((set, get) => ({
 
   save: async (b) => {
     const name = bookmarkName(b);
+    // A team's: a new one needs Create, a change Edit, in the team.
+    const refused = teamRefusal(b.id ? "edit" : "create");
+    if (refused) { toast.fail({ title: t("useBookmarks.saveFailed", { name }), detail: refused, subject: name }); return; }
     try {
       await bookmarkSave(b);
       set({ editing: null });
@@ -78,6 +91,9 @@ export const useBookmarks = create<BookmarkStore>((set, get) => ({
   // Behind an Undo toast, nothing asked (ruling 18).
   remove: async (b) => {
     const name = bookmarkName(b);
+    // Refused by a team's rules: it never leaves the list, so it never comes back.
+    const refused = teamRefusal("delete");
+    if (refused) { toast.fail({ title: t("useBookmarks.deleteFailed", { name }), detail: refused }); return; }
     deferDelete({
       key: `bookmark:${b.id}`,
       title: t("useBookmarks.deleted", { name }),
@@ -88,3 +104,10 @@ export const useBookmarks = create<BookmarkStore>((set, get) => ({
     });
   },
 }));
+
+// Another space: its bookmarks are read afresh, nothing of the old ones shows or stays open.
+onSpaceMoved(() => {
+  const was = useBookmarks.getState().status;
+  useBookmarks.setState({ status: "idle", error: null, items: [], editing: null, folder: BOOKMARK_TAB_ALL });
+  if (was !== "idle") void useBookmarks.getState().init();
+});

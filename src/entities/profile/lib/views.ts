@@ -4,10 +4,11 @@ import { randomId } from "../../../shared/lib/utils";
 import { emptyFilters, isProxyFilter, proxyIdOf, type ProfileFilters, type ProfileSort } from "./listing";
 import { PROFILE_COLUMNS, readProfileColumns, type ProfileColumns } from "./columns";
 import { defaultSet, sameSet } from "../../../shared/lib/tableColumns";
+import { onSpaceChange, spaceKey } from "../../space";
 
 /// Views: named copies of the Profiles list's query. Kept by the app on this
 /// computer (owner decision, Phase 4: frontend only), in the shape the backend
-/// should store later.
+/// should store later; each space has its own (`spaceKey`).
 const KEY = "shardx.views";
 const VERSION = 1;
 /** Longest View name; it has to fit the sidebar. */
@@ -114,7 +115,7 @@ function readQuery(raw: unknown): ViewQuery {
 /** The saved custom Views; a missing, broken or other-version value means none. */
 function load(): ProfileView[] {
   try {
-    const raw = JSON.parse(localStorage.getItem(KEY) ?? "null") as { version?: unknown; views?: unknown } | null;
+    const raw = JSON.parse(localStorage.getItem(spaceKey(KEY)) ?? "null") as { version?: unknown; views?: unknown } | null;
     if (!raw || raw.version !== VERSION || !Array.isArray(raw.views)) return [];
     const out: ProfileView[] = [];
     for (const v of raw.views as Record<string, unknown>[]) {
@@ -130,7 +131,7 @@ function load(): ProfileView[] {
 
 function save(views: ProfileView[]) {
   const saved = views.map(({ id, name, pinned, query: q }) => ({ id, name, pinned, query: q }));
-  try { localStorage.setItem(KEY, JSON.stringify({ version: VERSION, views: saved })); } catch { /* private mode */ }
+  try { localStorage.setItem(spaceKey(KEY), JSON.stringify({ version: VERSION, views: saved })); } catch { /* private mode */ }
 }
 
 // ---- The store -----------------------------------------------------------------
@@ -200,6 +201,9 @@ export const useViews = create<ViewStore>((set, get) => {
     },
   };
 });
+
+// Another space shows its own Views.
+onSpaceChange(() => useViews.setState({ views: load() }));
 
 /** Built-ins, then custom Views. */
 export function allViews(custom: ProfileView[] = useViews.getState().views): ProfileView[] {

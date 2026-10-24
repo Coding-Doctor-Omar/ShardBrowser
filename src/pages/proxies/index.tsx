@@ -10,7 +10,6 @@ import { useProfile } from "../../entities/profile";
 import { usePsAccount } from "../../entities/proxyshard";
 import { useOnboarding } from "../../features/onboarding";
 import { ProxyBulkImporter, ProxyFilterChips } from "../../features/manage-proxies";
-import { PsTrialModal } from "../../features/proxyshard";
 import { ProxyList } from "../../widgets/ProxyList";
 import { ProxyToolbar } from "../../widgets/ProxyList/ProxyToolbar";
 import { ProxyPeek } from "../../widgets/ProxyPeek";
@@ -41,9 +40,7 @@ export function ProxiesPage() {
   const loading = useHeldLoading(status === "idle" || status === "loading");
 
   useEffect(() => { init(); }, [init]);
-  // ProxyShard's trial, for someone with no account connected yet. It asks the
-  // server on every visit to this page and shows nothing unless the server
-  // says there is an offer; see PsTrialModal.
+  // The ProxyShard account, for the page's ProxyShard parts.
   const psInit = usePsAccount((s) => s.init);
   useEffect(() => { psInit(); }, [psInit]);
   // Pick up proxies/profiles added via the automation API or MCP live.
@@ -93,7 +90,6 @@ export function ProxiesPage() {
           }}
         />
       )}
-      <PsTrialModal />
     </>
   );
 }

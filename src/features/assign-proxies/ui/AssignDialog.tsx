@@ -1,4 +1,5 @@
 import { useMemo, useState } from "react";
+import { teamRefusal } from "../../../entities/space";
 import { Button, Checkbox, DialogModal, EmptyState, SegmentControl, useLatched } from "@proxyshard/shardx-ui-kit";
 import { RouteIcon } from "../../../shared/icons";
 import { useNav } from "../../../shared/model/navigation";
@@ -51,7 +52,7 @@ export function AssignDialog({ open, from, onClose }: {
   // The profiles the Proxies side can choose from: a Folder, and those
   // without a proxy (a deleted one counts as none) or all of them.
   const pool = useMemo(() => from.kind === "proxies"
-    ? profiles.filter((p) => (folder === "all" || p.folder === folder) && (scope === "all" || !p.proxy_id || proxyMissing(p, proxies)))
+    ? profiles.filter((p) => (folder === "all" || p.folder === pickedFolder(folder)) && (scope === "all" || !p.proxy_id || proxyMissing(p, proxies)))
     : [], [from.kind, profiles, proxies, folder, scope]);
   const poolIds = useMemo(() => listOrder(pool.map((p) => p.id), profiles), [pool, profiles]);
   const given = from.kind === "profiles" ? from.profileIds : null;
@@ -74,6 +75,7 @@ export function AssignDialog({ open, from, onClose }: {
     return !!p?.proxy_id && p.proxy_id !== proxyId && !proxyMissing(p, proxies);
   }).length;
   const noProxies = from.kind === "profiles" && proxies.length === 0;
+  const noCreate = !!teamRefusal("create");
 
   const run = async () => {
     setBusy(true);
@@ -111,11 +113,13 @@ export function AssignDialog({ open, from, onClose }: {
                 headingLevel={3}
                 icon={<RouteIcon />}
                 title={t("otherStates.noProxies")}
-                actions={
+                // A team's member who may not add one is told whose they are, not sent to an empty page.
+                hint={noCreate ? t("otherStates.noTeamProxiesHint") : undefined}
+                actions={noCreate ? undefined : (
                   <Button variant="neutral" mode="stroke" size="xsmall" onClick={() => { onClose(); useNav.getState().setSection("proxies"); }}>
                     {t("otherStates.goToProxies")}
                   </Button>
-                }
+                )}
               />
             </ListStateCenter>
           </div>
@@ -174,6 +178,10 @@ function previewOf(t: T, plan: AssignPlan, { direct, asked, targets, replaced }:
 
 /// The Proxies side's choice: which profiles, from a Folder, without a proxy
 /// or all, each one a row that can be left out.
+// A Folder's option carries a prefix, so a Folder named "all" is not Every folder.
+const folderPick = (name: string) => `folder:${name}`;
+const pickedFolder = (v: string) => (v.startsWith("folder:") ? v.slice(7) : null);
+
 function ProfileChoice({ profiles, folder, setFolder, scope, setScope, shown, unpicked, setUnpicked }: {
   profiles: readonly ProfileMeta[];
   folder: string; setFolder: (v: string) => void;
@@ -194,7 +202,7 @@ function ProfileChoice({ profiles, folder, setFolder, scope, setScope, shown, un
           isSearchable={folders.length > 8}
           options={[
             { value: "all", label: t("proxyDistributeModal.everyFolder") },
-            ...folders.map((f) => ({ value: f, label: f })),
+            ...folders.map((f) => ({ value: folderPick(f), label: f })),
           ]}
         />
         <FieldGroup label={t("proxyDistributeModal.applyTo")}>

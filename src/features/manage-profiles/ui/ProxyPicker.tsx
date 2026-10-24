@@ -5,6 +5,7 @@ import { toast } from "../../../shared/model/toast";
 import { storeBus } from "../../../shared/lib/storeBus";
 import { proxyBulkParse, proxySave, type ProxyEntry } from "../../../entities/proxy";
 import { useProfile } from "../../../entities/profile";
+import { teamRefusal, useRightsChange } from "../../../entities/space";
 import { useProxyOptions } from "./ProxySelect";
 
 /** A query that reads as a proxy line (host:port, a URL, user:pass@host):
@@ -22,6 +23,7 @@ export function ProxyPicker({ value, proxies, onPick }: {
 }) {
   const t = useT();
   const options = useProxyOptions(proxies, value);
+  useRightsChange();
   const [query, setQuery] = useState("");
   const adding = useRef(false);
   const add = async (line: string) => {
@@ -52,7 +54,8 @@ export function ProxyPicker({ value, proxies, onPick }: {
       query={query}
       onQueryChange={setQuery}
       onChange={(id) => onPick(id || null)}
-      onCreate={looksLikeLine(query.trim()) ? (line) => { void add(line); } : undefined}
+      // A team's new proxy needs Create on it (doors.rs proxy_save).
+      onCreate={looksLikeLine(query.trim()) && !teamRefusal("create") ? (line) => { void add(line); } : undefined}
       createLabel={(line) => t("proxyPicker.add", { line })}
       emptyText={t("proxySelect.noMatches")}
     />

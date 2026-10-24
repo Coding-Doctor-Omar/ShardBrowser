@@ -26,8 +26,8 @@ function appStorage(): Record<string, string> {
 }
 
 /** Whether the keys may go: they were written into the backup (or there were
- *  none). Tags, Views and folder looks live only here, so a copy that could
- *  not be written keeps them where they are rather than delete them. */
+ *  none). Views live only here, so a copy that could not be written keeps
+ *  them where they are rather than delete them. */
 let storageKept = true;
 
 /** Takes the app's keys out of storage. Blocked storage holds none to take. */

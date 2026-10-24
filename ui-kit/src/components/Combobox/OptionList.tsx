@@ -3,6 +3,7 @@ import { cn } from '@/lib/cn'
 import { useVirtualList } from '@/lib/virtual'
 import type { ListNavigation } from '@/lib/list/useListNavigation'
 import { swallowFollowUpClick } from '@/lib/overlay/clickGuard'
+import { layoutRect } from '@/lib/overlay/zoom'
 import { CheckIcon, MinusIcon, PlusIcon } from '@/lib/icons'
 import Badge, { type BadgeColor } from '@/components/Badge'
 
@@ -94,14 +95,14 @@ export default function OptionList({
   const { range, totalHeight, offsetOf, scrollToIndex } = useVirtualList({
     count: windowed ? rows.length : 0, rowHeight: ROW, overscan: OVERSCAN, scrollRef, headerHeight: PAD,
   })
-  // A short list moves its own scroller by the row's box (scrollIntoView
-  // would also scroll every scrolling ancestor).
+  // A short list moves only its own scroller (scrollIntoView moves them all), in
+  // layout px as scrollTop is: client px under a 90% Interface size fell short.
   const reveal = (index: number) => {
     const el = scrollRef.current
     const row = rows[index] && document.getElementById(nav.optionId(rows[index].id))
     if (!el || !row) return
-    const r = row.getBoundingClientRect()
-    const box = el.getBoundingClientRect()
+    const r = layoutRect(row)
+    const box = layoutRect(el)
     if (r.top < box.top + PAD) el.scrollTop -= box.top + PAD - r.top
     else if (r.bottom > box.bottom - PAD) el.scrollTop += r.bottom - (box.bottom - PAD)
   }

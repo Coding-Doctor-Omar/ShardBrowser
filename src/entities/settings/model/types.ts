@@ -15,6 +15,8 @@ export type Settings = {
   minimize_to_tray?: boolean;
   /** Appended to every launch, one per line. Applied last, so a repeat wins. */
   extra_args?: string;
+  /** Ask the Web Store about linked extensions every 5 h (on when absent). */
+  ext_update_check?: boolean;
 };
 
 /** Where profiles, user-data, extensions and the trash live. */

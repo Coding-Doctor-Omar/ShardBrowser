@@ -12,7 +12,7 @@ import type { Section } from "../../../shared/types";
 import { StatusDot } from "../../../shared/ui/StatusDot";
 import { ViewIcon } from "../../../shared/ui/ViewIcon";
 import {
-  leaveList, profileStatus, searchTextOf, useAllViews, useFolders, useOverviewFolds, useProfile, useProfileUi, useViewCounts, viewFolds, viewName,
+  leaveList, profileStatus, searchTextOf, useAllViews, useFolders, useOverviewFolds, useProfile, useProfileUi, useSaving, useViewCounts, viewFolds, viewName,
 } from "../../../entities/profile";
 import { tagsOf, useTags } from "../../../entities/tag";
 import { useProxy } from "../../../entities/proxy";
@@ -128,6 +128,7 @@ export function usePaletteItems(): { items: PaletteItem[]; contextTitle: string 
   const cancelled = useProfile((s) => s.cancelled);
   const pending = useProfile((s) => s.pending);
   const startFailed = useProfile((s) => s.startFailed);
+  const saving = useSaving((s) => s.ids);
   const now = useNow();
   const tags = useTags((s) => s.tags);
   const byProfile = useTags((s) => s.byProfile);
@@ -189,7 +190,7 @@ export function usePaletteItems(): { items: PaletteItem[]; contextTitle: string 
     // The subjects are read through the registry; these subscriptions rebuild
     // the group when they change, and a command's `when` or reason with them.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [lang, section, profiles, proxies, running, startBusy, pending, selected, activeId, activeByPointer, peekId, proxySel, proxyActive, proxyByPointer, proxyPeek, proxyList, trashSel, trashItems]);
+  }, [lang, section, profiles, proxies, running, startBusy, pending, saving, selected, activeId, activeByPointer, peekId, proxySel, proxyActive, proxyByPointer, proxyPeek, proxyList, trashSel, trashItems]);
 
   const commandItems = useMemo(() => {
     // Page commands: featured on their own page, found by a search elsewhere.
@@ -228,8 +229,8 @@ export function usePaletteItems(): { items: PaletteItem[]; contextTitle: string 
       // one color, and every dot carries its word (owner rule: no dot alone),
       // idle's last-run text and "Never run" included.
       const status = profileStatus(p, {
-        starting: startBusy.has(p.id), cancelled: cancelled.has(p.id), stopping: pending[p.id]?.kind === "stop", runningSince, failedAt: startFailed[p.id],
-        now, lang, proxyMissing: !!p.proxy_id && !countryOf.has(p.proxy_id),
+        starting: startBusy.has(p.id), cancelled: cancelled.has(p.id), stopping: pending[p.id]?.kind === "stop", runningSince, failedAt: startFailed[p.id], saving: saving.has(p.id),
+        now, lang, proxyMissing: !!p.proxy_id && p.origin !== "team" && !countryOf.has(p.proxy_id),
       });
       return {
         id: `profile:${p.id}`,
@@ -266,7 +267,7 @@ export function usePaletteItems(): { items: PaletteItem[]; contextTitle: string 
     });
     return profileItems;
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [lang, profiles, proxies, running, startBusy, cancelled, pending, startFailed, now, tags, byProfile]);
+  }, [lang, profiles, proxies, running, startBusy, cancelled, pending, startFailed, saving, now, tags, byProfile]);
 
   // Proxies and Automation projects, found by a search like profiles (at most
   // five each, ranked with the rest). Picking one opens it where it lives.

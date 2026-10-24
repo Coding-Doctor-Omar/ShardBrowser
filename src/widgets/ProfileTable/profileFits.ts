@@ -7,7 +7,7 @@ import { formatRelativeRun, type ProfileColumnId, type ProfileMeta } from "../..
 import type { ProxyEntry } from "../../entities/proxy";
 
 // The px ProfileRow's cells draw beside their text. Keep in step with it.
-/** A pinned name's pin: the 14 px glyph and the cell's 6 px gap (`gap-1.5`). */
+/** A pinned name's pin, or a synced one's cloud: the 14 px glyph and the cell's 6 px gap (`gap-1.5`). */
 const PIN = 14 + 6;
 /** A Folder chip's side padding (`px-1.5`, both sides). */
 const CHIP = 12;
@@ -36,10 +36,11 @@ const DAY = 24 * 3600_000;
 function proxyFit(proxyOf: (id: string) => ProxyEntry | undefined, clip: (s: string) => string): ColumnFit<ProfileMeta> {
   const direct = t("profileRow.direct");
   const missing = t("profileRow.proxyMissing");
+  const hidden = t("profileRow.proxyHidden");
   return (p, m) => {
     if (!p.proxy_id) return m(direct, "secondary");
     const x = proxyOf(p.proxy_id);
-    if (!x) return m(missing, "secondary");
+    if (!x) return m(p.origin === "team" ? hidden : missing, "secondary");
     // Every proxy has the slot: its flag, or a globe where it has none.
     const named = !!x.name && x.name !== `${x.host}:${x.port}`;
     return FLAG + (named ? m(clip(x.name), "secondary") : m(`${clip(x.host)}:${x.port}`, "mono"));
@@ -84,13 +85,15 @@ function statusFit(lang: Lang, now: number): ColumnFits<ProfileColumnId, Profile
     PILL_LEAD + m(when(p.last_launched_at, neverRun), "medium"),
     ...withLead.map((w) => PILL_LEAD + m(w, "medium")),
     ...bare.map((w) => PILL_BARE + m(w, "medium")),
+    // Open on another device names it.
+    p.sync?.on && p.sync.open_on ? PILL_LEAD + m(t("status.openOn", { device: p.sync.open_on }), "medium") : 0,
   );
 }
 
 /// What each Profiles cell shows, for sizing its column to its content
 /// (owner, 2026-09-30): the text ProfileRow draws, in the same type role,
-/// plus its fixed parts. Notes (the column that takes the spare room) keeps
-/// its width; Status sizes to its widest pill (`statusFit`).
+/// plus its fixed parts. Status sizes to its widest pill (`statusFit`); Notes
+/// to its text, so the room left over can show a note whole first.
 /// Times read `now` as the list was measured, again each hour (the list's
 /// fits follow an hour clock): "5 min ago" and "6 min ago" are as wide, but
 /// "23 hours ago" and "Yesterday" are not (review M1).
@@ -105,7 +108,7 @@ export function profileFits({ proxyOf, tagsOf, lang, now }: {
   const desktop = t("profileTable.deviceDesktop");
   const when = runWords(lang, now);
   return {
-    name: (p, m) => m(p.name, "ui") + (p.pinned ? PIN : 0),
+    name: (p, m) => m(p.name, "ui") + (p.pinned ? PIN : 0) + (p.sync?.on ? PIN : 0),
     status: statusFit(lang, now),
     folder: (p, m) => (p.folder ? CHIP + m(p.folder, "secondary") : 0),
     // The width at which TagChips' own fold (F18) shows the first two chips
@@ -121,6 +124,7 @@ export function profileFits({ proxyOf, tagsOf, lang, now }: {
     runTime: (p, m) => m(p.total_runtime_ms > 0 ? fmtDuration(p.total_runtime_ms, lang) : "—", "tabular"),
     device: (p, m) => m(p.mobile ? phone : desktop, "secondary"),
     extensions: (p, m) => m(String(p.extensions.length), "tabular"),
+    notes: (p, m) => (p.notes ? m(p.notes, "secondary") : 0),
   };
 }
 

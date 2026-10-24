@@ -4,13 +4,19 @@ inside the engine bundle, and remember etags so subsequent runs are
 zero-network. Mirrors src-tauri/src/runtime.rs in the launcher."""
 from __future__ import annotations
 
+import errno
 import json
 import os
 import platform
+import random
+import secrets
 import shutil
+import socket
 import subprocess
 import sys
 import tarfile
+import time
+import warnings
 import zipfile
 from dataclasses import dataclass
 from pathlib import Path
@@ -21,7 +27,7 @@ import httpx
 PUB_BASE = "https://pub-e57a7c60f6934eb09a6600bf2fc59cdc.r2.dev"
 CHROMIUM_VERSION = "156.0.8078.48"
 # This SDK's own version, compared against the manifest's `min_sdk_version`.
-SDK_VERSION = "2.1.0"
+SDK_VERSION = "2.1.1"
 # Version manifest (GitHub raw) — one tiny GET tells us every archive's current
 # etag, so we never poll R2/S3 (no per-archive HEAD). Updated archives are then
 # pulled from PUB_BASE only when their etag changed.
@@ -285,7 +291,10 @@ class Runtime:
             return {}
 
     def _save_manifest(self, m: dict) -> None:
-        self.manifest_path.write_text(json.dumps(m, indent=2), encoding="utf-8")
+        # Whole or not at all: other processes read it (_adopt_installed).
+        tmp = self.manifest_path.with_name(self.manifest_path.name + ".tmp")
+        tmp.write_text(json.dumps(m, indent=2), encoding="utf-8")
+        os.replace(tmp, self.manifest_path)
 
     # ---- install ----
 
@@ -325,31 +334,89 @@ class Runtime:
         Within a single process, subsequent calls are no-ops unless `force=True`.
         """
         if self._checked_in_process and not force:
+            self._adopt_installed()
             return
+        # One install at a time over this cache, across processes and the SDKs.
+        lock = _InstallLock.acquire(self.root)
+        try:
+            # Another call of this process did it while this one waited.
+            if self._checked_in_process and not force:
+                self._adopt_installed()
+                return
+            self._install_locked(force, lock)
+        finally:
+            lock.release()
+
+    def _adopt_installed(self) -> None:
+        """Another process may have swapped the engine since this one checked:
+        the version profiles claim follows the engine on disk, from its record."""
+        local = self._load_manifest()
+        v = local.get("installed_chromium_version")
+        if not v or v == self._chromium_version:
+            return
+        self._chromium_version = v
+        self._grease_brand = local.get("installed_grease_brand") or None
+        self._grease_version = local.get("installed_grease_version") or None
+        tls = local.get("installed_tls")
+        self._tls = tls if isinstance(tls, dict) else None
+
+    def _stay_on_installed(self, local: dict) -> None:
+        self._chromium_version = self._effective_installed_version(local) or CHROMIUM_VERSION
+        self._grease_brand = local.get("installed_grease_brand") or None
+        self._grease_version = local.get("installed_grease_version") or None
+        tls = local.get("installed_tls")
+        self._tls = tls if isinstance(tls, dict) else None
+
+    def _install_locked(self, force: bool, lock: "_InstallLock") -> None:
+        top = self._spec.binary_subpath[0]
+        # A run that died between the two renames of an update left the engine
+        # as `.previous`: put back before anything asks whether it is installed.
+        _recover_engine(self.root, top)
+        _sweep_leftovers(self.root, top, self._spec.browser.key, self._spec.binary_subpath)
         local = self._load_manifest()
         manifest = self._fetch_manifest()
         remote = manifest.get("archives") if isinstance(manifest.get("archives"), dict) else {}
-        # Remember the engine version so launch can normalise profiles to it.
-        # Without the manifest, what is ALREADY installed — not the version
-        # this SDK was published with. Falling back to the constant made an
-        # offline run record 152 over an engine that is 156, and profiles then
-        # declared a version the engine does not have.
-        self._chromium_version = (
-            manifest.get("chromium_version")
-            or local.get("installed_chromium_version")
-            or CHROMIUM_VERSION
-        )
-        self._grease_brand = manifest.get("grease_brand") or None
-        self._grease_version = manifest.get("grease_version") or None
-        remote_tls = manifest.get("tls")
-        self._tls = remote_tls if isinstance(remote_tls, dict) else None
-        # Refused rather than installed: this SDK could not configure it.
+        # An engine this SDK is too old to drive is not installed, but the one
+        # already on disk keeps running. Refusing outright stopped every run on
+        # an engine that worked yesterday, for an update nobody had asked for.
+        # With nothing installed, or a reinstall asked for, there is nothing to
+        # keep.
         min_sdk = manifest.get("min_sdk_version")
-        if min_sdk and self._version_lt(SDK_VERSION, str(min_sdk)):
+        too_old = bool(min_sdk) and self._version_lt(SDK_VERSION, str(min_sdk))
+        if too_old and (force or not self.installed):
             raise RuntimeError(
                 f"this engine build needs shardx {min_sdk} or newer — "
                 f"you are on {SDK_VERSION}; upgrade the SDK first"
             )
+        # Remember the engine version so launch can normalise profiles to it.
+        # Without the manifest, what is ALREADY installed — not the version
+        # this SDK was published with. Falling back to the constant made an
+        # offline run record 152 over an engine that is 156, and profiles then
+        # declared a version the engine does not have. Skipping an update, the
+        # manifest describes an engine that is not the one on disk, so it is
+        # not read.
+        offered = {} if too_old else manifest
+        self._chromium_version = (
+            offered.get("chromium_version")
+            or self._effective_installed_version(local)
+            or CHROMIUM_VERSION
+        )
+        self._grease_brand = offered.get("grease_brand") or local.get("installed_grease_brand") or None
+        self._grease_version = offered.get("grease_version") or local.get("installed_grease_version") or None
+        remote_tls = offered.get("tls")
+        if not isinstance(remote_tls, dict):
+            remote_tls = local.get("installed_tls")
+        self._tls = remote_tls if isinstance(remote_tls, dict) else None
+        if too_old:
+            warnings.warn(
+                f"[shardx] engine {manifest.get('chromium_version') or 'update'} needs shardx "
+                f"{min_sdk} or newer (this is {SDK_VERSION}); staying on the installed engine "
+                f"{self._chromium_version}. Upgrade the SDK to get it.",
+                RuntimeWarning,
+                stacklevel=3,
+            )
+            self._checked_in_process = True
+            return
         # Unknown is never a mismatch, so adopt a stamp once or the first bump
         # never lands.
         if self.installed and manifest.get("engine_build") \
@@ -357,24 +424,48 @@ class Runtime:
             local["installed_engine_build"] = manifest["engine_build"]
         # A None manifest (unreachable) must NOT force a re-download.
         need_browser = force or not self.installed or self._engine_outdated(local, manifest)
+        swapped = False
         if need_browser:
-            # Wipe the old engine tree first so a leftover `<old>.manifest` /
-            # stale libs can't linger beside the new ones (that pinned the
-            # detected version → endless re-download). binary_subpath[0] is the
-            # engine root dir.
-            # Download BEFORE wiping. The old tree has to go — see above — but
-            # removing it first meant a download that failed left no engine at
-            # all, and nothing could launch until the network came back.
-            tmp, etag = self._download(self._spec.browser, self.root)
-            shutil.rmtree(self.root / self._spec.binary_subpath[0], ignore_errors=True)
-            self._extract_archive(tmp, self.root)
-            local["browser_etag"] = etag
+            # Nothing installed is touched until a complete new tree is unpacked
+            # beside it (see _install_engine). The old tree still goes whole — a
+            # leftover `<old>.manifest` or stale lib pinned the detected version
+            # and re-downloaded for ever — but a download, an archive or an
+            # unpack that fails must never be what removes it (#122).
+            try:
+                local["browser_etag"] = self._install_engine(remote.get(self._spec.browser.key), force, lock)
+                swapped = True
+            except Exception as e:
+                # With nothing installed, or a reinstall asked for, there is nothing to stay on.
+                if force or not self.installed:
+                    raise
+                # The engine on disk works: stay on it, as for an update this SDK is too old for.
+                self._stay_on_installed(local)
+                warnings.warn(
+                    f"[shardx] the engine update was not installed: {e}. Staying on the installed "
+                    f"engine {self._chromium_version}; the update is tried again on the next run.",
+                    RuntimeWarning,
+                    stacklevel=3,
+                )
+        if swapped:
             if manifest.get("engine_build"):
                 local["installed_engine_build"] = manifest["engine_build"]
-        # Widevine — only re-pull when browser changed (versions must match).
-        if self._spec.widevine and (need_browser or not local.get("widevine_etag")):
-            local["widevine_etag"] = self._download_and_extract(self._spec.widevine, self.root)
-            self._place_widevine()
+            # Saved at once: the engine on disk is the new one, whatever fails next.
+            # The new tree has no CDM yet, so the old one's etag must not say it has.
+            local["installed_chromium_version"] = self._chromium_version
+            self._record_descriptor(local, manifest)
+            local.pop("widevine_etag", None)
+            self._save_manifest(local)
+        if self._spec.widevine and (swapped or not local.get("widevine_etag")):
+            # The CDM is no reason to fail a run whose engine is in: tried again next time.
+            try:
+                local["widevine_etag"] = self._download_and_extract(self._spec.widevine, self.root)
+                self._place_widevine()
+            except Exception as e:
+                warnings.warn(
+                    f"[shardx] Widevine CDM not installed ({e}); tried again on the next run.",
+                    RuntimeWarning,
+                    stacklevel=3,
+                )
         # Fingerprints — additive seed (etag changed → re-extract, never
         # overwrites user-renamed files).
         fp_remote = remote.get(FINGERPRINTS_ARCHIVE.key)
@@ -384,9 +475,12 @@ class Runtime:
             self._install_fingerprints()
             if fp_remote is not None:
                 local["fingerprints_etag"] = fp_remote
-        # Authoritative: we just extracted exactly this version (old tree wiped
-        # first). Recording the known value beats re-reading it off disk.
+        # Authoritative: the tree was replaced whole with exactly this version.
+        # Recording the known value beats re-reading it off disk. What the
+        # manifest says describes the engine on disk only when that is current.
         local["installed_chromium_version"] = self._chromium_version
+        if not need_browser or swapped:
+            self._record_descriptor(local, manifest)
         self._save_manifest(local)
         # Linux/mac archives produced on Windows lose every Unix exec bit;
         # restore +x on every ELF/Mach-O file under the engine tree (not
@@ -395,6 +489,16 @@ class Runtime:
         if sys.platform != "win32":
             _fix_unix_exec_bits(self.root)
         self._checked_in_process = True
+
+    @staticmethod
+    def _record_descriptor(local: dict, manifest: dict) -> None:
+        """GREASE and TLS of the engine on disk, for runs without the manifest."""
+        for src, dst in (("grease_brand", "installed_grease_brand"),
+                         ("grease_version", "installed_grease_version")):
+            if manifest.get(src):
+                local[dst] = manifest[src]
+        if isinstance(manifest.get("tls"), dict):
+            local["installed_tls"] = manifest["tls"]
 
     def _fetch_manifest(self) -> dict:
         """Fetch the version manifest (GitHub raw) — one request that yields
@@ -416,8 +520,10 @@ class Runtime:
         self._extract_archive(tmp, dest)
         return etag
 
-    def _download(self, arch: Archive, dest: Path) -> tuple[Path, str]:
-        """Fetch `arch` beside `dest` without touching what is installed."""
+    def _download(self, arch: Archive, dest: Path, unpacks: bool = False) -> tuple[Path, str]:
+        """Fetch `arch` beside `dest` without touching what is installed.
+        `unpacks`: refused before a byte is written when the disk cannot also
+        hold it unpacked beside what is installed."""
         url = f"{PUB_BASE}/{arch.key}"
         tmp = dest / f".{arch.key}.tmp"
         tmp.parent.mkdir(parents=True, exist_ok=True)
@@ -426,13 +532,23 @@ class Runtime:
             r.raise_for_status()
             etag = r.headers.get("etag", "").strip('"')
             total = int(r.headers.get("content-length", 0))
+            if unpacks and total > 0:
+                _assert_room(dest, total * (1 + UNPACK_GUESS) + SPACE_MARGIN)
             received = 0
-            with tmp.open("wb") as f:
-                for chunk in r.iter_bytes(chunk_size=1 << 16):
-                    f.write(chunk)
-                    received += len(chunk)
-                    if self._progress:
-                        self._progress(arch.label, received, total)
+            try:
+                with tmp.open("wb") as f:
+                    for chunk in r.iter_bytes(chunk_size=1 << 16):
+                        f.write(chunk)
+                        received += len(chunk)
+                        if self._progress:
+                            self._progress(arch.label, received, total)
+            except BaseException:
+                tmp.unlink(missing_ok=True)
+                raise
+        # A connection cut mid-body can still end as a 200 and a short file.
+        if total > 0 and received < total:
+            tmp.unlink(missing_ok=True)
+            raise RuntimeError(f"download {arch.key}: got {received} of {total} bytes")
         return tmp, etag
 
     def _extract_archive(self, tmp: Path, dest: Path) -> None:
@@ -451,6 +567,97 @@ class Runtime:
             _system_unzip(tmp, dest)
         tmp.unlink(missing_ok=True)
 
+    def _install_engine(self, wanted: Optional[str], force: bool = False,
+                        lock: Optional["_InstallLock"] = None) -> str:
+        """Brings the engine to the archive the manifest offers (`wanted`: its
+        etag, when known). A checked tree an earlier run staged is used as it
+        is; else the archive is downloaded and staged. Returns the etag."""
+        top = self._spec.binary_subpath[0]
+        staging = self.root / f".{top}.staging"
+        kept = _read_staged(staging, top, self._spec.binary_subpath)
+        if kept and not force and (wanted is None or kept["etag"] == wanted):
+            etag = kept["etag"]
+        else:
+            # An outdated tree goes before the download: its room counts.
+            _clear(staging)
+            tmp, etag = self._download(self._spec.browser, self.root, unpacks=True)
+            self._stage_engine(tmp, etag)
+        self._swap_staged(lock)
+        return etag
+
+    def _stage_engine(self, tmp: Path, etag: str) -> None:
+        """Unpacks the engine archive at `tmp` into the staging folder beside
+        the live engine and checks every file the archive lists. Nothing
+        installed is touched: the tree waits there, noted, until `_swap_staged`
+        moves it in. The archive is removed either way."""
+        key = self._spec.browser.key
+        top = self._spec.binary_subpath[0]
+        staging = self.root / f".{top}.staging"
+        entry = "/".join(self._spec.binary_subpath)
+        try:
+            # The table of contents sits at the end of the file: exactly what a
+            # download cut short is missing.
+            try:
+                with zipfile.ZipFile(tmp) as z:
+                    infos = z.infolist()
+            except (zipfile.BadZipFile, OSError) as e:
+                raise RuntimeError(f"download {key}: not a readable zip ({e}) — not touching the installed engine") from e
+            names = [_zip_name(i.filename) for i in infos]
+            if entry not in names:
+                raise RuntimeError(f"download {key}: no {entry} inside — not touching the installed engine")
+            # A dirty staging dir would mix an old engine into the new one.
+            _clear(staging)
+            _assert_room(self.root, sum(i.file_size for i in infos) + SPACE_MARGIN)
+            try:
+                self._extract_archive(tmp, staging)
+                gone = next((n for n in names if n.startswith(f"{top}/") and not n.endswith("/")
+                             and not os.path.lexists(staging / n)), None)
+                if gone:
+                    raise RuntimeError(f"download {key}: unpacked without {gone} — an antivirus may have removed it")
+                if sys.platform != "win32":
+                    _fix_unix_exec_bits(staging / top)
+                (staging / STAGED_NOTE).write_text(
+                    json.dumps({"etag": etag, "files": _count_files(staging / top)}), encoding="utf-8")
+            except BaseException:
+                shutil.rmtree(staging, ignore_errors=True)
+                raise
+            # Whatever else the archive carries (`__MACOSX` and such) replaces its
+            # namesake in the cache root, as extracting over the root used to do.
+            for p in list(staging.iterdir()):
+                if p.name in (top, STAGED_NOTE):
+                    continue
+                dst = self.root / p.name
+                if dst.is_dir() and not dst.is_symlink():
+                    shutil.rmtree(dst, ignore_errors=True)
+                elif os.path.lexists(dst):
+                    dst.unlink()
+                os.replace(p, dst)
+        finally:
+            tmp.unlink(missing_ok=True)
+
+    def _swap_staged(self, lock: Optional["_InstallLock"] = None) -> None:
+        """Swaps the staged tree in. Refused while processes run from the
+        engine; every refusal keeps the staged tree for the next run."""
+        top = self._spec.binary_subpath[0]
+        staging = self.root / f".{top}.staging"
+        target = self.root / top
+        if _read_staged(staging, top, self._spec.binary_subpath) is None:
+            shutil.rmtree(staging, ignore_errors=True)
+            raise RuntimeError(
+                "the unpacked engine update is no longer complete (an antivirus may have removed a "
+                "file); it is downloaded again on the next run"
+            )
+        if lock is not None and not lock.held():
+            raise RuntimeError("another process took the engine install over")
+        busy = _processes_under(target)
+        if busy > 0:
+            raise RuntimeError(
+                f"{busy} process{' is' if busy == 1 else 'es are'} still running from {target}; the "
+                "update is kept and goes in once the browsers started from it are closed"
+            )
+        _swap_engine_tree(self.root, top, staging / top)
+        shutil.rmtree(staging, ignore_errors=True)
+
     def _place_widevine(self) -> None:
         if not self._spec.widevine:
             return
@@ -460,7 +667,14 @@ class Runtime:
         src = self.root / wrapper_name / "WidevineCdm"
         if not src.exists():
             return
-        dst = self.root.joinpath(*self._spec.widevine_subpath)
+        # On macOS the CDM sits inside the framework's versioned folder. That
+        # is the version of the engine on disk, not the one this SDK was
+        # published with: the constant put it in a folder the engine never
+        # reads.
+        on_disk = self._installed_engine_version() or CHROMIUM_VERSION
+        dst = self.root.joinpath(*(
+            on_disk if seg == CHROMIUM_VERSION else seg for seg in self._spec.widevine_subpath
+        ))
         if dst.exists():
             shutil.rmtree(dst)
         dst.parent.mkdir(parents=True, exist_ok=True)
@@ -497,6 +711,393 @@ class Runtime:
             if p.suffix == ".json":
                 shutil.copy(p, self.fingerprints_dir / p.name)
         shutil.rmtree(staging, ignore_errors=True)
+
+
+# ---- engine swap (#122) ----
+# Shared with the Node and Rust SDKs, which use the same cache dir: in
+# `<cache>`, `.install.lock`, `.<top>.staging/` (+ `staged.json`),
+# `.<top>.previous` and the journal `.<top>.swapping` mean the same in all three.
+
+# Room kept free beyond what the unpacked engine takes.
+SPACE_MARGIN = 256 << 20
+# Unpacked bytes per archive byte, guessed before the archive is in.
+UNPACK_GUESS = 3
+# A lock this old is taken whoever holds it (a pid the OS gave to another).
+LOCK_MAX_AGE_MS = 6 * 60 * 60 * 1000
+STAGED_NOTE = "staged.json"
+# How often a rename Windows refuses for a moment (an antivirus) is tried.
+RENAME_TRIES = 6
+
+
+def _rmtree(path: Path) -> None:
+    shutil.rmtree(path)
+
+
+def _unlink_quiet(path: Path) -> None:
+    try:
+        path.unlink()
+    except OSError:
+        pass
+
+
+def _clear(d: Path) -> None:
+    """`d` gone, or an error: a staging dir we cannot clear stops the install
+    while the engine still works."""
+    shutil.rmtree(d, ignore_errors=True)
+    if os.path.lexists(d):
+        raise RuntimeError(f"could not clear {d}; close what uses it and try again")
+
+
+def _zip_name(n: str) -> str:
+    # Zips produced on Windows store backslashes; compare on one spelling.
+    n = n.replace("\\", "/")
+    return n[2:] if n.startswith("./") else n
+
+
+def _transient(e: OSError) -> bool:
+    """A file held for now: busy, or Windows' access denied (5) / sharing violation (32)."""
+    if e.errno == errno.EBUSY:
+        return True
+    return sys.platform == "win32" and (
+        getattr(e, "winerror", None) in (5, 32) or e.errno in (errno.EACCES, errno.EPERM))
+
+
+def _retry(f, tries: int) -> None:
+    """`f` again while a file is held for now; any other error at once."""
+    pause = 0.1
+    for i in range(1, max(tries, 1) + 1):
+        try:
+            f()
+            return
+        except OSError as e:
+            if i >= tries or not _transient(e):
+                raise
+        time.sleep(pause)
+        pause = min(pause * 2, 2.0)
+
+
+def _count_files(d: Path) -> int:
+    """Files and links under `d`, links not followed."""
+    try:
+        entries = list(os.scandir(d))
+    except OSError:
+        return 0
+    n = 0
+    for e in entries:
+        try:
+            n += _count_files(Path(e.path)) if e.is_dir(follow_symlinks=False) else 1
+        except OSError:
+            pass
+    return n
+
+
+def _engine_paths(root: Path, top: str):
+    return root / top, root / f".{top}.previous", root / f".{top}.swapping"
+
+
+def _write_journal(path: Path, files: int) -> None:
+    """On disk before the rename it announces, whole or not at all."""
+    tmp = path.with_name(path.name + ".tmp")
+    with open(tmp, "w", encoding="utf-8") as f:
+        f.write(json.dumps({"files": files}))
+        f.flush()
+        os.fsync(f.fileno())
+    os.replace(tmp, path)
+
+
+def _read_journal(path: Path) -> Optional[int]:
+    try:
+        v = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    files = v.get("files") if isinstance(v, dict) else None
+    return files if isinstance(files, int) and not isinstance(files, bool) else None
+
+
+def _recover_engine(root: Path, top: str, rename=os.rename, rmtree=_rmtree, tries: int = RENAME_TRIES) -> bool:
+    """Puts `<root>/.<top>.previous` back when a run died between the two
+    renames of an update (or could not undo the first) — only as its journal
+    left it, and only whole. Any other copy is a leftover and goes: one a
+    cleanup left half removed never stands in for a missing engine. True when
+    the engine was put back."""
+    target, previous, journal = _engine_paths(root, top)
+    if os.path.lexists(previous):
+        moved = _read_journal(journal)
+        if not os.path.lexists(target) and moved is not None and _count_files(previous) == moved:
+            try:
+                _retry(lambda: rename(previous, target), tries)
+            except OSError:
+                return False  # still held: kept, with its journal, for the next try
+            _unlink_quiet(journal)
+            return True
+        try:
+            rmtree(previous)
+        except OSError:
+            pass  # the next install() tries again
+    if not os.path.lexists(previous):
+        _unlink_quiet(journal)
+    return False
+
+
+def _swap_engine_tree(root: Path, top: str, staged: Path, rename=os.rename, rmtree=_rmtree,
+                      tries: int = RENAME_TRIES) -> None:
+    """Swaps the complete tree at `staged` in for `<root>/<top>`: live →
+    previous, staged → live, the first undone if the second fails. Any failure
+    leaves the engine that was there (or `.previous` with its journal, put back
+    by the next install())."""
+    target, previous, journal = _engine_paths(root, top)
+    _recover_engine(root, top, rename, rmtree, tries)
+    if os.path.lexists(previous):
+        if os.path.lexists(target):
+            raise RuntimeError(f"a copy of an earlier engine at {previous} could not be removed; delete it and try again")
+        raise RuntimeError(
+            f"the previous engine at {previous} could not be put back yet; close the browsers "
+            "started from it and try again"
+        )
+    had_live = os.path.lexists(target)
+    if had_live:
+        _write_journal(journal, _count_files(target))
+        try:
+            _retry(lambda: rename(target, previous), tries)
+        except OSError as e:
+            _unlink_quiet(journal)
+            raise RuntimeError(
+                f"the engine at {target} is in use and was not replaced ({e}); "
+                "close the browsers started from it and try again"
+            ) from e
+    try:
+        _retry(lambda: rename(staged, target), tries)
+    except OSError as e:
+        if had_live:
+            try:
+                _retry(lambda: rename(previous, target), tries)
+            except OSError:
+                # The journal stays: it is what puts the engine back.
+                raise RuntimeError(
+                    f"replacing the engine failed ({e}) and the previous one could not be put "
+                    f"back yet; it is kept at {previous} and restored by the next install()"
+                ) from e
+            _unlink_quiet(journal)
+        raise
+    _unlink_quiet(journal)
+    try:
+        rmtree(previous)
+    except OSError:
+        pass  # a tree Windows still holds is clutter: the next install() removes it
+
+
+def _read_staged(staging: Path, top: str, binary_subpath) -> Optional[dict]:
+    """A tree an earlier run unpacked, checked and noted, still whole."""
+    try:
+        v = json.loads((staging / STAGED_NOTE).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    if not isinstance(v, dict) or not isinstance(v.get("etag"), str) \
+            or not isinstance(v.get("files"), int) or isinstance(v.get("files"), bool):
+        return None
+    if not staging.joinpath(*binary_subpath).exists() or _count_files(staging / top) != v["files"]:
+        return None
+    return v
+
+
+def _sweep_leftovers(root: Path, top: str, key: str, binary_subpath) -> None:
+    """What an install that died left: an unfinished staging folder, a partial
+    download. A checked staged tree stays for the next swap."""
+    staging = root / f".{top}.staging"
+    if os.path.lexists(staging) and _read_staged(staging, top, binary_subpath) is None:
+        shutil.rmtree(staging, ignore_errors=True)
+    _unlink_quiet(root / f".{key}.tmp")
+
+
+def _free_bytes(d: Path) -> Optional[int]:
+    """Bytes the current user may still write on the disk holding `d`."""
+    try:
+        return shutil.disk_usage(d).free
+    except OSError:
+        return None
+
+
+def _assert_room(d: Path, need: int) -> None:
+    free = _free_bytes(d)
+    if free is not None and free < need:
+        mb = lambda n: -(-n // (1 << 20))  # noqa: E731
+        raise RuntimeError(
+            f"not enough free disk space for the engine update: it needs about {mb(need)} MB and "
+            f"{mb(free)} MB is free in {d}; the engine you have was not touched"
+        )
+
+
+def _processes_under(d: Path) -> int:
+    """How many processes run from `d`. On macOS and Linux a swap would pull
+    the files from under them; Windows refuses the rename itself."""
+    if not os.path.isdir(d):
+        return 0
+    roots = {os.path.abspath(d).rstrip(os.sep) + os.sep, os.path.realpath(d).rstrip(os.sep) + os.sep}
+    if sys.platform.startswith("linux"):
+        n = 0
+        for pid in os.listdir("/proc"):
+            if not pid.isdigit():
+                continue
+            try:
+                exe = os.readlink(f"/proc/{pid}/exe")
+            except OSError:
+                continue  # gone, or not ours
+            # A replaced binary reads "<path> (deleted)": still that folder.
+            if exe.endswith(" (deleted)"):
+                exe = exe[: -len(" (deleted)")]
+            if any(exe.startswith(r) for r in roots):
+                n += 1
+        return n
+    if sys.platform == "darwin":
+        try:
+            out = subprocess.run(["ps", "-axwwo", "comm="], stdin=subprocess.DEVNULL,
+                                 stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, check=False).stdout
+        except OSError:
+            return 0
+        lines = out.decode("utf-8", errors="replace").splitlines()
+        return sum(1 for line in lines if any(line.strip().startswith(r) for r in roots))
+    return 0
+
+
+def _host() -> str:
+    return socket.gethostname().lower()
+
+
+def _pid_alive(pid) -> bool:
+    if not isinstance(pid, int) or isinstance(pid, bool) or pid <= 0:
+        return False
+    if sys.platform == "win32":
+        # os.kill(pid, 0) would end the process here: ask for its exit code instead.
+        import ctypes
+        from ctypes import wintypes
+        k = ctypes.WinDLL("kernel32", use_last_error=True)
+        k.OpenProcess.restype = wintypes.HANDLE
+        k.OpenProcess.argtypes = (wintypes.DWORD, wintypes.BOOL, wintypes.DWORD)
+        k.GetExitCodeProcess.argtypes = (wintypes.HANDLE, ctypes.POINTER(wintypes.DWORD))
+        k.CloseHandle.argtypes = (wintypes.HANDLE,)
+        h = k.OpenProcess(0x1000, False, pid)  # PROCESS_QUERY_LIMITED_INFORMATION
+        if not h:
+            return ctypes.get_last_error() == 5  # access denied: it is there
+        try:
+            code = wintypes.DWORD()
+            return not k.GetExitCodeProcess(h, ctypes.byref(code)) or code.value == 259  # STILL_ACTIVE
+        finally:
+            k.CloseHandle(h)
+    try:
+        os.kill(pid, 0)
+        return True
+    except PermissionError:
+        return True
+    except OSError:
+        return False
+
+
+class _InstallLock:
+    """One install at a time over a cache dir, across processes and the three
+    SDKs (same file, same rules). A holder that died is taken over."""
+
+    def __init__(self, path: Path, token: str):
+        self.path = path
+        self.token = token
+
+    @classmethod
+    def acquire(cls, root: Path, poll: float = 0.5) -> "_InstallLock":
+        path = root / ".install.lock"
+        token = secrets.token_hex(8)
+        told = False
+        while True:
+            if _create_lock(path, token):
+                return cls(path, token)
+            seen = _read_lock(path)
+            if seen is None:
+                continue  # released meanwhile
+            if _lock_is_stale(path, seen):
+                _steal_lock(path, seen, token)
+                continue
+            if not told and seen.get("pid") != os.getpid():
+                warnings.warn(
+                    f"[shardx] waiting for another process (pid {seen.get('pid', '?')}) to finish "
+                    f"installing the engine… (if none is running, delete {path})",
+                    RuntimeWarning,
+                    stacklevel=3,
+                )
+                told = True
+            time.sleep(poll + random.random() * 0.1)
+
+    def held(self) -> bool:
+        """Still ours: nobody took it over as stale."""
+        seen = _read_lock(self.path)
+        return seen is not None and seen.get("token") == self.token
+
+    def release(self) -> None:
+        if self.held():
+            _unlink_quiet(self.path)
+
+
+def _create_lock(path: Path, token: str) -> bool:
+    try:
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o644)
+    except FileExistsError:
+        return False
+    except PermissionError:
+        if sys.platform == "win32":
+            return False  # one being removed this instant
+        raise
+    try:
+        body = {"pid": os.getpid(), "host": _host(), "token": token, "at": int(time.time() * 1000)}
+        os.write(fd, json.dumps(body).encode("utf-8"))
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+    return True
+
+
+def _read_lock(path: Path) -> Optional[dict]:
+    """None when there is no lock; {} when it cannot be read as one."""
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError:
+        return None
+    try:
+        v = json.loads(text)
+    except ValueError:
+        return {}
+    return v if isinstance(v, dict) else {}
+
+
+def _lock_is_stale(path: Path, seen: dict) -> bool:
+    try:
+        mtime = path.stat().st_mtime * 1000
+    except OSError:
+        return False
+    now = time.time() * 1000
+    # Unreadable: being written this instant, or by a process that died doing so.
+    if not isinstance(seen.get("token"), str):
+        return now - mtime > 10_000
+    at = seen.get("at")
+    if now - (at if isinstance(at, (int, float)) and not isinstance(at, bool) else mtime) > LOCK_MAX_AGE_MS:
+        return True
+    # Another computer's process cannot be asked about.
+    if seen.get("host") != _host():
+        return False
+    return not _pid_alive(seen.get("pid"))
+
+
+def _steal_lock(path: Path, seen: dict, token: str) -> None:
+    """Moves the stale lock aside and drops it, unless what moved was a fresh
+    one another process took in the meantime: that one is put back."""
+    aside = path.with_name(f"{path.name}.stale-{token}")
+    try:
+        os.rename(path, aside)
+    except OSError:
+        return
+    got = _read_lock(aside)
+    if got is not None and got.get("token") != seen.get("token"):
+        try:
+            os.link(aside, path)
+        except OSError:
+            pass  # a third one has it
+    _unlink_quiet(aside)
 
 
 _NATIVE_MAGIC = (
@@ -538,6 +1139,8 @@ def _system_unzip(archive: Path, dest: Path) -> None:
         proc = subprocess.run(
             ["unzip", "-q", "-o", str(archive), "-d", str(dest)],
             check=False,
+            # On a full disk unzip asks "Continue? (y/n)" on stdin; nobody answers.
+            stdin=subprocess.DEVNULL,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.PIPE,
         )

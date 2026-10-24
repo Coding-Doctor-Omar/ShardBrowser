@@ -60,15 +60,18 @@ export function PsApiKeyForm({ autoFocus }: { autoFocus?: boolean }) {
 }
 
 /// The page while no key works: this card is all there is (craft target).
+/// A wide card sets the form beside its words, so the key field stays a key's length.
 export function PsKeySetup() {
   const t = useT();
   return (
-    <Card data-ps-key-setup padding="sm" className="flex flex-col gap-3">
-      <div className="flex flex-col gap-1">
-        <h2 className="m-0 text-section-title text-text-strong-950">{t("psKey.setupTitle")}</h2>
-        <p className="m-0 text-help text-text-sub-600">{t("psKey.setupHelp")}</p>
+    <Card data-ps-key-setup padding="sm" className="@container/setup">
+      <div className="flex flex-col gap-3 @min-[1100px]/setup:grid @min-[1100px]/setup:grid-cols-[minmax(0,1fr)_minmax(0,640px)] @min-[1100px]/setup:items-start @min-[1100px]/setup:gap-8">
+        <div className="flex flex-col gap-1">
+          <h2 className="m-0 text-section-title text-text-strong-950">{t("psKey.setupTitle")}</h2>
+          <p className="m-0 max-w-[72ch] text-help text-text-sub-600">{t("psKey.setupHelp")}</p>
+        </div>
+        <PsApiKeyForm />
       </div>
-      <PsApiKeyForm />
     </Card>
   );
 }

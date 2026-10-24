@@ -27,11 +27,13 @@ const PILL_OF_TONE: Record<ProfileStatusTone, { color: BadgeColor; lead: "dot" |
   running: { color: "success", lead: "dot" },
   starting: { color: "information", lead: "spinner" },
   stopping: { color: "information", lead: "spinner" },
+  saving: { color: "information", lead: "spinner" },
   failed: { color: "error", lead: null },
   idle: { color: "gray", lead: "dot" },
   never: { color: "gray", lead: "dot" },
   warning: { color: "warning", lead: null },
   cancelled: { color: "gray", lead: "dot" },
+  elsewhere: { color: "information", lead: "dot" },
 };
 
 /** A profile's state: Running, Starting, Stopping, Cancelled, Failed to start,

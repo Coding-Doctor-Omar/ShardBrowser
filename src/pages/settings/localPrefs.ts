@@ -1,7 +1,7 @@
 import type { Theme } from "@proxyshard/shardx-ui-kit";
 import { savedLang, useLang, type Lang } from "../../shared/i18n";
 import { analyticsEnabled, setAnalyticsEnabled } from "../../shared/lib/analytics";
-import { savedInterfaceSize, useInterfaceSize, type InterfaceSize } from "../../shared/model/interfaceSize";
+import { savedInterfaceSize, useInterfaceSize, type InterfaceSizeChoice } from "../../shared/model/interfaceSize";
 import { useDirectStart } from "../../shared/model/directStart";
 import { useKeyPrefs } from "../../shared/model/keyPrefs";
 import { savedMotion, useMotion } from "../../shared/model/motion";
@@ -15,7 +15,7 @@ import { currentTheme, previewThemeFromSettings, setThemeFromCommand } from "../
 export type LocalPrefs = {
   lang: Lang;
   theme: Theme;
-  size: InterfaceSize;
+  size: InterfaceSizeChoice;
   reduceMotion: boolean;
   singleKeys: boolean;
   analytics: boolean;

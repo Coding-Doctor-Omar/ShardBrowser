@@ -255,7 +255,8 @@ export function Overview({ enabled, waiting, row, peekSpace }: {
         </div>
       </Fold>
       <Fold id={needsId} open={hasNeeds && !folds.needs} hold={!ready} instant={instant}>
-        <div ref={needsBody} className="grid pt-1 pb-2 gap-2.5" style={{ gridTemplateColumns: `repeat(${cols}, minmax(0, 1fr))` }}>
+        {/* Fewer cards than columns share the row: no empty band beside them. */}
+        <div ref={needsBody} className="grid pt-1 pb-2 gap-2.5" style={{ gridTemplateColumns: `repeat(${Math.max(1, Math.min(cols, cards.length))}, minmax(0, 1fr))` }}>
           {cards.map((m, i) => <ProblemCard key={m.kind} model={m} fresh={ready && moving} slot={i} onLeave={onLeave} />)}
         </div>
       </Fold>

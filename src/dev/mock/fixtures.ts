@@ -4,10 +4,14 @@
 // Shapes mirror what the Rust side returns. Profiles are stored the way
 // profile.rs writes them (a FingerprintConfig with a `_meta` block), because
 // the editor reads them back through `fromStored`.
+import type { MockTeamServer } from "./teamServer";
+import type { MockSync } from "./syncServer";
+import type { SpaceData } from "./spaces";
+import type { ProfileSync } from "../../entities/sync/model/types";
 import type { ProfileMeta } from "../../entities/profile/model/types";
 import type { ProxyEntry, ProxyTestSnapshot } from "../../entities/proxy/model/types";
 import type { FingerprintEntry } from "../../entities/fingerprint/model/types";
-import type { ExtensionEntry } from "../../entities/extension/model/types";
+import type { ExtensionEntry, ExtensionUpdate } from "../../entities/extension/model/types";
 import type { Bookmark } from "../../entities/bookmark/model/types";
 import type { TrashEntry } from "../../entities/trash/model/types";
 import type { Settings, ApiInfo } from "../../entities/settings/model/types";
@@ -43,6 +47,8 @@ export type StoredProfile = {
   notes: string;
   timezone: string;
   icu_locale: string | null;
+  /// Browser menus in the profile's language (#81); absent = this computer's.
+  ui_language?: "profile";
   webrtc: string;
   navigator: Record<string, unknown>;
   client_hints?: Record<string, unknown>;
@@ -53,6 +59,9 @@ export type StoredProfile = {
   blocked_ports: number[];
 };
 
+export type MockTags = { tags: { id: string; name: string; color: string }[]; by_profile: Record<string, string[]> };
+export type MockFolders = { registry: string[]; meta: Record<string, { color: string | null; icon: string }> };
+
 export type MockState = {
   version: number;
   profiles: Record<string, StoredProfile>;
@@ -62,6 +71,8 @@ export type MockState = {
   snapshots: Record<string, ProxyTestSnapshot[]>;
   fingerprints: FingerprintEntry[];
   extensions: ExtensionEntry[];
+  /** Web Store update records by entry id (extUpdates.ts); made on first read. */
+  extUpdates?: Record<string, ExtensionUpdate>;
   bookmarks: Bookmark[];
   trash: TrashEntry[];
   /** The profiles behind the Trash entries moved there in this session, so a
@@ -75,12 +86,32 @@ export type MockState = {
   api: ApiInfo;
   psKey: string;
   psOrders: PsOrder[];
+  /** As tags.rs keeps them; absent until the first write or import. */
+  tags?: MockTags;
+  /** As folders.rs keeps them; absent until the first write or import. */
+  folders?: MockFolders;
+  /** The space the launcher works in and the teams joined (team.rs). */
+  space?: { kind: "personal" } | { kind: "team"; team_id: string };
+  /** `needs_invite`: the admin replaced the token (live.rs token_replaced); a new join clears it. */
+  teams?: { id: string; name: string; server: string; admin: boolean; revoked?: boolean; needs_invite?: boolean }[];
+  /** Each joined team's server: its members, rules, folders and profiles (teamServer.ts). */
+  teamServers?: Record<string, MockTeamServer>;
+  /** Whose lists the fields above hold: "personal" (or absent) or a team id (spaces.ts). */
+  dataOf?: string;
+  /** The lists of the spaces not in use, by "personal" or team id. */
+  spaceData?: Record<string, SpaceData>;
+  /** Personal sync and what its servers keep (syncServer.ts). */
+  sync?: MockSync;
   /** The wallet in cents once a purchase has charged it; absent: PS_ME's. */
   psBalance?: number;
   automation: Project[];
   modules: ModuleInfo[];
   /** profile id -> pid + wall-clock start. */
   running: Record<string, { pid: number; started: number }>;
+  /** Team profiles closed here whose session is still being sent (open.rs resends it): listed, a start refused. */
+  saving?: Record<string, true>;
+  /** Team profiles whose session is kept here unsent (Outcome::Unsent): the next start sends it first. */
+  unsent?: Record<string, true>;
   /** The folder Delete all data moved the old data into (app_reset_backup). */
   backup?: string;
   /** A Delete all data that did not finish, as app_reset_pending answers. */
@@ -240,8 +271,12 @@ function stored(s: ProfileSeed, fps: FingerprintEntry[]): StoredProfile {
   };
 }
 
+/** A profile's sync as the list reads it; syncServer.ts fills it in. */
+export const syncLink: { of: (id: string) => ProfileSync | undefined } = { of: () => undefined };
+
 /** ProfileMeta the list shows, derived from the stored file. */
 export function metaOf(p: StoredProfile): ProfileMeta {
+  const sync = syncLink.of(p._meta.id);
   const ua = String((p.navigator as { user_agent?: string } | undefined)?.user_agent ?? "");
   return {
     id: p._meta.id,
@@ -258,6 +293,7 @@ export function metaOf(p: StoredProfile): ProfileMeta {
     color: p._meta.color ?? null,
     extensions: p._meta.extensions,
     mobile: /android/i.test(ua),
+    ...(sync ? { sync } : {}),
   };
 }
 
@@ -312,8 +348,8 @@ function snapshot(p: ProxyEntry, minutesAgo: number, ok = true): ProxyTestSnapsh
 // ---- Library ----------------------------------------------------------------
 
 const EXTENSIONS: ExtensionEntry[] = [
-  { id: "ublock", name: "uBlock Origin Lite", version: "2025.1.14.1103", description: "An efficient content blocker. Easy on CPU and memory.", icon: "", path: "/Users/you/Library/Application Support/ShardX/extensions/ublock", size_bytes: 3_412_990, added_at: `@${unix(30)}` },
-  { id: "cookie-editor", name: "Cookie-Editor", version: "1.13.0", description: "Simple yet powerful Cookie Editor. Create, edit and delete cookies without leaving your tab.", icon: "", path: "/Users/you/Library/Application Support/ShardX/extensions/cookie-editor", size_bytes: 612_400, added_at: `@${unix(14)}` },
+  { id: "ublock", name: "uBlock Origin Lite", version: "2025.1.14.1103", description: "An efficient content blocker. Easy on CPU and memory.", icon: "", path: "/Users/you/Library/Application Support/ShardX/extensions/ublock", size_bytes: 3_412_990, added_at: `@${unix(30)}`, source: { kind: "webstore", id: "ddkjiahejlhfcafbddmgiahcphecmpfh" } },
+  { id: "cookie-editor", name: "Cookie-Editor", version: "1.13.0", description: "Simple yet powerful Cookie Editor. Create, edit and delete cookies without leaving your tab.", icon: "", path: "/Users/you/Library/Application Support/ShardX/extensions/cookie-editor", size_bytes: 612_400, added_at: `@${unix(14)}`, source: { kind: "webstore", id: "hlkenndednhfkekhgcdicdfddnkalmdm" } },
   { id: "metamask", name: "MetaMask", version: "12.9.3", description: "An Ethereum Wallet in your Browser.", icon: "", path: "/Users/you/Library/Application Support/ShardX/extensions/metamask", size_bytes: 41_320_112, added_at: `@${unix(6)}` },
 ];
 
@@ -624,6 +660,7 @@ export function seed(): MockState {
       camera_enabled: true,
       minimize_to_tray: false,
       extra_args: "",
+      ext_update_check: true,
       api_enabled: true,
       api_port: 40325,
       api_secret: "mock-signing-key-0000000000000000",

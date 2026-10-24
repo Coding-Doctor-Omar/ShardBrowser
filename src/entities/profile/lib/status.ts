@@ -65,7 +65,7 @@ export function formatExactRun(atMs: number, lang: Lang): string {
   return dateTimeFormat(intlLocale(lang), { dateStyle: "long", timeStyle: "short" }).format(atMs);
 }
 
-export type ProfileStatusTone = "running" | "starting" | "stopping" | "failed" | "idle" | "never" | "warning" | "cancelled";
+export type ProfileStatusTone = "running" | "starting" | "stopping" | "saving" | "failed" | "idle" | "never" | "warning" | "cancelled" | "elsewhere";
 
 /// Owner feedback 5i: the one mapping from a Profile's status to its dot's
 /// color, so the Status column, Peek's header, a pinned sidebar item and the
@@ -85,11 +85,13 @@ const DOT_OF_TONE: Record<ProfileStatusTone, StatusDotTone> = {
   running: "success",
   starting: "info",
   stopping: "info",
+  saving: "info",
   failed: "error",
   idle: "neutral",
   never: "outline",
   warning: "warning",
   cancelled: "neutral",
+  elsewhere: "info",
 };
 
 export type ProfileStatus = {
@@ -112,7 +114,7 @@ export type ProfileStatus = {
 /// proxy warning, then its last run. A later state (Task 8, "Proxy missing") is one more
 /// branch here, not a new column.
 export function profileStatus(
-  profile: Pick<ProfileMeta, "last_launched_at">,
+  profile: Pick<ProfileMeta, "last_launched_at" | "sync"> & Partial<Pick<ProfileMeta, "open_on">>,
   opts: {
     starting: boolean;
     /** `running[id]` from the store: the session's start time (ms epoch),
@@ -148,9 +150,12 @@ export function profileStatus(
      *  wins, so a new start never reads Cancelled. Required, like `stopping`:
      *  every surface that names a state passes it. */
     cancelled: boolean;
+    /** Its browser has closed and its session is still being sent to the team
+     *  (`useSaving`): it cannot start again until that ends. */
+    saving: boolean;
   },
 ): ProfileStatus {
-  const { starting, runningSince, now, lang, proxyMissing, stopping, failedAt, cancelled } = opts;
+  const { starting, runningSince, now, lang, proxyMissing, stopping, failedAt, cancelled, saving } = opts;
   const t = (key: string, vars?: Record<string, string | number>) => translate(lang, key, vars);
   const of = (tone: ProfileStatusTone, label: string, detail?: string): ProfileStatus =>
     ({ tone, label, dot: DOT_OF_TONE[tone], ...(detail !== undefined ? { detail } : {}) });
@@ -161,6 +166,24 @@ export function profileStatus(
     const label = t("status.running");
     if (!Number.isFinite(runningSince)) return of("running", label);
     return of("running", label, t("profileRow.runningFor", { t: fmtDuration(now - runningSince, lang) }));
+  }
+  // A synced one goes to the sync server, not to a team.
+  if (saving) return of("saving", t("status.saving"), profile.sync?.on ? t("profileRow.savingSyncDetail") : t("profileRow.savingDetail"));
+  // Synced and open on another device: it cannot start here until it closes there.
+  const lease = profile.sync?.on ? profile.sync.open_on : undefined;
+  if (lease) {
+    const seen = profile.sync?.seen_at;
+    const detail = seen === undefined ? t("profileRow.openOnDetail", { device: lease })
+      : t("profileRow.openOnSeen", { device: lease, when: formatRelativeRun(seen * 1000, now, lang) });
+    return of("elsewhere", t("status.openOn", { device: lease }), detail);
+  }
+  // A team profile another device has open: it starts here once it is closed there.
+  const held = profile.open_on && !profile.open_on.this_device ? profile.open_on : undefined;
+  if (held) {
+    const device = held.device_name || t("rights.anotherDevice");
+    const who = held.member_name ? t("rights.openOnBy", { device, member: held.member_name }) : t("rights.openOn", { device });
+    const detail = held.since > 0 ? t("profileRow.teamOpenSince", { who, when: formatRelativeRun(held.since * 1000, now, lang) }) : t("profileRow.teamOpenDetail", { who });
+    return of("elsewhere", t("status.openOn", { device }), detail);
   }
   const at = stampMs(profile.last_launched_at);
   if (failedAt !== undefined && (at === null || failedAt > at)) return of("failed", t("status.failedToStart"));

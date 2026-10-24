@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState, type CSSProperties } from "react";
-import { Button, Card, SegmentControl, cn } from "@proxyshard/shardx-ui-kit";
+import { Button, Card, SegmentControl, Tooltip, cn } from "@proxyshard/shardx-ui-kit";
+import { teamRefusal, useRightsChange } from "../../entities/space";
 import { AddIcon } from "../../shared/icons";
 import {
   specFor,
@@ -47,6 +48,9 @@ import { exportProject, reviewBeforeRun, startProjectRun } from "../../features/
 
 export function ProjectEditor() {
   const t = useT();
+  // A team's project without Edit opens to read: nothing in it changes (useAutomation `viewOnly`).
+  useRightsChange();
+  const noEdit = teamRefusal("edit");
   const project = useAutomation((s) => s.current());
   const open = useAutomation((s) => s.open);
   const patch = useAutomation((s) => s.patch);
@@ -540,14 +544,18 @@ export function ProjectEditor() {
                   ? t("projectEditor.stepCountOne")
                   : t("projectEditor.stepCountMany", { n: project.blocks.length })}
               </span>
-              <Button
-                variant="neutral" mode="ghost" size="2xsmall"
-                className="ml-auto"
-                leftIcon={<AddIcon className="size-3.5" />}
-                onClick={() => { setPickAt(null); setPicking(true); }}
-              >
-                {t("projectEditor.addStep")}
-              </Button>
+              <Tooltip content={noEdit ?? undefined}>
+                <Button
+                  variant="neutral" mode="ghost" size="2xsmall"
+                  className="ml-auto"
+                  leftIcon={<AddIcon className="size-3.5" />}
+                  disabled={!!noEdit}
+                  aria-description={noEdit ?? undefined}
+                  onClick={() => { if (noEdit) return; setPickAt(null); setPicking(true); }}
+                >
+                  {t("projectEditor.addStep")}
+                </Button>
+              </Tooltip>
             </div>
             <div className="min-h-0 flex-1">
               {/* Held back for the one layout pass of a project with no positions, so the first fit sees the laid-out steps. */}
@@ -572,7 +580,7 @@ export function ProjectEditor() {
                 onMoveEnd={() => { void commitMove(project.id); }}
                 onSetStart={(id) => setRunOpts({ start: id })}
                 onDelete={removeBlock}
-                onAddAt={(x, y) => { setPickAt({ x, y }); setPicking(true); }}
+                onAddAt={(x, y) => { if (noEdit) return; setPickAt({ x, y }); setPicking(true); }}
               />}
             </div>
           </Card>
@@ -593,6 +601,7 @@ export function ProjectEditor() {
             {/* Never sideways: every field fits 320 px. The side padding is
                 the room focus rings need inside the scroller. */}
             <div data-editor-panel className="scrollbar-on-scroll min-h-0 flex-1 overflow-y-auto overflow-x-hidden overscroll-contain px-3.5 pb-3.5 pt-1" {...sideScroll}>
+            <fieldset disabled={!!noEdit} className="m-0 flex min-h-full min-w-0 flex-col border-0 p-0">
             {/* Both stay mounted; only the inactive one hides, so a rule's
                 open form or a step's draft survives a switch. */}
             <div hidden={rightTab !== "traffic"} className="flex min-h-full flex-col">
@@ -631,6 +640,7 @@ export function ProjectEditor() {
                 }}
               />
             </div>
+            </fieldset>
             </div>
           </Card>
 

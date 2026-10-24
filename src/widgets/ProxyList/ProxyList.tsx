@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef } from "react";
-import { Button, Checkbox, cn, EmptyState, useContextMenu, useInputModality, useVirtualList } from "@proxyshard/shardx-ui-kit";
+import { Button, Checkbox, cn, EmptyState, Tooltip, useContextMenu, useInputModality, useVirtualList } from "@proxyshard/shardx-ui-kit";
+import { teamRefusal, useOnRightsMoved, useRightsChange } from "../../entities/space";
 import { buyProxies } from "../../features/manage-proxies";
 import { AddIcon, FilterIcon, NavProxiesIcon, SearchIcon } from "../../shared/icons";
 import { ListStateCenter, LoadError, LoadingRows } from "../../shared/ui/ListStates";
@@ -33,6 +34,8 @@ const HEADER_HEIGHT = LIST_HEADER_HEIGHT;
 /// which the header's count waits for too.
 export function ProxyList({ loading }: { loading: boolean }) {
   const t = useT();
+  useRightsChange();
+  const addWhy = teamRefusal("create");
   const visible = useFilteredProxies();
   const counts = useProfileCountByProxy();
   const search = useProxy((s) => s.search);
@@ -44,6 +47,7 @@ export function ProxyList({ loading }: { loading: boolean }) {
   const activeId = useProxy((s) => s.activeId);
   const peekId = useProxy((s) => s.peekId);
   const ctx = useContextMenu();
+  useOnRightsMoved(ctx.close);
 
   const scrollRef = useRef<HTMLDivElement>(null);
   const wrapRef = useRef<HTMLDivElement>(null);
@@ -228,7 +232,16 @@ export function ProxyList({ loading }: { loading: boolean }) {
                     <Button variant="neutral" mode="link" size="xsmall" onClick={buyProxies}>{t("proxyTable.emptyBuy")}</Button>
                   </>
                 )}
-                action={{ label: t("proxyTable.emptyAction"), icon: <AddIcon />, onClick: () => useProxy.getState().setBulkOpen(true) }}
+                // A team's new proxies need Create on it: the button says why, as the header's does.
+                {...(addWhy ? {
+                  actions: (
+                    <Tooltip content={addWhy}>
+                      <Button variant="primary" mode="filled" size="xsmall" data-empty-action leftIcon={<AddIcon />} disabled aria-description={addWhy}>
+                        {t("proxyTable.emptyAction")}
+                      </Button>
+                    </Tooltip>
+                  ),
+                } : { action: { label: t("proxyTable.emptyAction"), icon: <AddIcon />, onClick: () => useProxy.getState().setBulkOpen(true) } })}
               />
             )}
           </ListStateCenter>

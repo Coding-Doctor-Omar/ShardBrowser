@@ -1,6 +1,6 @@
 import { memo, useMemo, useRef, useState } from "react";
 import { cardClass, cn, IconButton, Tooltip } from "@proxyshard/shardx-ui-kit";
-import { profileStatus, proxyMissing, useProfile, useProfileUi, type ProfileMeta } from "../../entities/profile";
+import { profileStatus, proxyMissing, useProfile, useProfileUi, useSaving, type ProfileMeta } from "../../entities/profile";
 import { useLang, useT } from "../../shared/i18n";
 import { fmtDurationShort } from "../../shared/lib/format";
 import { stampMs } from "../../shared/lib/utils";
@@ -56,7 +56,8 @@ const Tile = memo(function Tile({ profile: p, now }: { profile: ProfileMeta; now
   const stopping = useProfile((s) => s.pending[p.id]?.kind === "stop");
   const failedAt = useProfile((s) => s.startFailed[p.id]);
   const proxies = useProfile((s) => s.proxies);
-  const status = profileStatus(p, { starting, cancelled, stopping, runningSince, failedAt, now, lang, proxyMissing: proxyMissing(p, proxies) });
+  const saving = useSaving((s) => s.ids.has(p.id));
+  const status = profileStatus(p, { starting, cancelled, stopping, runningSince, failedAt, saving, now, lang, proxyMissing: proxyMissing(p, proxies) });
   const running = runningSince !== undefined;
   const words = status.tone === "running" && Number.isFinite(runningSince)
     ? t("overview.runningFor", { duration: runLength(now - runningSince!) })

@@ -13,6 +13,7 @@ import { allQuery, allViews, sameQuery, useViews, viewOwnFilters, viewQuery, typ
 import { tagsOf, useTags } from "../../tag";
 import { useMinuteClock } from "../../../shared/lib/useNow";
 import { computeVisible, needsRunning, NO_RUNNING, readsClock, type Visible } from "./visible";
+import { useActionsTail } from "./actionsWidth";
 
 /// Folder tabs derived from profile assignments + the persisted registry of
 /// empty folders. Sorted; "all" is rendered separately as the first tab.
@@ -256,9 +257,12 @@ export function useProfileLayout(): TableLayout<ProfileColumnId> {
   // Tags holds 96 to 190 px before any tag exists (CRAFT-14): chosen, but left
   // out until the first tag is made.
   const noTags = useTags((s) => s.tags.length === 0);
+  // The row actions as wide as their words need in this language.
+  const tail = useActionsTail((s) => s.tail);
   return useMemo(
     () => layoutColumns(PROFILE_COLUMNS, columns, widths, {
       ...PROFILE_TABLE,
+      tail,
       leadTrack: SELECT_TRACK,
       available,
       auto,
@@ -273,7 +277,7 @@ export function useProfileLayout(): TableLayout<ProfileColumnId> {
           ? rowActionsCoverPx(PROFILE_FLOATING_ACTIONS) - PROFILE_TABLE.gap
           : 0,
     }),
-    [columns, widths, auto, full, floor, available, inFolder, noTags],
+    [columns, widths, auto, full, floor, available, inFolder, noTags, tail],
   );
 }
 

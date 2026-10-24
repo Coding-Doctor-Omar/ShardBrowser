@@ -29,6 +29,18 @@ export function ConfirmHost() {
           {b.label}
         </Button>
       ))}
-    />
+    >
+      {/* What the question is about, one per line (the profiles a Quit closes). */}
+      {shown.items?.length ? (
+        <ul data-confirm-items className="list-tile m-0 flex max-h-[240px] list-none flex-col overflow-auto">
+          {shown.items.map((it, i) => (
+            <li key={i} className="row-line relative flex min-w-0 flex-col gap-0.5 px-cell py-2">
+              <span className="truncate text-secondary font-medium text-text-strong-950">{it.label}</span>
+              {it.note && <span className="text-secondary text-text-sub-600">{it.note}</span>}
+            </li>
+          ))}
+        </ul>
+      ) : null}
+    </Modal>
   );
 }

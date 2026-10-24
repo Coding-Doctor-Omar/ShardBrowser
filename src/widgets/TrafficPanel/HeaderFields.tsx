@@ -74,7 +74,8 @@ export function HeaderChips({ value, onChange }: { value?: string[]; onChange: (
   const list = value ?? [];
   const [text, setText] = useState("");
   const commit = () => {
-    const names = text.split(",").map((s) => s.trim()).filter((s) => s && !list.includes(s));
+    // A pasted list may name one header twice: once is enough.
+    const names = [...new Set(text.split(",").map((s) => s.trim()))].filter((s) => s && !list.includes(s));
     if (names.length > 0) onChange([...list, ...names]);
     setText("");
   };

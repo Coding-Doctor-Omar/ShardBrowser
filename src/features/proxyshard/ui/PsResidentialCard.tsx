@@ -174,9 +174,10 @@ export function PsResidentialTile() {
           aria-valuemin={0}
           aria-valuemax={100}
           data-ps-bar
-          className="absolute inset-x-0 bottom-0 h-[4px] bg-bg-sunken"
+          className="absolute inset-x-0 bottom-0 h-[4px] bg-bg-sunken forced-colors:border-t forced-colors:border-[CanvasText]"
         >
-          <div className={cn("h-full", pct > 90 ? "bg-error-base" : pct > 70 ? "bg-warning-base" : "bg-primary-base")} style={{ width: `${pct}%` }} />
+          {/* Forced colors paint both Canvas: the fill keeps the system's Highlight. */}
+          <div className={cn("h-full forced-colors:forced-color-adjust-none forced-colors:bg-[Highlight]", pct > 90 ? "bg-error-base" : pct > 70 ? "bg-warning-base" : "bg-primary-base")} style={{ width: `${pct}%` }} />
         </div>
       )}
 

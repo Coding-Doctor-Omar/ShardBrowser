@@ -8,6 +8,7 @@ import { setPageFilter } from "../../shared/lib/pageFilter";
 import { ariaOf, command } from "../../features/commands";
 import { HAS_CAPTIONS } from "../WindowControls";
 import { usePageScrolled } from "./pageScroll";
+import { useCompactActions } from "./compact";
 import { PageHelpButton, type PageHelp } from "./PageHelp";
 import { useScrollMemory } from "../../shared/model/scrollMemory";
 import { useKeyPrefs } from "../../shared/model/keyPrefs";
@@ -18,11 +19,9 @@ type Filter = { value: string; onChange: (v: string) => void; placeholder?: stri
 export type HeaderCount = number | { shown: number; total: number };
 export type { PageHelp };
 
-/** A one-column page's width cap, px (`width="form"`, LAYOUT-04). */
-const FORM_WIDTH = 760;
-/** The wider cap, px (`width="wide"`): a dashboard page of cards (ProxyShard). */
-const WIDE_WIDTH = 1120;
-const CAPPED = { form: FORM_WIDTH, wide: WIDE_WIDTH } as const;
+/** A one-column page's width cap (`width="form"`, LAYOUT-04): 760 px, more in a wide window (app.css). */
+const FORM_WIDTH = "var(--page-form-width)";
+const CAPPED = { form: FORM_WIDTH } as const;
 
 /// The top bar of every page: title, count, an info button, the page's view
 /// controls, a filter field and one action cluster. On Windows and Linux it
@@ -53,7 +52,7 @@ export function PageHeader({ title, lead, count, help, after, filter, actions, w
   /** A filter field; "/" focuses it from anywhere outside a field or dialog. */
   filter?: Filter;
   actions?: ReactNode;
-  width?: "full" | "form" | "wide";
+  width?: "full" | "form";
   /** The tour's key for the title (`data-tour`), for a step that points at
    *  the page when nothing smaller is there (Settings without its Save bar). */
   titleTour?: string;
@@ -61,6 +60,10 @@ export function PageHeader({ title, lead, count, help, after, filter, actions, w
   const t = useT();
   const filterRef = useRef<HTMLInputElement>(null);
   const searchBtnRef = useRef<HTMLButtonElement>(null);
+  const headerRef = useRef<HTMLElement>(null);
+  const actionsRef = useRef<HTMLDivElement>(null);
+  // Too narrow for the actions' words: they give way to their icons before the title does.
+  useCompactActions(headerRef, actionsRef);
   const hasFilter = filter !== undefined;
   const scrolled = usePageScrolled((s) => s.scrolled);
   // Folded at rest, at every width; open once asked for, and while it holds
@@ -137,6 +140,7 @@ export function PageHeader({ title, lead, count, help, after, filter, actions, w
     // so change the literal with the constant.
     // F6 moves between this, the sidebar, the content and Peek (A11Y-14).
     <header
+      ref={headerRef}
       data-region="header"
       data-scrolled={scrolled || undefined}
       className={cn(
@@ -145,16 +149,16 @@ export function PageHeader({ title, lead, count, help, after, filter, actions, w
       )}
       // The column's right edge: what the window has past the body's gutter
       // and its capped column, or the usual end room when that is less.
-      style={width !== "full" ? { paddingInlineEnd: `max(${HAS_CAPTIONS ? "150px" : "var(--spacing-gutter)"}, calc(100% - ${CAPPED[width]}px - var(--spacing-gutter)))` } : undefined}
+      style={width !== "full" ? { paddingInlineEnd: `max(${HAS_CAPTIONS ? "150px" : "var(--spacing-gutter)"}, calc(100% - ${CAPPED[width]} - var(--spacing-gutter)))` } : undefined}
       onMouseDown={titleBarOnMouseDown}
     >
-      {/* Up to 40% of the header, and the last thing to give way: the
-          filter's shrink weight is a thousand times its, so the filter
-          shrinks to its least first (and the View's buttons are icons in a
-          narrow header); only then does a long title truncate, never the
-          header overflow. (A weight under 1 on the title alone, as before,
-          lets it take only that share of what is left: the header ran over.) */}
-      {lead ?? <div data-title-block className="flex min-w-0 max-w-[40%] shrink items-baseline gap-2">
+      {/* Up to 40% of the header, and the last thing to give way: it does
+          not shrink, so the filter (shrink weight 1000) and `after` give way
+          first, and only its cap cuts a long title. Narrower still,
+          compact.ts takes the actions' words away and lifts the cap (60%,
+          then none); only at its last level does the title shrink, so the
+          header never runs over (data-compact). */}
+      {lead ?? <div data-title-block className="flex min-w-0 max-w-[40%] shrink-0 items-baseline gap-2 in-data-[compact=1]:max-w-[60%] in-data-[compact=2]:max-w-none in-data-[compact=3]:max-w-none in-data-[compact=3]:shrink">
         {/* Where the keyboard lands on a page opened from the keys, and
             after what held it left (A11Y-04): focusable from code only. Its
             ring is the outline every stop draws, on keyboard focus only: a
@@ -208,7 +212,7 @@ export function PageHeader({ title, lead, count, help, after, filter, actions, w
             </span>
           </div>
         )}
-        <div className="flex shrink-0 items-center gap-2">{actions}</div>
+        <div ref={actionsRef} data-header-actions className="flex shrink-0 items-center gap-2">{actions}</div>
       </div>
     </header>
   );
@@ -216,7 +220,7 @@ export function PageHeader({ title, lead, count, help, after, filter, actions, w
 
 /// The page's content under the header. It scrolls, unless `scroll` is false
 /// for a page whose content scrolls itself (the lists). `width="form"` caps a
-/// one-column page at 760 px, left-aligned at the gutter (LAYOUT-04); its
+/// one-column page (760 px, wider in a wide window), left-aligned at the gutter (LAYOUT-04); its
 /// PageHeader takes the same `width`.
 /// `scrollKey` keeps its place across page switches (WIG-06), per key.
 /// Its content starts on the sidebar's line (owner, 2026-10-01): the top of
@@ -229,7 +233,7 @@ export function PageBody({ children, className, scroll = true, width = "full", s
   children: ReactNode;
   className?: string;
   scroll?: boolean;
-  width?: "full" | "form" | "wide";
+  width?: "full" | "form";
   /** The place this body's scroll is kept under (a page, or a page's tab). */
   scrollKey?: string;
 }) {

@@ -1,6 +1,6 @@
 import { SegmentControl, Switch, type Theme } from "@proxyshard/shardx-ui-kit";
 import { useT } from "../../../shared/i18n";
-import { INTERFACE_SIZES } from "../../../shared/model/interfaceSize";
+import { INTERFACE_SIZES, useInterfaceSize, type InterfaceSizeChoice } from "../../../shared/model/interfaceSize";
 import { SelectField } from "../../../shared/ui/SelectField";
 import { SettingRow, SettingsGroup, type SettingsProps } from "../SettingRow";
 
@@ -8,6 +8,7 @@ import { SettingRow, SettingsGroup, type SettingsProps } from "../SettingRow";
 // settings.json: it is stored on Save, and Don't save puts the old one back.
 export function AppearanceSection({ p, setP }: SettingsProps) {
   const t = useT();
+  const auto = useInterfaceSize((s) => s.auto);
   return (
     <SettingsGroup>
       <SettingRow
@@ -34,16 +35,16 @@ export function AppearanceSection({ p, setP }: SettingsProps) {
         title={t("settings.interfaceSizeTitle")}
         help={t("settings.interfaceSizeHelp")}
         control={({ labelId, helpId }) => (
-          <div className="w-[160px]">
+          <div className="w-[200px]">
             <SelectField
               aria-labelledby={labelId}
               aria-describedby={helpId}
               value={p.size}
               onChange={(v) => setP("size", v)}
-              options={INTERFACE_SIZES.map((n) => ({
-                value: n,
-                label: n === 100 ? t("settings.interfaceSizeDefault", { n }) : t("settings.interfaceSizePercent", { n }),
-              }))}
+              options={[
+                { value: "auto" as InterfaceSizeChoice, label: t("settings.interfaceSizeAuto", { n: auto }) },
+                ...INTERFACE_SIZES.map((n) => ({ value: n as InterfaceSizeChoice, label: t("settings.interfaceSizePercent", { n }) })),
+              ]}
             />
           </div>
         )}

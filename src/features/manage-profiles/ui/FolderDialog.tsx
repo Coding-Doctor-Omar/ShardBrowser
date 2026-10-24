@@ -8,6 +8,7 @@ import { useDialogLife } from "../../../shared/lib/useDialogLife";
 import { ColorRadios } from "../../../shared/ui/ColorRadios";
 import { useT } from "../../../shared/i18n";
 import { toast } from "../../../shared/model/toast";
+import { adminRefusal, useInTeam } from "../../../entities/space";
 import {
   DEFAULT_FOLDER_META, leaveList, useFolderMeta, useFolders, useProfile, useProfileUi,
   type FolderIcon,
@@ -46,6 +47,7 @@ function FolderDialogBody({ target, open }: { target: FolderTarget; open: boolea
   const rememberFolder = useProfile((s) => s.rememberFolder);
   const renameFolder = useProfile((s) => s.renameFolder);
   const setMeta = useFolderMeta((s) => s.setMeta);
+  const team = useInTeam();
   const original = target.mode === "edit" ? target.name : "";
   // `original` may be a Folder named like an inherited property ("constructor",
   // "toString"): only an own key on `byName` is a real, previously-set look
@@ -68,6 +70,9 @@ function FolderDialogBody({ target, open }: { target: FolderTarget; open: boolea
 
   const submit = async () => {
     if (!trimmed || taken) return;
+    // A team's folders are its admin's: nothing is shown made that the team refuses.
+    const adminOnly = adminRefusal();
+    if (adminOnly) { toast.fail({ title: t("folderMeta.saveFailed"), detail: adminOnly }); return; }
     setBusy(true);
     if (target.mode === "create") {
       rememberFolder(trimmed);
@@ -123,7 +128,8 @@ function FolderDialogBody({ target, open }: { target: FolderTarget; open: boolea
           <ColorRadios label={t("folderDialog.color")} value={color} onChange={setColor} allowNone />
         </div>
 
-        <div className="flex flex-col gap-1.5">
+        {/* A team folder's look is its colour alone (space/mod.rs set_meta). */}
+        {!team && <div className="flex flex-col gap-1.5">
           <Label as="span">{t("folderDialog.icon")}</Label>
           <div
             role="radiogroup"
@@ -155,7 +161,7 @@ function FolderDialogBody({ target, open }: { target: FolderTarget; open: boolea
               );
             })}
           </div>
-        </div>
+        </div>}
       </div>
     </DialogModal>
   );

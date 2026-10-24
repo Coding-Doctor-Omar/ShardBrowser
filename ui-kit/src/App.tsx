@@ -69,7 +69,7 @@ export default function App() {
       <div className="mx-auto flex max-w-5xl flex-col gap-6">
         <header className="flex flex-col gap-4 rounded-surface border border-stroke-soft-200 bg-bg-white-0 p-6 sm:flex-row sm:items-center sm:justify-between">
           <div className="flex flex-col gap-1">
-            <h1 className="text-page-title text-text-strong-950">Shardx UI Kit</h1>
+            <h1 className="text-page-title text-text-strong-950">ShardBrowser UI Kit</h1>
             <p className="text-body text-text-sub-600">
               React + Tailwind CSS v4, built from the Proxy Shard Figma, light &amp; dark aware
             </p>
@@ -233,7 +233,7 @@ export default function App() {
           </div>
         </Section>
         <footer className="pb-6 text-center text-secondary text-text-soft-400">
-          Shardx UI Kit — {badgeColors.length} badge colors, Inter type scale, light &amp; dark.
+          ShardBrowser UI Kit — {badgeColors.length} badge colors, Inter type scale, light &amp; dark.
         </footer>
       </div>
 

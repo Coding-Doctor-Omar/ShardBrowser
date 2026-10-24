@@ -77,11 +77,17 @@ export function useGpuCompatReady() {
   }, [load]);
 }
 
-/** Loads this machine's GPU verdicts, waiting for a load already in flight. */
-export async function verdictsLoaded(): Promise<void> {
-  await useGpuCompat.getState().load();
-  if (!useGpuCompat.getState().loading) return;
-  await new Promise<void>((resolve) => {
-    const stop = useGpuCompat.subscribe((s) => { if (!s.loading) { stop(); resolve(); } });
+/** How long anything waits for the verdicts: the check starts the engine and can
+ *  hang (no display, no GPU), so past this the caller goes on without them. */
+export const VERDICT_WAIT_MS = 1000;
+
+/** Loads this machine's GPU verdicts, waiting at most `limitMs`; true when they are in. */
+export function verdictsLoaded(limitMs = VERDICT_WAIT_MS): Promise<boolean> {
+  void useGpuCompat.getState().load();
+  if (useGpuCompat.getState().loaded) return Promise.resolve(true);
+  return new Promise<boolean>((resolve) => {
+    const done = (inTime: boolean) => { clearTimeout(timer); stop(); resolve(inTime); };
+    const timer = setTimeout(() => done(false), limitMs);
+    const stop = useGpuCompat.subscribe((s) => { if (s.loaded) done(true); });
   });
 }

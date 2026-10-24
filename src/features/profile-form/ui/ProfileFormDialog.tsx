@@ -6,11 +6,12 @@ import { commitFocusedField } from "../../../shared/lib/commitField";
 import { useUnsaved } from "../../../shared/model/unsaved";
 import { LoadError, LoadingRows } from "../../../shared/ui/ListStates";
 import { useT } from "../../../shared/i18n";
-import { useProfile } from "../../../entities/profile";
+import { settingsRefusal, useProfile } from "../../../entities/profile";
+import { useRightsChange } from "../../../entities/space";
 import { walkTheForm } from "../../tour/lib/profileTour";
 import {
-  PROFILE_FORM_TABS, canSave, changedTabs, closeProfileForm, isDirty, openProfileForm, problemsOf, reloadProfileForm,
-  saveProfileForm, setProfileFormTab, useProfileForm, type ProfileFormTab,
+  PROFILE_FORM_TABS, canSave, changedTabs, closeProfileForm, isDirty, openProfileForm, problemsOf, readOnlyWhy, reloadProfileForm,
+  rightsProblem, saveProfileForm, setProfileFormTab, useProfileForm, type ProfileFormTab,
 } from "../model/useProfileForm";
 import { BasicsTab } from "./BasicsTab";
 import { ProxyTab } from "./ProxyTab";
@@ -45,8 +46,13 @@ export function ProfileFormDialog() {
   const problems = problemsOf(draft);
   const saving = status === "saving";
   // The list's name until the form has loaded, so the title never reads "Edit ".
-  const listed = useProfile((st) => st.profiles.find((p) => p.id === s.id)?.name);
-  const name = s.saved?.form.name ?? listed ?? "";
+  const listed = useProfile((st) => st.profiles.find((p) => p.id === s.id));
+  const name = s.saved?.form.name ?? listed?.name ?? "";
+  // A team's profile without Edit opens to read: every field shows, nothing changes.
+  useRightsChange();
+  const readOnly = listed ? readOnlyWhy(s) : null;
+  const refused = readOnly ? null : rightsProblem(s);
+  const hidden = mode === "edit" && listed ? settingsRefusal(listed) : null;
 
   // Every exit the dialog cannot see (a page change, quitting) asks first.
   useUnsaved(open && dirty ? {
@@ -102,8 +108,10 @@ export function ProfileFormDialog() {
       <span className="text-error-text">{error}</span>
       {s.errorDetail && <span data-error-detail>{s.errorDetail}</span>}
     </span>
-  ) : saving || !draft ? null
+  ) : readOnly && draft ? <span data-read-only>{t("profileForm.readOnly", { why: readOnly })}</span>
+    : saving || !draft ? null
     : problems.name ? t("profileForm.nameRequired")
+    : refused ? <span data-rights-problem>{refused}</span>
     : s.badFields.length > 0 ? t("profileForm.numberInvalid")
     : mode === "edit" && !dirty ? t("profileForm.noChanges")
     : null;
@@ -112,14 +120,16 @@ export function ProfileFormDialog() {
     <DialogModal
       open={open}
       onOpenChange={(o) => { if (!o) closeProfileForm(); }}
-      title={mode === "create" ? t("profileForm.newTitle") : t("profileForm.editTitle", { name })}
+      title={mode === "create" ? t("profileForm.newTitle") : readOnly ? t("profileForm.viewTitle", { name }) : t("profileForm.editTitle", { name })}
       size="lg"
       // At most 85% of the window; the body scrolls, the footer stays.
       className="max-h-[calc(var(--viewport-h)*0.85)]!"
       dirty={dirty}
       initialFocusRef={nameRef}
-      onConfirm={() => { commitFocusedField(); void saveProfileForm(); }}
-      confirmLabel={saving ? t("profileForm.saving") : mode === "create" ? t("profileForm.create") : t("profileForm.save")}
+      {...(readOnly ? { cancelLabel: t("profileForm.close") } : {
+        onConfirm: () => { commitFocusedField(); void saveProfileForm(); },
+        confirmLabel: saving ? t("profileForm.saving") : mode === "create" ? t("profileForm.create") : t("profileForm.save"),
+      })}
       isLoading={saving}
       isDisabled={!canSave(s)}
       footerNote={note}
@@ -154,9 +164,11 @@ export function ProfileFormDialog() {
               </Button>
             )}
           </div>
-          <fieldset disabled={saving} className="m-0 min-w-0 border-0 p-0">
+          <fieldset disabled={saving || !!readOnly} data-read-only={readOnly ? "" : undefined} className="m-0 min-w-0 border-0 p-0">
             <TabPanel tabsId="profile-form" value={tab} className="py-4">
-              {tab === "basics" ? <BasicsTab draft={draft} nameRef={nameRef} />
+              {/* A team row's settings the server did not send: only its row's own fields are known. */}
+              {tab !== "basics" && hidden ? <p data-settings-hidden className="m-0 text-secondary text-text-sub-600">{hidden}</p>
+                : tab === "basics" ? <BasicsTab draft={draft} nameRef={nameRef} />
                 : tab === "proxy" ? <ProxyTab draft={draft} />
                 : tab === "fingerprint" ? <FingerprintTab key={session} draft={draft} />
                 : <ExtensionsTab draft={draft} />}

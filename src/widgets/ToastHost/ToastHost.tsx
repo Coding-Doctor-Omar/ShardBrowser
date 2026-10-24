@@ -117,7 +117,7 @@ const sameSpot = (a: Spot, b: Spot) =>
 
 /** Keeps `place` current: a bulk bar showing or going, Peek opening or
  *  closing (the list column's visible part changes), the page, the window or
- *  the stack resizing, a dialog, menu or popover opening, closing or growing. */
+ *  the stack resizing, a dialog, menu or popover opening, closing, growing or moving. */
 function useAnchor(stack: React.RefObject<HTMLElement | null>, key: string) {
   const profileBar = useProfileUi((s) => s.selected.size > 0);
   const proxyBar = useProxy((s) => s.proxySel.size > 0);
@@ -132,11 +132,19 @@ function useAnchor(stack: React.RefObject<HTMLElement | null>, key: string) {
       const next = place(stack.current);
       setAt((was) => (sameSpot(was, next) ? was : next));
       const open = [openDialog(), ...openSurfaces()].filter((el): el is HTMLElement => el !== null);
+      const same = open.length === watched.length && open.every((el) => watched.includes(el));
       for (const el of watched) if (!open.includes(el)) sizes.unobserve(el);
       for (const el of open) if (!watched.includes(el)) sizes.observe(el);
+      if (!same) {
+        moves.disconnect();
+        for (const el of open) moves.observe(el, { attributes: true, attributeFilter: ["style"] });
+      }
       watched = open;
     };
     const sizes = new ResizeObserver(measure);
+    // A popover that shrinks is placed again after its resize is seen (its
+    // left and top): without this the stack judged it where it no longer was.
+    const moves = new MutationObserver(measure);
     const main = document.querySelector("main");
     if (main) sizes.observe(main);
     if (stack.current) sizes.observe(stack.current);
@@ -152,7 +160,7 @@ function useAnchor(stack: React.RefObject<HTMLElement | null>, key: string) {
     if (column) mounts.observe(column, { childList: true });
     window.addEventListener("resize", measure);
     measure();
-    return () => { window.removeEventListener("resize", measure); sizes.disconnect(); mounts.disconnect(); };
+    return () => { window.removeEventListener("resize", measure); sizes.disconnect(); mounts.disconnect(); moves.disconnect(); };
   }, [stack, profileBar, proxyBar, profilePeek, proxyPeek, section, key]);
   return at;
 }

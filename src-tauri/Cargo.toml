@@ -1,6 +1,6 @@
 [package]
 name = "shardbrowser-launcher"
-version = "2.1.0"
+version = "2.1.1"
 description = "ShardBrowser Launcher: profiles, proxies, fingerprints and automation for the ShardBrowser engine."
 authors = ["ProxyShard"]
 edition = "2021"
@@ -23,6 +23,11 @@ automation = ["dep:wasmtime", "dep:wreq", "dep:wreq-util", "dep:postgres", "dep:
 [dev-dependencies]
 # `oneshot` on the router, so the API can be exercised without binding a port.
 tower = { version = "0.5", features = ["util"] }
+# A real team server in-process, for the team client's tests.
+shardbrowser-team-server = { path = "../team-server" }
+# Team keys made per test, as the team server makes them.
+ed25519-dalek = { version = "2", features = ["pkcs8", "rand_core"] }
+rand = "0.8"
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
@@ -48,6 +53,8 @@ tauri-plugin-clipboard-manager = "2"
 tauri-plugin-single-instance = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+# Team rights, decided the same way the team server decides them.
+team-model = { path = "../crates/team-model" }
 tokio = { version = "1", features = ["process", "rt-multi-thread", "macros", "fs", "net", "io-util", "time", "sync"] }
 anyhow = "1"
 dirs = "5"
@@ -57,6 +64,19 @@ iana-time-zone = "0.1"
 uuid = { version = "1", features = ["v4", "serde"] }
 url = "2"
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "socks", "json"] }
+# A session upload read from its file as it goes, already in the tree with reqwest.
+http-body = "1"
+# The team link: hyper's pool over connections switched to TLS with the team's key.
+# All already in the tree with reqwest, at these features, on ring.
+team-wire = { path = "../crates/team-wire" }
+hyper = { version = "1", features = ["client", "http1"] }
+hyper-util = { version = "0.1", features = ["client-legacy", "http1", "tokio"] }
+http-body-util = "0.1"
+tower-service = "0.3"
+httparse = "1"
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring"] }
+webpki-roots = "1"
 base64 = "0.22"
 # Local automation HTTP API (axum) + JWT bearer auth.
 axum = "0.7"
@@ -74,6 +94,10 @@ pbkdf2 = "0.12"
 hmac = "0.12"
 sha1 = "0.10"
 sha2 = "0.10"
+# Extension updates: CRX3 signatures as Chrome checks them, and the Web Store's
+# update2 answers. Both already in the tree (rustls, plist).
+ring = "0.17"
+quick-xml = "0.39"
 # Self-bootstrapping runtime: zip extraction of the chrome bundle
 # downloaded from Cloudflare R2 on first launch (src/runtime.rs).
 zip = { version = "2", default-features = false, features = ["deflate"] }
@@ -98,6 +122,15 @@ aes-gcm = "0.10"
 getrandom = "0.2"
 windows-sys = { version = "0.59", features = [
     "Win32_Foundation",            # HLOCAL + LocalFree live here in 0.59
+    "Win32_Security",              # CreateJobObjectW's attributes
     "Win32_Security_Cryptography", # CryptProtectData / CryptUnprotectData
+    "Win32_System_WindowsProgramming", # QueryInterruptTime
+    "Win32_System_Threading",      # the reaper's wait on the launcher; a browser started held
+    "Win32_System_JobObjects",     # a team browser ends with the launcher
+    "Win32_System_Diagnostics_ToolHelp", # its thread, to let it go; who runs from the engine folder
+    "Win32_System_Registry",       # MachineGuid: a device id stays with its computer
+    "Win32_Storage_FileSystem",    # free disk space before an engine update unpacks
+    "Wdk_System_Threading",        # a process's command line: browser or helper
+    "Win32_UI_WindowsAndMessaging", # Stop's WM_CLOSE to a browser's windows, shown or not
 ] }
 

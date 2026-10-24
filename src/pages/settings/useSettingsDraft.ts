@@ -422,7 +422,7 @@ export function useSettingsDraft() {
   // are what their stores show; the others are the draft over the stored one.
   const lang = useLang((st) => st.lang);
   const { previewTheme, theme: chosenTheme } = useTheme();
-  const size = useInterfaceSize((st) => st.size);
+  const size = useInterfaceSize((st) => st.choice);
   const reduceMotion = useMotion((st) => st.reduce);
   const singleKeys = useKeyPrefs((st) => st.singleKeys);
   const askDirect = useDirectStart((st) => st.ask);

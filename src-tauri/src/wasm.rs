@@ -68,6 +68,9 @@ fn engine() -> &'static Engine {
     E.get_or_init(|| {
         let mut config = Config::new();
         config.consume_fuel(true);
+        // On macOS wasmtime's Mach-port thread aborts the process when any signal
+        // lands on it, such as SIGCHLD from a browser exiting; plain signals don't.
+        config.macos_use_mach_ports(false);
         Engine::new(&config).unwrap_or_default()
     })
 }
@@ -553,7 +556,7 @@ pub fn list() -> Result<Vec<ModuleInfo>> {
     for entry in fs::read_dir(&dir)? {
         let Ok(entry) = entry else { continue };
         let path = entry.path();
-        if path.extension().and_then(|e| e.to_str()) != Some("wasm") {
+        if crate::store::is_os_litter(&entry.file_name()) || path.extension().and_then(|e| e.to_str()) != Some("wasm") {
             continue;
         }
         let id = path
@@ -1199,11 +1202,12 @@ mod tests {
         assert!(!out.contains_key("secret"));
     }
 
-    /// The state store, against the real files, in a module id nothing else
-    /// uses. Kept together in one test because they share a process-global cache
-    /// and running them in parallel would have them fight over it.
+    /// The state store, against files under the test's own root, in a module id
+    /// nothing else uses. Kept together in one test because they share a
+    /// process-global cache and running them in parallel would have them fight over it.
     #[test]
     fn what_a_module_remembers_survives_and_is_bounded() {
+        let _root = crate::store::test_root("modstate");
         let id = "modstate-selftest";
         let dir = match data_dir(id) {
             Ok(d) => d,
@@ -1265,9 +1269,49 @@ mod tests {
 
     #[test]
     fn a_grant_dies_with_the_digest_it_was_made_for() {
+        let _root = crate::store::test_root("grant");
         // No file at all: nothing is granted, which is the failing-closed case
         // every path here is built on.
         let g = grant_for("a-module-that-is-not-installed");
         assert!(g.call_modules.is_empty() && g.call_flows.is_empty());
+    }
+
+    /// A child exiting signals the launcher; with the engine up that must not end it.
+    /// Run in a process of its own, since what fails is an abort.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_signal_on_any_thread_does_not_abort_once_the_engine_is_up() {
+        const CHILD: &str = "SHARDX_WASM_SIGNAL_CHILD";
+        const NAME: &str = "wasm::tests::a_signal_on_any_thread_does_not_abort_once_the_engine_is_up";
+        if std::env::var_os(CHILD).is_some() {
+            extern "C" fn nothing(_: libc::c_int) {}
+            // SAFETY: a handler that does nothing, then a signal to each thread of this process.
+            unsafe {
+                libc::signal(libc::SIGUSR2, nothing as *const () as libc::sighandler_t);
+                let _ = engine();
+                std::thread::sleep(std::time::Duration::from_millis(200));
+                let mut list: libc::thread_act_array_t = std::ptr::null_mut();
+                let mut n: libc::mach_msg_type_number_t = 0;
+                #[allow(deprecated)]
+                let task = libc::mach_task_self();
+                assert_eq!(libc::task_threads(task, &mut list, &mut n), 0);
+                for i in 0..n as usize {
+                    let t = libc::pthread_from_mach_thread_np(*list.add(i));
+                    if t != 0 {
+                        libc::pthread_kill(t, libc::SIGUSR2);
+                    }
+                }
+            }
+            std::thread::sleep(std::time::Duration::from_millis(500));
+            return;
+        }
+        let out = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", NAME, "--test-threads=1", "--nocapture"])
+            .env(CHILD, "1")
+            .output()
+            .unwrap();
+        let said = String::from_utf8_lossy(&out.stdout).to_string() + &String::from_utf8_lossy(&out.stderr);
+        assert!(out.status.success(), "the child ended with {:?}:\n{said}", out.status);
+        assert!(said.contains("1 passed"), "the child ran nothing:\n{said}");
     }
 }

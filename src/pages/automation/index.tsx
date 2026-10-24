@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { Badge, Button, Card } from "@proxyshard/shardx-ui-kit";
+import { Badge, Button, Card, Tooltip } from "@proxyshard/shardx-ui-kit";
 import { PageBody, PageHeader } from "../../widgets/PageHeader";
 import { AddIcon, UploadIcon } from "../../shared/icons";
 import { FileTooBig, MB } from "../../shared/lib/pickFile";
@@ -8,6 +8,7 @@ import { useHeldLoading } from "../../shared/hooks/useHeldLoading";
 import { useNow } from "../../shared/lib/useNow";
 import { useDialogLife } from "../../shared/lib/useDialogLife";
 import { automationImport, automationRunStop, useAutomation, useRunningOn, type Bundle, type Project } from "../../entities/automation";
+import { teamRefusal, useRightsChange } from "../../entities/space";
 import { toast } from "../../shared/model/toast";
 import { ProjectEditor } from "./ProjectEditor";
 import { ProjectsList } from "./ProjectsList";
@@ -36,6 +37,9 @@ export function AutomationPage() {
   const reload = useAutomation((s) => s.reload);
   const { running, last, refresh: refreshFleet } = useRunningOn();
   const now = useNow();
+  // A team's projects: making one needs Create in the team.
+  useRightsChange();
+  const noCreate = teamRefusal("create");
 
   const [review, setReview] = useState<{ bundle: Bundle; lines: ReviewLine[] } | null>(null);
   const [runReview, setRunReview] = useState<{ project: Project; lines: ReviewLine[] } | null>(null);
@@ -74,6 +78,8 @@ export function AutomationPage() {
   if (openId) return <ProjectEditor />;
 
   const importBundle = async (bundle: Bundle, reviewed: boolean) => {
+    const refused = teamRefusal("create");
+    if (refused) { toast.fail({ title: t("automation.importFailed"), detail: refused }); return; }
     try {
       const p = await automationImport(bundle);
       // Its first Run shows the review again.
@@ -103,7 +109,7 @@ export function AutomationPage() {
   // A double click on New project makes one project: the second press waits
   // for the first to open its editor.
   const newProject = () => {
-    if (creating.current) return;
+    if (creating.current || noCreate) return;
     creating.current = true;
     void create(t("automation.emptyAction")).finally(() => { creating.current = false; });
   };
@@ -133,12 +139,18 @@ export function AutomationPage() {
           } catch (err) { toast.fail({ title: t("automation.importFailed"), detail: err }); }
         }}
       />
-      <Button variant="neutral" mode="stroke" size="xsmall" leftIcon={<UploadIcon className="size-3.5" />} onClick={() => importFile.current?.click()}>
-        {t("automation.import")}
-      </Button>
-      <Button variant="primary" mode="filled" size="xsmall" leftIcon={<AddIcon className="size-3.5" />} data-tour="new-project" onClick={newProject}>
-        {t("automation.emptyAction")}
-      </Button>
+      {/* A team's projects are made with Create in the team: each button says why it does nothing.
+          Else its words, only while a narrow header shows its icon alone. */}
+      <Tooltip content={noCreate ?? t("automation.import")} whenTruncated={!noCreate}>
+        <Button variant="neutral" mode="stroke" size="xsmall" leftIcon={<UploadIcon className="size-3.5" />} disabled={!!noCreate} aria-description={noCreate ?? undefined} onClick={() => importFile.current?.click()}>
+          {t("automation.import")}
+        </Button>
+      </Tooltip>
+      <Tooltip content={noCreate ?? t("automation.emptyAction")} whenTruncated={!noCreate}>
+        <Button variant="primary" mode="filled" size="xsmall" leftIcon={<AddIcon className="size-3.5" />} data-tour="new-project" disabled={!!noCreate} aria-description={noCreate ?? undefined} onClick={newProject}>
+          {t("automation.emptyAction")}
+        </Button>
+      </Tooltip>
     </>
   );
 

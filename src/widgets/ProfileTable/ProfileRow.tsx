@@ -3,7 +3,7 @@ import { useShallow } from "zustand/react/shallow";
 import { flushSync } from "react-dom";
 import { focusCellButton, focusProfileRow } from "../../shared/lib/focusRow";
 import { Checkbox, clientScale, cn, pageZoom, rectToLayout, swallowFollowUpClick, Tooltip, useLongPress, type ContextMenuApi } from "@proxyshard/shardx-ui-kit";
-import { PinIconApp } from "../../shared/icons";
+import { PinIconApp, SyncConflictIcon, SyncedIcon } from "../../shared/icons";
 import { ProxyFlag } from "../../shared/ui/ProxyFlag";
 import { StatusPill } from "../../shared/ui/StatusPill";
 import { CellEditButton } from "../../shared/ui/CellEditButton";
@@ -14,8 +14,8 @@ import { slideDelayOf } from "../../shared/lib/arrival";
 import { useReducedMotion } from "../../shared/hooks/useReducedMotion";
 import {
   formatExactRun, formatRelativeRun,
-  profileFocusWindow,
-  profileStatus, useFolderLook, useProfile, useProfileUi, PROFILE_EDITABLE, type ProfileColumnId, type ProfileMeta,
+  may, profileFocusWindow,
+  profileStatus, useFolderLook, useProfile, useProfileUi, useSaving, PROFILE_EDITABLE, type ProfileColumnId, type ProfileMeta,
 } from "../../entities/profile";
 import type { ProxyEntry } from "../../entities/proxy";
 import { FolderCellMenu, InlineText, ProfileRowActions, ProxyCellPopover } from "../../features/manage-profiles";
@@ -85,10 +85,13 @@ export const ProfileRow = memo(function ProfileRow({ profile, proxy, top, column
   const [runningSince, isStarting, cancelled, stopping, failedAt, arrivedAt] = useProfile(useShallow((s) => [
     s.running[p.id], s.startBusy.has(p.id), s.cancelled.has(p.id), s.pending[p.id]?.kind === "stop", s.startFailed[p.id], s.arrived[p.id],
   ] as const));
-  // `proxy` is the bound proxy from the list's map: none for a bound id means it was deleted.
-  const missing = !!p.proxy_id && !proxy;
+  // `proxy` is the bound proxy from the list's map: none for a bound id means it was deleted,
+  // or, on a team's row, that this member may not see it (it comes with the session).
+  const hidden = !!p.proxy_id && !proxy && p.origin === "team";
+  const missing = !!p.proxy_id && !proxy && !hidden;
   const proxyNamed = !!proxy?.name && proxy.name !== `${proxy.host}:${proxy.port}`;
-  const status = profileStatus(p, { starting: isStarting, cancelled, stopping, runningSince, failedAt, now, lang, proxyMissing: missing });
+  const saving = useSaving((s) => s.ids.has(p.id));
+  const status = profileStatus(p, { starting: isStarting, cancelled, stopping, runningSince, failedAt, saving, now, lang, proxyMissing: missing });
 
   // Live layer (spec 6.1, 6.2). A start from this window lands (Starting,
   // then Running): the row flashes once and the Running dot's halo swells
@@ -189,9 +192,12 @@ export const ProfileRow = memo(function ProfileRow({ profile, proxy, top, column
     onMenu(e, menuItemsFor("rowMenu", "profiles", subject), { heading });
   };
 
+  // A team profile without Edit is read-only here: no cell edits it.
+  const canEdit = may(p, "edit");
   // Each editable cell's edit button (owner feature 2026-09-26): it opens
   // that field's own editor at the cell. "Add" when the cell is empty.
   const editOf = (id: ProfileColumnId, lead = false): ReactNode => {
+    if (!canEdit) return null;
     const tabIndex = active ? 0 : -1;
     switch (id) {
       case "folder":
@@ -238,6 +244,8 @@ export const ProfileRow = memo(function ProfileRow({ profile, proxy, top, column
   // the cell: the Peek it opens may move the columns before the second.
   const doubleClickEdit = (id: string | undefined): (() => void) | null => {
     if (editing) return null;
+    // Read-only: the name still opens the form, to read; any other cell does nothing more.
+    if (!canEdit && id !== "name") return () => {};
     switch (id) {
       // The name opens the profile form: every field, saved by hand (rename is E).
       case "name": return () => openProfileForm({ mode: "edit", id: p.id });
@@ -316,6 +324,16 @@ export const ProfileRow = memo(function ProfileRow({ profile, proxy, top, column
                     <span data-pin className="inline-flex shrink-0 text-icon-soft-400"><PinIconApp aria-hidden="true" className="size-3.5" /></span>
                   </Tooltip>
                 )}
+                {p.sync?.on && (
+                  // Synced across the person's devices: said by word too, for a screen reader.
+                  // A conflict copy has its own glyph and warns not to run it beside the original.
+                  <Tooltip content={p.sync.conflict ? t("profileRow.syncedConflict") : t("profileRow.synced")} warm={false} delay={700}>
+                    <span data-synced={p.sync.conflict ? "conflict" : "on"} className={cn("inline-flex shrink-0", p.sync.conflict ? "text-warning-base" : "text-icon-soft-400")}>
+                      {p.sync.conflict ? <SyncConflictIcon aria-hidden="true" className="size-3.5" /> : <SyncedIcon aria-hidden="true" className="size-3.5" />}
+                      <span className="sr-only">{p.sync.conflict ? t("profileRow.syncedConflict") : t("profileRow.synced")}</span>
+                    </span>
+                  </Tooltip>
+                )}
               </>
             )}
           </div>
@@ -368,9 +386,11 @@ export const ProfileRow = memo(function ProfileRow({ profile, proxy, top, column
         );
       case "folder":
         return (
-          <div key="folder" ref={folderCell} role="gridcell" data-cell="folder" className="group/cell relative flex min-w-0 items-center gap-1 self-stretch">
-            {p.folder && <span className="flex min-w-0"><FolderChip name={p.folder} color={folderLook.color} wholeOnHover /></span>}
-            {own("folder")}
+          <div key="folder" ref={folderCell} role="gridcell" data-cell="folder" className="group/cell @container relative flex min-w-0 items-center gap-1 self-stretch">
+            <span className="relative flex min-w-0 items-center">
+              {p.folder && <span className="flex min-w-0"><FolderChip name={p.folder} color={folderLook.color} wholeOnHover /></span>}
+              {own("folder")}
+            </span>
           </div>
         );
       case "tags":
@@ -380,61 +400,68 @@ export const ProfileRow = memo(function ProfileRow({ profile, proxy, top, column
             ref={tagsCell}
             role="gridcell"
             data-cell="tags"
-            className="group/cell relative flex min-w-0 items-center gap-1 self-stretch"
+            className="group/cell @container relative flex min-w-0 items-center gap-1 self-stretch"
           >
-            <TagChips profileId={p.id} width={tagsWidth} />
-            {own("tags")}
+            <span className="relative flex min-w-0 items-center">
+              <TagChips profileId={p.id} width={tagsWidth} />
+              {own("tags")}
+            </span>
           </div>
         );
       case "proxy":
         // "Change proxy" moved into the edit button's own name.
         return (
-          <Tooltip key="proxy" content={missing ? t("profileRow.proxyMissingHint") : undefined}>
+          <Tooltip key="proxy" content={missing ? t("profileRow.proxyMissingHint") : hidden ? t("profileRow.proxyHiddenHint") : undefined}>
             <div
               ref={proxyCell}
               role="gridcell"
               data-cell="proxy"
               data-proxy-missing={missing || undefined}
-              className="group/cell relative flex min-w-0 items-center gap-1.5 self-stretch"
+              className="group/cell @container relative flex min-w-0 items-center gap-1.5 self-stretch"
             >
-              {proxy ? (
-                // The proxy's name, as Proxies and Peek show it (CRAFT-13); an
-                // unnamed one (or one named by its address, as a pasted line
-                // is) shows its host, cut before the port, never after
-                // (TYPE-07). The whole address and the type are in the tooltip.
-                <Tooltip
-                  warm={false}
-                  delay={700}
-                  content={
-                    <>
-                      {proxyNamed && <>{proxy.name}<br /></>}
-                      <span className="mono">{proxy.host}:{proxy.port}</span>
-                      <br />
-                      {proxy.kind.toUpperCase()}
-                    </>
-                  }
-                >
-                  <span className="flex min-w-0 items-center gap-1.5">
-                    <ProxyFlag cc={proxy.country} />
-                    {proxyNamed ? (
-                      <span data-proxy-name className="truncate text-secondary text-text-sub-600">{proxy.name}</span>
-                    ) : (
-                      <span data-proxy-address className="flex min-w-0 text-mono text-text-sub-600">
-                        <span className="truncate">{proxy.host}</span>
-                        <span data-port className="shrink-0">:{proxy.port}</span>
-                      </span>
-                    )}
-                  </span>
-                </Tooltip>
-              ) : missing ? (
-                // Plain text, no dot here: the Status column already carries the
-                // warning dot for this state (controller ruling, Task 8 — a dot
-                // in two cells would duplicate it).
-                <span className="text-secondary text-text-strong-950">{t("profileRow.proxyMissing")}</span>
-              ) : (
-                <span className="text-secondary text-text-soft-400">{t("profileRow.direct")}</span>
-              )}
-              {own("proxy")}
+              {/* The edit button sits right after what the cell shows (CellEditButton). */}
+              <span className="relative flex min-w-0 items-center">
+                {proxy ? (
+                  // The proxy's name, as Proxies and Peek show it (CRAFT-13); an
+                  // unnamed one (or one named by its address, as a pasted line
+                  // is) shows its host, cut before the port, never after
+                  // (TYPE-07). The whole address and the type are in the tooltip.
+                  <Tooltip
+                    warm={false}
+                    delay={700}
+                    content={
+                      <>
+                        {proxyNamed && <>{proxy.name}<br /></>}
+                        <span className="mono">{proxy.host}:{proxy.port}</span>
+                        <br />
+                        {proxy.kind.toUpperCase()}
+                      </>
+                    }
+                  >
+                    <span className="flex min-w-0 items-center gap-1.5">
+                      <ProxyFlag cc={proxy.country} />
+                      {proxyNamed ? (
+                        <span data-proxy-name className="truncate text-secondary text-text-sub-600">{proxy.name}</span>
+                      ) : (
+                        <span data-proxy-address className="flex min-w-0 text-mono text-text-sub-600">
+                          <span className="truncate">{proxy.host}</span>
+                          <span data-port className="shrink-0">:{proxy.port}</span>
+                        </span>
+                      )}
+                    </span>
+                  </Tooltip>
+                ) : missing ? (
+                  // Plain text, no dot here: the Status column already carries the
+                  // warning dot for this state (controller ruling, Task 8 — a dot
+                  // in two cells would duplicate it).
+                  <span className="text-secondary text-text-strong-950">{t("profileRow.proxyMissing")}</span>
+                ) : hidden ? (
+                  <span data-proxy-hidden className="truncate text-secondary text-text-sub-600">{t("profileRow.proxyHidden")}</span>
+                ) : (
+                  <span className="text-secondary text-text-soft-400">{t("profileRow.direct")}</span>
+                )}
+                {own("proxy")}
+              </span>
             </div>
           </Tooltip>
         );
@@ -510,14 +537,16 @@ export const ProfileRow = memo(function ProfileRow({ profile, proxy, top, column
             ref={notesCell}
             role="gridcell"
             data-cell="notes"
-            className="group/cell relative flex min-w-0 items-center gap-1 self-stretch text-secondary text-text-sub-600"
+            className="group/cell @container relative flex min-w-0 items-center gap-1 self-stretch text-secondary text-text-sub-600"
           >
-            {/* A cut note shows whole on hover, only when it is cut, and
-                only the note (EMIL-14): the edit button names the edit. */}
-            <Tooltip content={p.notes || undefined} whenTruncated warm={false} delay={700}>
-              <span className="min-w-0 flex-1 truncate">{p.notes || <span className="text-text-soft-400">—</span>}</span>
-            </Tooltip>
-            {own("notes")}
+            <span className="relative flex min-w-0 items-center">
+              {/* A cut note shows whole on hover, only when it is cut, and
+                  only the note (EMIL-14): the edit button names the edit. */}
+              <Tooltip content={p.notes || undefined} whenTruncated warm={false} delay={700}>
+                <span className="min-w-0 truncate">{p.notes || <span className="text-text-soft-400">—</span>}</span>
+              </Tooltip>
+              {own("notes")}
+            </span>
           </div>
         );
     }

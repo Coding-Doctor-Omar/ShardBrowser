@@ -26,10 +26,64 @@ test("Interface size shows at once from Settings, and is stored and survives a r
   await expect.poll(() => zoomOf(page)).toBe("1.25");
   await appearance(page);
   await page.getByRole("combobox", { name: "Interface size" }).click();
-  await page.getByRole("option", { name: "100% (default)" }).click();
+  // Auto, the default, says what it picks for this screen (owner, 2026-10-23).
+  await page.getByRole("option", { name: "Auto (currently 100%)" }).click();
   await expect.poll(() => zoomOf(page)).toBe("1");
   await page.locator("[data-save-bar]").getByRole("button", { name: "Save", exact: true }).click();
   await expect(page.locator("[data-save-bar]")).toHaveCount(0);
+  // Auto is nothing stored.
+  expect(await page.evaluate(() => localStorage.getItem("shardx.interfaceSize"))).toBeNull();
+});
+
+// Owner, 2026-10-23: on 4K at 150% (a 2560 px wide screen) everything was
+// too small. Auto goes by the screen's width in CSS px; a size picked by
+// hand wins over it.
+test("Auto: 100% on a 1920 screen, 125% on a 2560 one, 150% from 2800; it follows the window to another screen; a size picked by hand wins", async ({ page }) => {
+  await page.setViewportSize({ width: 1920, height: 1080 });
+  await openApp(page);
+  expect(await zoomOf(page)).toBe("1");
+  await page.setViewportSize({ width: 2560, height: 1440 });
+  await expect.poll(() => zoomOf(page)).toBe("1.25");
+  expect(await page.evaluate(() => getComputedStyle(document.documentElement).getPropertyValue("--page-zoom"))).toBe("1.25");
+  expect(await noPageScroll(page)).toEqual({ x: true, y: true });
+  await page.setViewportSize({ width: 3840, height: 2160 });
+  await expect.poll(() => zoomOf(page)).toBe("1.5");
+  await page.setViewportSize({ width: 2560, height: 1440 });
+  await page.goto("/?section=settings");
+  await appearance(page);
+  await expect(page.getByRole("combobox", { name: "Interface size" })).toContainText("Auto (currently 125%)");
+  await page.getByRole("combobox", { name: "Interface size" }).click();
+  await page.getByRole("option", { name: "100%", exact: true }).click();
+  await page.locator("[data-save-bar]").getByRole("button", { name: "Save", exact: true }).click();
+  await expect.poll(() => zoomOf(page)).toBe("1");
+  await page.setViewportSize({ width: 3840, height: 2160 });
+  await page.waitForTimeout(200);
+  expect(await zoomOf(page)).toBe("1");
+});
+
+// Auto never leaves a window under 1280 x 800 layout px: the default window
+// on a 4K screen stays at 100%, and a bigger one gets what fits.
+for (const [width, height, zoom] of [[1280, 800, "1"], [1024, 680, "1"], [1920, 1080, "1.25"], [3840, 2100, "1.5"]] as const) {
+  test.describe(`a ${width} x ${height} window on a 4K screen at 100%`, () => {
+    test.use({ viewport: { width, height }, contextOptions: { screen: { width: 3840, height: 2160 } } });
+    test(`Auto goes by the window too: ${zoom}`, async ({ page }) => {
+      await openApp(page);
+      expect(await zoomOf(page)).toBe(zoom);
+      expect(await noPageScroll(page)).toEqual({ x: true, y: true });
+    });
+  });
+}
+
+// The old build kept "100" for its "100% (default)": that reads as Auto, once.
+test("a 100 kept by the old build reads as Auto; a 100 picked now stays 100", async ({ page }) => {
+  await page.setViewportSize({ width: 2560, height: 1440 });
+  await page.addInitScript(() => { if (sessionStorage.getItem("seeded") === null) { sessionStorage.setItem("seeded", "1"); localStorage.setItem("shardx.interfaceSize", "100"); } });
+  await openApp(page);
+  expect(await zoomOf(page)).toBe("1.25");
+  expect(await page.evaluate(() => localStorage.getItem("shardx.interfaceSize"))).toBeNull();
+  await page.evaluate(() => localStorage.setItem("shardx.interfaceSize", "100"));
+  await page.reload();
+  await expect.poll(() => zoomOf(page)).toBe("1");
 });
 
 test("at 125% in a 1280 x 800 window: no page scrollbar, and opening Peek folds the sidebar like a 1024 window", async ({ page }) => {

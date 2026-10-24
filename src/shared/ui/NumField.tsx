@@ -8,6 +8,10 @@ import { registerCommittable } from "../lib/commitField";
 /** What a value shows as: nothing for an optional number left empty. */
 const textOf = (v: number | null) => (v === null ? "" : String(v));
 
+/** Exactly one `{{name}}` and nothing else. A brace or a space inside is a
+ *  typo, not a name, and half of one ("{{d") is still being typed. */
+const VAR_REF = /^\{\{[^\s{}]+\}\}$/;
+
 /** How a field is named, one way only, so none compiles unnamed: its own
  *  caption (`label`), an `aria-label`, or the id of the caller's caption
  *  (`aria-labelledby`, beside that caption's `<label htmlFor={id}>`). */
@@ -29,6 +33,12 @@ type Emptying =
 
 export type NumFieldProps = Naming & Emptying & {
   onChange: (v: number) => void;
+  /** Takes a `{{variable}}` typed in place of a number, on leaving the field.
+   *  Only settings the runner expands before using them offer this (a wait of
+   *  `{{delay}}`); the caller stores the text and shows it in a text box of
+   *  its own, so this field never has to display one. Without a handler a
+   *  reference is "not a number", as it was. */
+  onVar?: (ref: string) => void;
   min?: number;
   max?: number;
   /** Digits after the point that are kept; 0 means whole numbers. */
@@ -51,13 +61,14 @@ export type NumFieldProps = Naming & Emptying & {
 /// every draft that reads as a number inside the range reaches `onChange`, so
 /// a form's own draft holds it; "-" on its way to "-33" and an empty
 /// field on its way to a new port stay as they are. Leaving the field (or
-/// Enter) brings a number into range, or keeps a non-number with a message.
+/// Enter) brings a number into range, keeps a non-number with a message, or —
+/// where the caller takes one — hands over a `{{variable}}`.
 /// A text field, so it has no spinner arrows. The types make every field
 /// named, and every field that can be empty say what emptying it does.
 export function NumField(props: NumFieldProps) {
   const {
     label, "aria-label": ariaLabel, "aria-labelledby": labelledBy,
-    value, onChange, onClear, min, max, decimals = 0, placeholder, id, className,
+    value, onChange, onClear, onVar, min, max, decimals = 0, placeholder, id, className,
     "aria-describedby": describedBy, onInvalid,
   } = props;
   const t = useT();
@@ -88,6 +99,18 @@ export function NumField(props: NumFieldProps) {
   const message = min !== undefined && max !== undefined ? t("numField.invalidRange", { min, max }) : t("numField.invalid");
 
   const commit = () => {
+    const typed = text.trim();
+    // A finished reference goes over as typed, and only on leaving: handing it
+    // over mid-word would swap this field for the caller's text box under the
+    // keyboard, and the rest of the name would land nowhere. The field is on
+    // its way out, so its unmount has nothing of its own left to commit.
+    if (onVar && VAR_REF.test(typed)) {
+      focused.current = false;
+      setError(null);
+      report(false);
+      onVar(typed);
+      return;
+    }
     const n = parse(text, decimals);
     if (n === null && onClear && text.trim() === "") { setError(null); setText(""); report(false); if (value !== null) onClear(); return; }
     if (n === null) { setError(message); report(true); return; }
@@ -123,7 +146,8 @@ export function NumField(props: NumFieldProps) {
       // Label to control is 6 px on kit-labelled fields.
       wrapperClassName="gap-[6px]"
       type="text"
-      inputMode={decimals > 0 || (min !== undefined && min < 0) ? "decimal" : "numeric"}
+      // A field that takes a reference needs the braces on the keyboard too.
+      inputMode={onVar ? "text" : decimals > 0 || (min !== undefined && min < 0) ? "decimal" : "numeric"}
       placeholder={placeholder}
       value={text}
       error={error ?? undefined}

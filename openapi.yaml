@@ -1,10 +1,10 @@
 openapi: 3.0.3
 
 info:
-  title: ShardX Launcher — Automation API
+  title: ShardBrowser Launcher — Automation API
   version: "0.1.0"
   description: |
-    Local HTTP API for automating the ShardX anti-detect browser launcher:
+    Local HTTP API for automating the ShardBrowser anti-detect browser launcher:
     generate fingerprints, create/launch/close profiles, and obtain a Chrome
     DevTools Protocol (CDP) WebSocket endpoint to drive a launched profile
     with Puppeteer / Playwright.
@@ -31,8 +31,8 @@ info:
 
     ## Typical flow
     1. `GET /fingerprint/new/{platform}` → a fully uniquified fingerprint
-       (random platform_version, host-aware CPU/RAM, clamped screen,
-       library noise prefs), **not** persisted.
+       (random platform_version, host-aware CPU/RAM, this computer's screen
+       on Windows/Linux, library noise prefs), **not** persisted.
     2. Optionally edit the returned `fingerprint` object (e.g. flip
        `noise.fonts.enabled`, set `webrtc`, tweak `navigator`).
     3. `POST /profiles` (or `POST /folders/{folder}/profiles`) with that
@@ -154,8 +154,10 @@ paths:
         Picks a random library fingerprint matching `platform`, then
         uniquifies it: a fresh Sec-CH-UA `platform_version`, host-aware
         `hardware_concurrency`/`device_memory` (never claims more than the
-        real machine), and a screen clamped to the real display. Returned
-        unsaved — feed it to a create endpoint as `fingerprint`.
+        real machine), and the screen: Windows/Linux claim this computer's
+        (the template's taskbar kept), macOS/Android the template's own, both
+        clamped to the real display. Returned unsaved — feed it to a create
+        endpoint as `fingerprint`.
       parameters:
         - name: platform
           in: path
@@ -360,7 +362,7 @@ paths:
       tags: [Profiles]
       summary: Launch a profile (with CDP)
       description: |
-        Spawns the ShardX browser for the profile with remote-debugging
+        Spawns the ShardBrowser engine for the profile with remote-debugging
         enabled, resolves any `auto` timezone/locale/geo from the bound
         proxy, and returns the CDP endpoint once Chrome has written its
         DevToolsActivePort. CDP is enabled **only** on API launches (UI
@@ -415,7 +417,12 @@ paths:
       description: |
         Sends the browser a graceful shutdown (SIGTERM on Unix; 5s grace
         then SIGKILL). Temporary profiles are deleted as part of close.
-        `stopped` is `false` if the profile wasn't running.
+
+        `stopped` is `false` when nothing was stopped. That usually means the
+        profile wasn't running, but it also covers a profile that is running
+        and could not be reached — so treat `false` as "it may still be up",
+        not as "it is closed", and read the profile's state before acting on
+        its data.
       parameters:
         - $ref: "#/components/parameters/ProfileId"
       responses:
@@ -792,7 +799,7 @@ paths:
         With `id` it updates that bookmark; without, it creates one.
 
         A bookmark bound to a folder appears in the bookmarks bar of every
-        profile in that folder, inside a folder called **ShardX**; `folder: ""`
+        profile in that folder, inside a folder called **ShardBrowser**; `folder: ""`
         means every profile. Only that folder is managed, so bookmarks the
         operator saved inside a profile are untouched.
 
@@ -1375,6 +1382,26 @@ components:
               description: >
                 How often the claimed display refreshes. Absent means 60.
                 See the refresh_rate field on the create/edit requests.
+        window:
+          type: object
+          additionalProperties: true
+          description: >
+            The browser window. With no size here the launcher derives one from
+            the claimed screen at start, so a profile does not open in a window
+            sized for this computer's monitor.
+          properties:
+            outer_width: { type: integer }
+            outer_height: { type: integer }
+            inner_width: { type: integer }
+            inner_height: { type: integer }
+            keep_focus:
+              type: boolean
+              description: >
+                Report the window as focused even while another one is in
+                front, so `document.hasFocus()` stays true and a page keeps
+                running while the profile works in the background. Absent
+                means off: a window that never loses focus is unusual in
+                itself.
         client_hints:
           type: object
           description: Sec-CH-UA family (browser.vision calls this `hints`).
@@ -1410,6 +1437,17 @@ components:
         timezone:
           type: string
           description: IANA name, or "auto" to resolve from the bound proxy at launch.
+        ui_language:
+          type: string
+          enum: [system, profile]
+          default: system
+          description: >
+            The browser's own interface language: its menus and the messages
+            it shows on pages. `system` (or absent) is this computer's
+            language, as in a normal Chrome. `profile` uses the profile's
+            language (`navigator.language`, resolved at launch when "auto").
+            Only `profile` is sent to the browser; an explicit `--lang` in the
+            extra launch arguments still wins.
 
     NoisePrefs:
       type: object

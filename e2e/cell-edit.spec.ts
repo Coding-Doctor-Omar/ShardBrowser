@@ -21,7 +21,7 @@ const TAGS = {
   byProfile: { f62a9d43: ["t-warm"], aed41005: ["t-warm", "t-vip"] },
 };
 
-test("hovering an editable cell shows its edit button at the cell's end, with a hover state; it opens the tag picker under the cell, not Peek", async ({ page }) => {
+test("hovering an editable cell shows its edit button after its content, inside the cell, with a hover state; it opens the tag picker under the cell, not Peek", async ({ page }) => {
   await seed(page, "shardx.tags", TAGS);
   await openApp(page);
   const tags = cellOf(page, "Etsy craft shop", "tags");
@@ -34,7 +34,9 @@ test("hovering an editable cell shows its edit button at the cell's end, with a 
   await expect(edit).toBeVisible();
   const cell = (await tags.boundingBox())!;
   const button = (await edit.boundingBox())!;
-  expect(cell.x + cell.width - (button.x + button.width)).toBeLessThanOrEqual(2);
+  const chips = (await tags.locator("[data-tag]").last().boundingBox())!;
+  expect(button.x + button.width).toBeLessThanOrEqual(cell.x + cell.width + 1);
+  expect(button.x).toBeGreaterThanOrEqual(Math.min(chips.x + chips.width, cell.x + cell.width - 24) - 1);
   const rest = await edit.evaluate((el) => getComputedStyle(el).backgroundColor);
   await edit.hover();
   await expect.poll(() => edit.evaluate((el) => getComputedStyle(el).backgroundColor)).not.toBe(rest);
@@ -44,6 +46,25 @@ test("hovering an editable cell shows its edit button at the cell's end, with a 
   expect((await picker.boundingBox())!.y).toBeGreaterThanOrEqual(cell.y + cell.height - 1);
   await expect(page.locator("aside[data-peek]")).toHaveCount(0);
   await expect(page.locator("[role='row'][aria-selected='true']")).toHaveCount(0);
+});
+
+// A stretched row (owner, 2026-10-23) makes cells wider than what they show:
+// the button stays beside the text it edits, not at the far end of the cell.
+test("in a wide row the edit button sits right after the cell's text, not at the cell's far end", async ({ page }) => {
+  await page.setViewportSize({ width: 1920, height: 1000 });
+  await openApp(page);
+  const proxy = cellOf(page, "FB Ads acc-01", "proxy");
+  await proxy.hover({ position: { x: 4, y: 18 } });
+  const edit = proxy.getByRole("button", { name: "Edit proxy for FB Ads acc-01" });
+  await expect(edit).toBeVisible();
+  const text = (await proxy.locator("[data-proxy-name]").boundingBox())!;
+  const button = (await edit.boundingBox())!;
+  const cell = (await proxy.boundingBox())!;
+  // The 14 px fade, then the button.
+  expect(button.x - (text.x + text.width)).toBeGreaterThanOrEqual(0);
+  expect(button.x - (text.x + text.width)).toBeLessThanOrEqual(20);
+  expect(cell.x + cell.width - (button.x + button.width)).toBeGreaterThan(60);
+  expect(await reachable(edit)).toBe(true);
 });
 
 test("an empty Folder cell offers Add: a menu under the cell with No folder, every Folder and New folder", async ({ page }) => {

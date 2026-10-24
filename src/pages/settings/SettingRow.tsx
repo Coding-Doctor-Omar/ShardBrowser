@@ -21,7 +21,8 @@ export type SettingsProps = {
 /// from a click anywhere on it, once (owner rule for rows that hold a check).
 export function SettingRow({ id, title, help, control, below }: {
   id: string;
-  title: string;
+  /** Words, or words with a mark before them (Sync's status). */
+  title: ReactNode;
   help?: ReactNode;
   /** `helpId` is the help's id, for `aria-describedby`. */
   control?: (ids: { labelId: string; helpId: string | undefined }) => ReactNode;
@@ -47,7 +48,7 @@ export function SettingRow({ id, title, help, control, below }: {
     >
       <div className="min-w-0">
         <div id={labelId} className="text-ui text-text-strong-950">{title}</div>
-        {help && <p id={helpId} data-setting-help className="m-0 mt-0.5 text-balance! text-help text-text-sub-600">{help}</p>}
+        {help && <p id={helpId} data-setting-help className="m-0 mt-0.5 max-w-[72ch] text-balance! text-help text-text-sub-600">{help}</p>}
       </div>
       {control && (
         <div ref={controlRef} className="flex shrink-0 items-center justify-end">
@@ -66,7 +67,7 @@ export function SettingsGroup({ title, help, list, children }: { title?: string;
   return (
     <section className="flex flex-col gap-2">
       {title && <h3 className="m-0 text-section-title text-text-strong-950">{title}</h3>}
-      {help && <p data-group-help className="m-0 text-balance! text-help text-text-sub-600">{help}</p>}
+      {help && <p data-group-help className="m-0 max-w-[72ch] text-balance! text-help text-text-sub-600">{help}</p>}
       {list ? <div className="list-tile pt-1">{children}</div> : <Card padding="none" className="px-4">{children}</Card>}
     </section>
   );

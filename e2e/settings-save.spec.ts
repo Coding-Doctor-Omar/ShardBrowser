@@ -1,5 +1,5 @@
 import { expect, test, type Page } from "@playwright/test";
-import { appModule, openApp } from "./support/app";
+import { appModule, openApp, storedTags } from "./support/app";
 
 // Manual save (Task 8): Settings change only on Save. The page holds a draft;
 // the bar at its bottom saves or drops it; leaving asks.
@@ -27,8 +27,7 @@ const TAGS = {
 const seedTags = (page: Page) => page.addInitScript((v) => {
   if (localStorage.getItem("shardx.tags") === null) localStorage.setItem("shardx.tags", JSON.stringify(v));
 }, TAGS);
-const tagStore = (page: Page) =>
-  page.evaluate(() => (JSON.parse(localStorage.getItem("shardx.tags") ?? "null")?.tags ?? []).map((t: { name: string; color: string }) => `${t.name}:${t.color}`));
+const tagStore = async (page: Page) => (await storedTags(page)).tags.map((t) => `${t.name}:${t.color}`);
 
 test("flipping a switch writes nothing and shows the bar", async ({ page }) => {
   await openApp(page, { section: "settings" });
@@ -152,7 +151,7 @@ test("a tag rename and a new color wait for Save", async ({ page }) => {
   expect(await tagStore(page)).toEqual(["Warm-up:orange", "VIP:violet"]);
   await saveButton(page).click();
   await expect(toast(page, "Settings saved")).toBeVisible();
-  expect(await tagStore(page)).toEqual(["Warmed:red", "VIP:violet"]);
+  await expect.poll(() => tagStore(page)).toEqual(["Warmed:red", "VIP:violet"]);
   await expect(bar(page)).toHaveCount(0);
   // The row is named by the saved name, which is Warmed now.
   await expect(row.getByRole("textbox", { name: "Name of the tag “Warmed”" })).toHaveValue("Warmed");
@@ -193,7 +192,7 @@ test("a taken tag name fails Save with the error, and nothing is written", async
   await expect(row).not.toContainText(taken);
   await saveButton(page).click();
   await expect(toast(page, "Settings saved")).toBeVisible();
-  expect(await tagStore(page)).toEqual(["Warmed:orange", "VIP:violet"]);
+  await expect.poll(() => tagStore(page)).toEqual(["Warmed:orange", "VIP:violet"]);
   expect(await stored(page, "minimize_to_tray")).toBe(!before);
 });
 

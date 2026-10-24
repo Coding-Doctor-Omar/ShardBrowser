@@ -60,8 +60,9 @@ pub struct Progress {
 }
 
 /// Directories that move; everything else in the config dir stays where the
-/// launcher can always find it.
-const MOVED: &[&str] = &["profiles", "user-data", "extensions", "trash"];
+/// launcher can always find it. A team copy kept for a new invite moves too,
+/// or no sweep would find it again.
+const MOVED: &[&str] = &["profiles", "user-data", "extensions", "trash", "team-open"];
 
 fn emit(app: &tauri::AppHandle, p: Progress) {
     let _ = app.emit("data-migration", p);
@@ -69,21 +70,35 @@ fn emit(app: &tauri::AppHandle, p: Progress) {
 
 /// Move the data root to `dst`. Returns the number of files moved.
 pub fn run(app: &tauri::AppHandle, dst: &Path) -> Result<u64> {
+    run_with(dst, &|p| emit(app, p))
+}
+
+/// The move, telling its progress to `emit`.
+pub(crate) fn run_with(dst: &Path, emit: &dyn Fn(Progress)) -> Result<u64> {
     if reset_pending() {
         anyhow::bail!("a reset didn’t finish: restart ShardBrowser to undo or finish it first");
     }
     if MIGRATING.swap(true, Ordering::SeqCst) {
         anyhow::bail!("a migration is already running");
     }
-    let out = do_run(app, dst);
+    // Looked at under the lock: a launch counts itself before it looks at the lock.
+    let out = refuse_while_busy().and_then(|()| do_run(dst, emit));
     MIGRATING.store(false, Ordering::SeqCst);
     if out.is_err() {
-        emit(app, Progress { phase: "done", done: 0, total: 0, percent: 100, current: String::new() });
+        emit(Progress { phase: "done", done: 0, total: 0, percent: 100, current: String::new() });
     }
     out
 }
 
-fn do_run(app: &tauri::AppHandle, dst: &Path) -> Result<u64> {
+/// A profile starting, or a team profile open here (its copy is under the data folder).
+fn refuse_while_busy() -> Result<()> {
+    if crate::launch::in_flight() > 0 {
+        anyhow::bail!("a profile is starting: try again once it has started");
+    }
+    crate::space::open::refuse_while_open().map_err(anyhow::Error::msg)
+}
+
+fn do_run(dst: &Path, emit: &dyn Fn(Progress)) -> Result<u64> {
     let src = store::data_root()?;
     let dst = dst.to_path_buf();
     if dst == src {
@@ -95,7 +110,7 @@ fn do_run(app: &tauri::AppHandle, dst: &Path) -> Result<u64> {
     std::fs::create_dir_all(&dst).with_context(|| format!("create {}", dst.display()))?;
     writable(&dst)?;
 
-    emit(app, Progress { phase: "scan", done: 0, total: 0, percent: 0, current: String::new() });
+    emit(Progress { phase: "scan", done: 0, total: 0, percent: 0, current: String::new() });
     let mut files: Vec<(PathBuf, PathBuf)> = Vec::new();
     for name in MOVED {
         let from = src.join(name);
@@ -106,7 +121,7 @@ fn do_run(app: &tauri::AppHandle, dst: &Path) -> Result<u64> {
     let total = files.len() as u64;
     if total == 0 {
         finish(&dst)?;
-        emit(app, Progress { phase: "done", done: 0, total: 0, percent: 100, current: String::new() });
+        emit(Progress { phase: "done", done: 0, total: 0, percent: 100, current: String::new() });
         return Ok(0);
     }
 
@@ -121,7 +136,7 @@ fn do_run(app: &tauri::AppHandle, dst: &Path) -> Result<u64> {
         // One event per file is noise on a profile with ten thousand cache
         // entries; the bar only needs to move.
         if done % 25 == 0 || done == total {
-            emit(app, Progress {
+            emit(Progress {
                 phase: "copy",
                 done,
                 total,
@@ -135,7 +150,7 @@ fn do_run(app: &tauri::AppHandle, dst: &Path) -> Result<u64> {
         }
     }
 
-    emit(app, Progress { phase: "verify", done, total, percent: 100, current: String::new() });
+    emit(Progress { phase: "verify", done, total, percent: 100, current: String::new() });
     for (from, to) in &files {
         let a = std::fs::metadata(from).map(|m| m.len()).unwrap_or(0);
         let b = std::fs::metadata(to).map(|m| m.len()).unwrap_or(u64::MAX);
@@ -145,7 +160,7 @@ fn do_run(app: &tauri::AppHandle, dst: &Path) -> Result<u64> {
     }
 
     // Only now is the old copy expendable.
-    emit(app, Progress { phase: "cleanup", done, total, percent: 100, current: String::new() });
+    emit(Progress { phase: "cleanup", done, total, percent: 100, current: String::new() });
     finish(&dst)?;
     for name in MOVED {
         let old = src.join(name);
@@ -154,7 +169,7 @@ fn do_run(app: &tauri::AppHandle, dst: &Path) -> Result<u64> {
         }
     }
 
-    emit(app, Progress { phase: "done", done, total, percent: 100, current: String::new() });
+    emit(Progress { phase: "done", done, total, percent: 100, current: String::new() });
     Ok(done)
 }
 
@@ -180,6 +195,10 @@ fn writable(dir: &Path) -> Result<()> {
 fn collect(src: &Path, dst: &Path, out: &mut Vec<(PathBuf, PathBuf)>) -> Result<()> {
     for entry in std::fs::read_dir(src)? {
         let entry = entry?;
+        // The drive's own litter is not ours to carry back and forth.
+        if crate::store::is_os_litter(&entry.file_name()) {
+            continue;
+        }
         let from = entry.path();
         let to = dst.join(entry.file_name());
         match entry.file_type() {

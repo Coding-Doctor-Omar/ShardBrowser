@@ -1,5 +1,5 @@
 import { expect, test, type Page } from "@playwright/test";
-import { openApp } from "./support/app";
+import { openApp, storedTags } from "./support/app";
 
 // LAYOUT-16: a setting is a row: its name and one line of help, the control at the end.
 // The tabs of setting rows (F30, F31). Tags and Views are lists, Storage one card,
@@ -7,10 +7,22 @@ import { openApp } from "./support/app";
 const TABS = ["General", "Appearance", "Profile defaults", "API & MCP", "Helper"];
 const panel = (page: Page) => page.getByRole("tabpanel");
 
-test("the content column is 640 px wide (6.2)", async ({ page }) => {
-  await page.setViewportSize({ width: 2560, height: 1440 });
+// The column runs to the page's edge at every width; only the help keeps a
+// readable line (owner, 2026-10-23: no empty band beside a narrow column).
+test("the content column reaches the page's right edge at every width, and its help keeps a readable line", async ({ page }) => {
   await openApp(page, { section: "settings" });
-  expect((await panel(page).boundingBox())!.width).toBeLessThanOrEqual(640);
+  const gap = () => page.evaluate(() => {
+    const body = document.querySelector<HTMLElement>("[data-page-body]")!;
+    const end = body.getBoundingClientRect().right - parseFloat(getComputedStyle(body).paddingRight) * Number(getComputedStyle(document.documentElement).zoom || 1);
+    return Math.abs(end - document.querySelector("[role='tabpanel']")!.getBoundingClientRect().right);
+  });
+  expect(await gap()).toBeLessThanOrEqual(1);
+  await page.setViewportSize({ width: 2560, height: 1440 });
+  // A 2560 screen gets 125% by Auto.
+  await expect.poll(() => page.evaluate(() => getComputedStyle(document.documentElement).zoom)).toBe("1.25");
+  await expect.poll(gap).toBeLessThanOrEqual(1);
+  const help = panel(page).locator("[data-setting-help]").first();
+  expect(await help.evaluate((el) => getComputedStyle(el).maxWidth)).not.toBe("none");
 });
 
 for (const name of TABS) {
@@ -81,8 +93,7 @@ test("a taken tag name is found on Save, and goes once the other tag is renamed 
   await save.click();
   await expect(panel(page).getByText(/A tag named/)).toHaveCount(0);
   await expect(page.locator("[data-save-bar]")).toHaveCount(0);
-  const names = await page.evaluate(() => JSON.parse(localStorage.getItem("shardx.tags")!).tags.map((t: { name: string }) => t.name));
-  expect(names).toEqual(["cold", "warm-up"]);
+  await expect.poll(async () => (await storedTags(page)).tags.map((t) => t.name)).toEqual(["cold", "warm-up"]);
 });
 
 test("a long data path keeps its end in view (TYPE-07)", async ({ page }) => {

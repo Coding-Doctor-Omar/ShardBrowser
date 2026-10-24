@@ -8,7 +8,7 @@
 // sends JSON, and unwraps the API's `{ success:false, message }` error shape
 // into an anyhow error so the UI shows the server's own wording.
 
-use crate::proxy::{self, ProxyEntry, ProxyKind};
+use crate::space::proxy::{self, ProxyEntry, ProxyKind};
 use crate::store;
 use anyhow::{anyhow, Context, Result};
 use serde::{Deserialize, Serialize};
@@ -140,9 +140,9 @@ pub async fn trial_offer() -> Result<Value> {
 }
 
 /// Fetch the active proxies for a Datacenter/ISP order and persist them into
-/// the local proxy list as `kind` ("socks5" | "http"). Returns the number of
-/// new proxies actually added (identical ones already there are skipped).
-pub async fn import_order_proxies(order_id: i64, kind: String) -> Result<usize> {
+/// the proxy list of the space `t` was asked in, as `kind` ("socks5" | "http").
+/// Returns the number of new proxies actually added (identical ones are skipped).
+pub async fn import_order_proxies(t: &crate::space::Ticket, order_id: i64, kind: String) -> Result<usize> {
     let q = vec![("order_id".to_string(), order_id.to_string())];
     let resp = call("GET", "/user/api/proxies/active", &q, None).await?;
 
@@ -189,7 +189,7 @@ pub async fn import_order_proxies(order_id: i64, kind: String) -> Result<usize> 
         });
     }
 
-    proxy::bulk_save(entries)
+    proxy::bulk_save(crate::space::Door("ps_import_order"), t, entries).await
 }
 
 /// One proxy line for a project's `proxy.generate` block. Deliberately not via

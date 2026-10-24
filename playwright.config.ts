@@ -17,6 +17,9 @@ const devURL = `http://127.0.0.1:${lanePort ?? "1420"}`;
 // (PERF_PORT), never the main tree's 4173.
 const perfPort = lanePort ? process.env.PERF_PORT : undefined;
 const perfURL = `http://127.0.0.1:${perfPort ?? "4173"}`;
+// Whole tiles only: a partial re-raster kept edge pixels from earlier paints,
+// so an icon's anti-aliasing depended on the session's paint history.
+const wholeRaster = { args: ["--disable-partial-raster"] };
 
 // Screenshot and flow tests run against `npm run dev:mock`: the app in a plain
 // browser with an in-page stand-in for the Tauri backend and seeded data.
@@ -57,14 +60,14 @@ export default defineConfig({
   },
   projects: [
     // Everything except the forced-colors shots and the timing tests.
-    { name: "dev", grepInvert: built ? /@forced|@devserver/ : /@forced/, testIgnore: /(perf(-probe|-budget)?|startup)\.spec\.ts/, use: { baseURL: devURL } },
+    { name: "dev", grepInvert: built ? /@forced|@devserver/ : /@forced/, testIgnore: /(perf(-probe|-budget)?|startup)\.spec\.ts/, use: { baseURL: devURL, launchOptions: wholeRaster } },
     // The smallest window the app allows: compact sidebar, nothing clipped.
     {
       name: "compact",
       testMatch: /pages\.spec\.ts/,
       grepInvert: built ? /@devserver/ : undefined,
       snapshotPathTemplate: "e2e/__screenshots__/{platform}/{arg}-compact{ext}",
-      use: { baseURL: devURL, viewport: { width: 1024, height: 680 } },
+      use: { baseURL: devURL, viewport: { width: 1024, height: 680 }, launchOptions: wholeRaster },
     },
     // Windows High Contrast (forced colors): the state matrix's @forced shots
     // and the focus checks (focus.spec.ts).
@@ -74,7 +77,7 @@ export default defineConfig({
       grep: /@forced/,
       grepInvert: built ? /@devserver/ : undefined,
       snapshotPathTemplate: "e2e/__screenshots__/{platform}/{arg}-forced{ext}",
-      use: { baseURL: devURL, forcedColors: "active" },
+      use: { baseURL: devURL, forcedColors: "active", launchOptions: wholeRaster },
     },
     // Timing and startup tests run on the production build of the mock, as the
     // audit measured (development React is several times slower), after every other

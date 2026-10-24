@@ -5,14 +5,32 @@ use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::OnceLock;
 use tauri::{Emitter, Window};
 use tokio::io::AsyncWriteExt;
+
+mod caps;
+mod os;
+mod swap;
+
+// A launch asks the engine binary whether it still needs --disable-extensions-except.
+pub(crate) use caps::loads_extensions_alone as engine_loads_extensions_alone;
+// Extension updates measure the same disk before unpacking.
+pub(crate) use os::free_bytes;
 
 const PUB_BASE: &str = "https://pub-e57a7c60f6934eb09a6600bf2fc59cdc.r2.dev";
 /// Version manifest (GitHub raw) — one tiny GET yields every archive's current
 /// etag, so install/status checks never poll R2/S3 per-archive.
 const MANIFEST_URL: &str =
     "https://raw.githubusercontent.com/ProxyShard/ShardBrowser/main/runtime.json";
+/// Whole-request budget for that GET. The window's first paint waits on
+/// `runtime_status`, so being offline has to mean a quick "no manifest" instead
+/// of a request the OS lets hang — a network that accepts the connection and
+/// never answers, a captive portal, or dead DNS left the window empty (#114).
+/// Kept short on purpose: giving up early only costs this launch its update
+/// check, while waiting costs the operator a launcher that looks stuck.
+const MANIFEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(4);
 const LAUNCHER_RELEASE_REPO: &str = "ProxyShard/ShardBrowser";
 /// Chromium version baked into the current bundle (used for Mac Framework path).
 pub const CHROMIUM_VERSION: &str = "156.0.8078.48";
@@ -57,6 +75,10 @@ pub fn host_spec() -> Option<PlatformSpec> {
 
 /// Runtime dir under the platform data dir; kept outside the launcher bundle.
 pub fn runtime_dir() -> Result<PathBuf> {
+    // A test gets an empty one under its own root, never the installed engine.
+    #[cfg(test)]
+    return Ok(crate::store::test_config_or_panic("runtime dir").join("runtime"));
+    #[allow(unreachable_code)]
     Ok(dirs::data_dir()
         .context("platform data dir not available")?
         .join("shardx-launcher")
@@ -83,8 +105,8 @@ fn manifest_path() -> Result<PathBuf> {
     Ok(runtime_dir()?.join("manifest.json"))
 }
 
-/// Top-level dir (under runtime_dir) the engine archive extracts into. Wiped
-/// before a re-extract so stale files from the previous version can't linger.
+/// Top-level dir (under runtime_dir) the engine archive extracts into. Replaced
+/// whole on an update (swap.rs), so no file of the previous version lingers.
 fn engine_root_dir() -> &'static str {
     #[cfg(target_os = "macos")]
     return "ShardX-Mac-arm64";
@@ -134,48 +156,171 @@ struct Manifest {
 /// `<ver>.manifest` file. Returns `None` on Linux (no on-disk marker) — callers
 /// fall back to the stored `installed_chromium_version`.
 fn installed_engine_version() -> Option<String> {
-    let base = runtime_dir().ok()?;
-    #[cfg(target_os = "macos")]
-    {
-        let versions = base
-            .join("ShardX-Mac-arm64")
-            .join("ShardX.app")
-            .join("Contents")
-            .join("Frameworks")
-            .join("ShardX Framework.framework")
-            .join("Versions");
-        for ent in fs::read_dir(&versions).ok()?.flatten() {
-            let name = ent.file_name().to_string_lossy().to_string();
-            if name != "Current" && name.chars().next().is_some_and(|c| c.is_ascii_digit()) {
-                return Some(name);
-            }
-        }
-        None
+    let layout = swap::Layout::host(runtime_dir().ok()?, "");
+    swap::version_in(&layout.live(), layout.marker)
+}
+
+/// The engine folder beside its staging folder and backup (swap.rs).
+fn host_layout() -> Option<swap::Layout> {
+    Some(swap::Layout::host(runtime_dir().ok()?, &host_spec()?.browser.key))
+}
+
+/// Read-held while the GPU probe runs the engine, write-held while an install
+/// replaces it: neither starts while the other is under way.
+fn engine_gate() -> &'static tokio::sync::RwLock<()> {
+    static G: OnceLock<tokio::sync::RwLock<()>> = OnceLock::new();
+    G.get_or_init(|| tokio::sync::RwLock::new(()))
+}
+
+/// One install (or start-up sweep) at a time over the staging and backup folders.
+fn install_lock() -> &'static tokio::sync::Mutex<()> {
+    static L: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
+    L.get_or_init(|| tokio::sync::Mutex::new(()))
+}
+
+/// The engine may be run now; `None` while an install has it.
+pub fn engine_use() -> Option<tokio::sync::RwLockReadGuard<'static, ()>> {
+    engine_gate().try_read().ok()
+}
+
+/// Set for the moment the engine folder is renamed; launches are refused then.
+static SWAPPING: AtomicBool = AtomicBool::new(false);
+
+pub fn swapping() -> bool {
+    SWAPPING.load(Ordering::SeqCst)
+}
+
+pub const UPDATING: &str = "The ShardBrowser engine is being updated. Try again in a moment.";
+
+/// Profiles started by this launcher run the bundled engine (no Browser path set).
+fn bundled_engine_in_use() -> bool {
+    crate::settings::load()
+        .ok()
+        .and_then(|s| s.browser_path)
+        .is_none_or(|p| !Path::new(&p).exists())
+}
+
+/// Before the window asks anything: the engine put back if the launcher died
+/// between the two renames of an update, or its record saved if it died just
+/// after; leftovers removed in the background.
+pub fn recover_at_start() {
+    let Some(layout) = host_layout() else { return };
+    // A status call that got the lock first does the same.
+    if let Ok(_one) = install_lock().try_lock() {
+        recover_swap(&layout);
     }
-    #[cfg(target_os = "windows")]
-    {
-        let dir = base.join("ShardX-Windows");
-        // Marker is the `<version>.manifest` sidecar next to chrome.exe. Require
-        // the stem to parse as a dotted version so a stray/leftover file can't
-        // feed a bogus version into the update check.
-        let looks_like_version =
-            |s: &str| s.split('.').count() >= 2 && s.starts_with(|c: char| c.is_ascii_digit());
-        for ent in fs::read_dir(&dir).ok()?.flatten() {
-            let p = ent.path();
-            if p.extension().and_then(|s| s.to_str()) == Some("manifest") {
-                if let Some(stem) = p.file_stem().and_then(|s| s.to_str()) {
-                    if looks_like_version(stem) {
-                        return Some(stem.to_string());
-                    }
-                }
-            }
-        }
-        None
+    tauri::async_runtime::spawn(async move {
+        let _one = install_lock().lock().await;
+        let _ = tokio::task::spawn_blocking(move || swap::sweep(&layout, &swap::Ops::real(&layout))).await;
+    });
+}
+
+/// What a swap cut short left, settled; held under `install_lock`.
+fn recover_swap(layout: &swap::Layout) {
+    if swap::restore(layout, &swap::Ops::real(layout)) {
+        eprintln!("[runtime] an interrupted engine update was undone; the previous engine is back");
     }
-    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
-    {
-        let _ = base;
-        None
+    // Stopped between the swap and its record: the record the journal carries
+    // is saved now, or the engine on disk would be downloaded again.
+    let Some(record) = swap::finished(layout) else { return };
+    let mut m = load_manifest();
+    apply_record(&mut m, &record);
+    if save_manifest(&m).is_ok() {
+        swap::settle(layout);
+        eprintln!("[runtime] the record of an engine update that was cut short is saved");
+    }
+}
+
+/// The engine a swap put in, as the manifest keeps it.
+fn apply_record(m: &mut Manifest, r: &swap::Record) {
+    m.browser_etag = Some(r.etag.clone());
+    if r.version.is_some() {
+        m.installed_chromium_version = r.version.clone();
+    }
+    m.installed_engine_build = r.build.clone();
+}
+
+/// Why the last engine install did not finish, for the window to show.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct InstallError {
+    /// download | space | extract | verify | busy | swap
+    pub stage: String,
+    pub message: String,
+    /// Profiles running on the engine (stage `busy`), else 0.
+    pub running_browsers: u32,
+    /// Profile starts under way here (stage `busy`), else 0.
+    #[serde(default)]
+    pub starting: u32,
+    /// The previous engine is installed and works.
+    pub engine_kept: bool,
+    /// Archive etag (else the version) the attempt was for.
+    pub target: Option<String>,
+    pub at_ms: u64,
+}
+
+fn install_error_path() -> Result<PathBuf> {
+    Ok(runtime_dir()?.join("install-error.json"))
+}
+
+fn load_install_error() -> Option<InstallError> {
+    serde_json::from_str(&fs::read_to_string(install_error_path().ok()?).ok()?).ok()
+}
+
+fn save_install_error(e: &InstallError) {
+    if let Ok(p) = install_error_path() {
+        let _ = fs::write(p, serde_json::to_string_pretty(e).unwrap_or_default());
+    }
+}
+
+fn clear_install_error() {
+    if let Ok(p) = install_error_path() {
+        let _ = fs::remove_file(p);
+    }
+}
+
+/// The `runtime:failed` payload: the stop, and whether its update is unpacked here already.
+#[derive(Serialize, Clone)]
+struct Failed<'a> {
+    #[serde(flatten)]
+    err: &'a InstallError,
+    update_staged: bool,
+}
+
+#[cfg(test)]
+mod install_error_tests {
+    use super::*;
+
+    #[test]
+    fn a_record_from_before_reads_no_start_and_the_event_says_what_is_staged() {
+        let old = r#"{"stage":"busy","message":"m","running_browsers":2,"engine_kept":true,"target":"e1","at_ms":1}"#;
+        let err: InstallError = serde_json::from_str(old).unwrap();
+        assert_eq!((err.running_browsers, err.starting), (2, 0));
+        let starting = InstallError { starting: 1, running_browsers: 0, ..err };
+        let told = serde_json::to_value(Failed { err: &starting, update_staged: true }).unwrap();
+        assert_eq!(told["stage"], "busy");
+        assert_eq!((told["starting"].as_u64(), told["running_browsers"].as_u64()), (Some(1), Some(0)));
+        assert_eq!(told["update_staged"], true);
+    }
+}
+
+#[cfg(test)]
+mod gate_tests {
+    use std::time::Duration;
+
+    /// No GPU probe starts while an install holds the engine, and an install
+    /// waits for a probe already running.
+    #[tokio::test]
+    async fn a_probe_and_an_install_never_overlap() {
+        let install = super::engine_gate().write().await;
+        assert!(super::engine_use().is_none(), "a probe started during an install");
+        drop(install);
+
+        let probe = super::engine_use().expect("no install under way");
+        let waited = tokio::time::timeout(Duration::from_millis(200), super::engine_gate().write()).await;
+        assert!(waited.is_err(), "the install did not wait for the probe");
+        drop(probe);
+        let install = tokio::time::timeout(Duration::from_secs(5), super::engine_gate().write()).await;
+        assert!(install.is_ok(), "the install did not get the engine once the probe ended");
     }
 }
 
@@ -219,9 +364,16 @@ fn load_manifest() -> Manifest {
 }
 
 fn save_manifest(m: &Manifest) -> Result<()> {
+    use std::io::Write;
     let p = manifest_path()?;
     fs::create_dir_all(p.parent().unwrap())?;
-    fs::write(p, serde_json::to_string_pretty(m)?)?;
+    // Whole or not at all: a record cut short reads as no engine version.
+    let tmp = p.with_extension("json.tmp");
+    let mut f = fs::File::create(&tmp)?;
+    f.write_all(serde_json::to_string_pretty(m)?.as_bytes())?;
+    f.sync_all()?;
+    drop(f);
+    fs::rename(&tmp, &p)?;
     Ok(())
 }
 
@@ -241,6 +393,11 @@ pub struct RuntimeStatus {
     /// What the manifest asks for, when it asks for anything.
     pub min_launcher_version: Option<String>,
     pub launcher_version: String,
+    /// Why the last install did not finish, while it still matters: an update
+    /// is still due, or nothing is installed. `None` otherwise.
+    pub install_error: Option<InstallError>,
+    /// The update is downloaded, unpacked and checked; only the swap is left.
+    pub update_staged: bool,
 }
 
 #[derive(Default)]
@@ -271,10 +428,20 @@ struct RemoteManifest {
 
 /// Fetch the version manifest (GitHub raw) — one request yielding every
 /// archive's current etag + the chromium version, so install/status never poll
-/// R2/S3 per-archive. Empty/None when unreachable.
+/// R2/S3 per-archive. Empty when unreachable, refusing, or out of budget — all
+/// three answer "no manifest", never an error, because `runtime_status` renders
+/// the interface behind this call.
 async fn fetch_manifest() -> RemoteManifest {
-    async fn inner() -> Option<RemoteManifest> {
-        let resp = reqwest::Client::new().get(MANIFEST_URL).send().await.ok()?;
+    fetch_manifest_at(MANIFEST_URL, MANIFEST_TIMEOUT).await
+}
+
+/// The fetch itself, address and budget passed in so a test can aim it at a
+/// server that never answers.
+async fn fetch_manifest_at(url: &str, budget: std::time::Duration) -> RemoteManifest {
+    async fn inner(url: &str, budget: std::time::Duration) -> Option<RemoteManifest> {
+        // One budget for connect + headers + body: reqwest hands the deadline on
+        // to the response, so a server that stalls mid-answer is bounded too.
+        let resp = reqwest::Client::new().get(url).timeout(budget).send().await.ok()?;
         if !resp.status().is_success() {
             return None;
         }
@@ -304,7 +471,33 @@ async fn fetch_manifest() -> RemoteManifest {
             min_launcher_version: str_field("min_launcher_version"),
         })
     }
-    inner().await.unwrap_or_default()
+    inner(url, budget).await.unwrap_or_default()
+}
+
+#[cfg(test)]
+mod manifest_fetch_tests {
+    /// #114: the first paint waits on this GET, so a server that accepts the
+    /// connection and then says nothing has to end as "no manifest" within the
+    /// budget — that silence, not a refused connection, is what hung the window.
+    #[tokio::test]
+    async fn a_server_that_never_answers_ends_as_no_manifest() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let held = tokio::spawn(async move {
+            let _conn = listener.accept().await;
+            std::future::pending::<()>().await;
+        });
+
+        let budget = std::time::Duration::from_millis(300);
+        let started = std::time::Instant::now();
+        let m = super::fetch_manifest_at(&format!("http://{addr}/runtime.json"), budget).await;
+        let waited = started.elapsed();
+        held.abort();
+
+        assert!(m.archives.is_empty(), "a silent server must not yield archives");
+        assert!(m.chromium_version.is_none());
+        assert!(waited < budget * 10, "the fetch waited {waited:?} on a silent server");
+    }
 }
 
 /// Migrate every `*.json` in `dir` to a new engine descriptor: bump
@@ -547,6 +740,12 @@ pub async fn ensure_profiles_migrated() {
     if local.applied_signature.as_deref() == Some(sig.as_str()) {
         return;
     }
+    // An engine still on another version (an update not in yet, or one that
+    // failed): its profiles keep its version; the install migrates after the swap.
+    let on_disk = binary_path().is_ok_and(|p| p.exists());
+    if on_disk && effective_installed_version(&local).is_some_and(|v| v != target) {
+        return;
+    }
     let n = migrate_all_to(
         &target,
         m.grease_brand.as_deref(),
@@ -615,6 +814,16 @@ fn engine_outdated(local: &Manifest, remote: &RemoteManifest, browser_key: &str)
 #[tauri::command]
 pub async fn runtime_status() -> Result<RuntimeStatus, String> {
     let spec = host_spec();
+    let layout = host_layout();
+    // An update that could not put the previous engine back: tried again here,
+    // off the async threads, unless an install (or the start's own try) has it.
+    if let (Some(l), Ok(one)) = (layout.clone(), install_lock().try_lock()) {
+        let _ = tokio::task::spawn_blocking(move || {
+            let _one = one;
+            recover_swap(&l);
+        })
+        .await;
+    }
     let installed = binary_path().map(|p| p.exists()).unwrap_or(false);
     let mut m = load_manifest();
     let manifest = fetch_manifest().await;
@@ -652,6 +861,13 @@ pub async fn runtime_status() -> Result<RuntimeStatus, String> {
                     .unwrap_or(false)
             })
             .unwrap_or(false);
+    // A failure matters while its update is still due or nothing is installed.
+    let install_error = load_install_error().filter(|_| update_available || !installed);
+    let update_staged = update_available
+        && layout
+            .as_ref()
+            .and_then(swap::staged_note)
+            .is_some_and(|s| remote.as_deref().is_none_or(|r| r == s.etag));
 
     Ok(RuntimeStatus {
         installed,
@@ -664,6 +880,8 @@ pub async fn runtime_status() -> Result<RuntimeStatus, String> {
         needs_newer_launcher,
         min_launcher_version: manifest.min_launcher_version,
         launcher_version: launcher_version().to_string(),
+        install_error,
+        update_staged,
     })
 }
 
@@ -672,9 +890,8 @@ pub async fn runtime_install(window: Window, force: bool) -> Result<RuntimeStatu
     let spec = host_spec().ok_or("Host platform has no published ShardBrowser engine archive")?;
     let base = runtime_dir().map_err(|e| e.to_string())?;
     fs::create_dir_all(&base).map_err(|e| e.to_string())?;
+    let layout = swap::Layout::host(base, &spec.browser.key);
 
-    let installed_now = binary_path().map(|p| p.exists()).unwrap_or(false);
-    let local = load_manifest();
     let manifest = fetch_manifest().await;
 
     // Refused rather than installed: this build could not configure it.
@@ -686,31 +903,55 @@ pub async fn runtime_install(window: Window, force: bool) -> Result<RuntimeStatu
         ));
     }
 
+    let one = install_lock().lock().await;
+    // The engine as it was, should an earlier update have been cut short, and
+    // the record read after that.
+    let l = layout.clone();
+    let _ = blocking(move || recover_swap(&l)).await;
+    let mut local = load_manifest();
+    let installed_now = binary_path().map(|p| p.exists()).unwrap_or(false);
     // Manifest unreachable → don't force a re-download.
     let need_browser =
         force || !installed_now || engine_outdated(&local, &manifest, &spec.browser.key);
-    let browser_etag = if need_browser {
-        // Wipe the old engine tree first. The archive extracts *over* the
-        // existing dir but never deletes files the new version dropped — most
-        // critically the previous `<version>.manifest`, which lingers beside the
-        // new one and poisons version detection into an endless re-download (and
-        // stale DLLs/.so could be loaded). Applies to win + linux + mac alike.
-        // Download BEFORE wiping. The old tree has to go — see above — but
-        // removing it first meant a download that failed left no engine at
-        // all, and the launcher could not start a single profile until the
-        // network came back. The archive is on disk by the time anything is
-        // removed.
-        let (archive, etag) = download_archive(&window, &spec.browser, &base)
-            .await
-            .map_err(|e| e.to_string())?;
-        let _ = fs::remove_dir_all(base.join(engine_root_dir()));
-        extract_archive(&window, &spec.browser, &archive, &base)
-            .await
-            .map_err(|e| e.to_string())?;
-        etag
-    } else {
-        local.browser_etag.clone().unwrap_or_default()
-    };
+    let target_ver = manifest
+        .chromium_version
+        .clone()
+        .unwrap_or_else(|| CHROMIUM_VERSION.to_string());
+    if need_browser {
+        match install_engine(&window, &spec.browser, &layout, &manifest, force).await {
+            Ok(record) => {
+                // Saved at once: the engine on disk is the new one, whatever fails next.
+                apply_record(&mut local, &record);
+                match save_manifest(&local) {
+                    Ok(()) => swap::settle(&layout),
+                    // The journal keeps it for the next start.
+                    Err(e) => eprintln!("[runtime] the engine is in, but its record could not be saved yet: {e}"),
+                }
+                clear_install_error();
+            }
+            Err(f) => {
+                drop(one);
+                return engine_failed(&window, f, &manifest, &spec.browser.key, &layout).await;
+            }
+        }
+    }
+    // The previous tree goes in the background, and a staged one nothing needs
+    // (not knowable offline); what stays (a Windows lock) is swept at the next start.
+    let reachable = manifest.chromium_version.is_some() || !manifest.archives.is_empty();
+    let stale = !need_browser && reachable && layout.staging().exists();
+    if need_browser || stale {
+        let l = layout.clone();
+        tauri::async_runtime::spawn(async move {
+            let _one = install_lock().lock().await;
+            let _ = tokio::task::spawn_blocking(move || {
+                if !swap::cleanup(&l, &swap::Ops::real(&l)) {
+                    eprintln!("[runtime] an earlier engine could not be removed yet; it goes at the next start");
+                }
+            })
+            .await;
+        });
+    }
+    drop(one);
 
     // The CDM is no longer fetched here. The engine's own component updater
     // downloads it into the profile's user-data-dir, which is the only place
@@ -727,15 +968,11 @@ pub async fn runtime_install(window: Window, force: bool) -> Result<RuntimeStatu
     let fp_etag = install_fingerprints(&window, force, local.fingerprints_etag.as_deref(), fp_remote)
         .await
         .map_err(|e| e.to_string())?
-        .or(local.fingerprints_etag);
+        .or(local.fingerprints_etag.clone());
 
     // Migrate already-created profiles AND the fingerprint library (incl.
     // user-added) to the new engine descriptor (UA + client_hints incl. grease).
     // Runs only when the version-or-grease signature changed since last time.
-    let target_ver = manifest
-        .chromium_version
-        .clone()
-        .unwrap_or_else(|| CHROMIUM_VERSION.to_string());
     let sig = format!(
         "{target_ver}|{}|{}|{}",
         manifest.grease_brand.as_deref().unwrap_or(""),
@@ -755,27 +992,177 @@ pub async fn runtime_install(window: Window, force: bool) -> Result<RuntimeStatu
     }
 
     save_manifest(&Manifest {
-        browser_etag: Some(browser_etag),
+        browser_etag: local.browser_etag.clone(),
         widevine_etag,
         fingerprints_etag: fp_etag,
         applied_chromium_version: Some(target_ver.clone()),
         applied_signature: Some(sig),
-        // Authoritative: we just successfully extracted exactly target_ver (the
-        // old tree was wiped first). Recording the known value beats re-reading
-        // it off disk, which is what let a leftover `<old>.manifest` keep the
-        // version "stuck" and re-download every launch.
-        installed_chromium_version: Some(target_ver),
-        // Carried through when nothing was downloaded.
-        installed_engine_build: if need_browser {
-            manifest.engine_build.clone()
-        } else {
-            local.installed_engine_build.clone()
-        },
+        // Recorded at the swap, never re-read off disk (a leftover
+        // `<old>.manifest` once kept the version "stuck"); an engine from
+        // before the record adopts the manifest's.
+        installed_chromium_version: local.installed_chromium_version.clone().or(Some(target_ver)),
+        installed_engine_build: local.installed_engine_build.clone(),
     })
     .map_err(|e| e.to_string())?;
 
     let _ = window.emit("runtime:done", ());
     runtime_status().await
+}
+
+/// The install stopped short. With the previous engine still there the window
+/// opens on it and the reason rides in the status; with none, it is an error.
+async fn engine_failed(
+    window: &Window,
+    f: swap::Failure,
+    manifest: &RemoteManifest,
+    key: &str,
+    layout: &swap::Layout,
+) -> Result<RuntimeStatus, String> {
+    let kept = binary_path().is_ok_and(|p| p.exists());
+    let err = InstallError {
+        stage: f.stage.name().to_string(),
+        message: f.message,
+        running_browsers: f.browsers,
+        starting: f.starting,
+        engine_kept: kept,
+        target: manifest.archives.get(key).cloned().or_else(|| manifest.chromium_version.clone()),
+        at_ms: std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_millis() as u64),
+    };
+    eprintln!("[runtime] engine install stopped at {}: {}", err.stage, err.message);
+    save_install_error(&err);
+    let etag = manifest.archives.get(key);
+    let update_staged = swap::staged_note(layout).is_some_and(|s| etag.is_none_or(|e| *e == s.etag));
+    let _ = window.emit("runtime:failed", Failed { err: &err, update_staged });
+    if kept {
+        runtime_status().await
+    } else {
+        Err(err.message)
+    }
+}
+
+/// Runs `f` off the async threads; a step that panicked is a failure.
+async fn blocking<T: Send + 'static>(
+    f: impl FnOnce() -> T + Send + 'static,
+) -> Result<T, swap::Failure> {
+    tokio::task::spawn_blocking(f).await.map_err(|e| {
+        swap::Failure::new(swap::Stage::Extract, format!("The engine install stopped: {e}"))
+    })
+}
+
+/// Clears `SWAPPING` however the swap ends.
+struct Swapping;
+
+impl Swapping {
+    fn on() -> Swapping {
+        SWAPPING.store(true, Ordering::SeqCst);
+        Swapping
+    }
+}
+
+impl Drop for Swapping {
+    fn drop(&mut self) {
+        SWAPPING.store(false, Ordering::SeqCst);
+    }
+}
+
+/// The engine archive downloaded (or kept from an earlier try), unpacked beside
+/// the live engine, checked and swapped in (#122). Nothing installed is touched
+/// before the swap, and the swap puts the previous engine back if it fails.
+async fn install_engine(
+    window: &Window,
+    spec: &ArchiveSpec,
+    layout: &swap::Layout,
+    manifest: &RemoteManifest,
+    force: bool,
+) -> Result<swap::Record, swap::Failure> {
+    let wanted = manifest.archives.get(&spec.key).cloned();
+    // Kept from an earlier try only while it is what the manifest offers now.
+    let fits = move |etag: &str| !force && wanted.as_deref().is_none_or(|w| w == etag);
+    // A GPU probe under way finishes first; none starts until this is done.
+    let _gate = engine_gate().write().await;
+    let l = layout.clone();
+    let kept = blocking(move || swap::staged(&l)).await.ok().flatten();
+    let staged = match kept.filter(|s| fits(&s.etag)) {
+        Some(s) => {
+            progress(window, spec, "extract", 0, 0, 100);
+            s
+        }
+        None => {
+            // An unfinished or outdated tree goes before the download: its room counts.
+            let l = layout.clone();
+            blocking(move || swap::drop_staging(&l, &swap::Ops::real(&l))).await??;
+            let l = layout.clone();
+            let dl = match blocking(move || swap::downloaded(&l)).await.ok().flatten().filter(|d| fits(&d.etag)) {
+                Some(d) => d,
+                None => download_engine(window, spec, layout).await?,
+            };
+            progress(window, spec, "extract", dl.size, dl.size, 100);
+            let l = layout.clone();
+            blocking(move || swap::stage(&l, &dl, &swap::Ops::real(&l))).await??
+        }
+    };
+    // The manifest's version, as profiles are migrated to it; the tree's own
+    // marker when the manifest cannot be read.
+    let record = swap::Record {
+        etag: staged.etag.clone(),
+        version: manifest
+            .chromium_version
+            .clone()
+            .or(staged.version)
+            .or_else(|| Some(CHROMIUM_VERSION.to_string())),
+        build: manifest.engine_build.clone(),
+    };
+    // Launches are refused while the folder moves; one under way refuses the swap.
+    let _swapping = Swapping::on();
+    let (l, r) = (layout.clone(), record.clone());
+    blocking(move || swap::swap(&l, &swap::Ops::real(&l), &r)).await??;
+    Ok(record)
+}
+
+/// Streams the engine archive into `<key>.part` and keeps it as the download.
+/// Refused before a byte is written when the disk cannot hold it unpacked too.
+async fn download_engine(
+    window: &Window,
+    spec: &ArchiveSpec,
+    layout: &swap::Layout,
+) -> Result<swap::Downloaded, swap::Failure> {
+    swap::drop_download(layout);
+    let ops = swap::Ops::real(layout);
+    let room = |total: u64| {
+        let need = total.saturating_mul(1 + swap::UNPACK_GUESS).saturating_add(swap::SPACE_MARGIN);
+        swap::room(&ops, &layout.base, need)
+    };
+    let etag = match fetch(window, spec, &layout.part(), room).await {
+        Ok(etag) => etag,
+        Err(e) => {
+            let _ = fs::remove_file(layout.part());
+            return Err(match e.downcast::<swap::Failure>() {
+                Ok(f) => f,
+                Err(e) => swap::Failure::new(
+                    swap::Stage::Download,
+                    format!("Downloading the engine failed ({e:#}). The engine you have was not touched."),
+                ),
+            });
+        }
+    };
+    swap::keep_download(layout, &etag).map_err(|e| {
+        swap::Failure::new(swap::Stage::Download, format!("Could not keep the downloaded engine: {e}"))
+    })
+}
+
+fn progress(window: &Window, spec: &ArchiveSpec, phase: &str, received: u64, total: u64, percent: u64) {
+    let _ = window.emit(
+        "runtime:progress",
+        serde_json::json!({
+            "label": spec.label,
+            "phase": phase,
+            "received": received,
+            "total": total,
+            "percent": percent,
+        }),
+    );
 }
 
 /// Download + seed fingerprint library. Bundled templates are always
@@ -803,7 +1190,12 @@ async fn install_fingerprints(
     let staging = dir.join(".staging");
     let _ = fs::remove_dir_all(&staging);
     fs::create_dir_all(&staging)?;
-    let etag = download_and_extract(window, &spec, &staging).await?;
+    let zip = staging.join(format!("{}.part", spec.key));
+    let etag = fetch(window, &spec, &zip, |_| Ok(())).await?;
+    progress(window, &spec, "extract", 0, 0, 100);
+    let (z, s) = (zip.clone(), staging.clone());
+    tokio::task::spawn_blocking(move || swap::unzip(&z, &s)).await??;
+    let _ = fs::remove_file(&zip);
 
     let src = staging.join(FINGERPRINTS_TOP_DIR);
     let walk = if src.exists() { src } else { staging.clone() };
@@ -828,26 +1220,20 @@ async fn install_fingerprints(
     Ok(Some(etag))
 }
 
-/// Stream archive → temp file → extract; emits `runtime:progress` events.
-/// Downloads `spec` beside `base` and hands back the archive and its etag,
-/// without touching anything that is already installed.
-async fn download_archive(window: &Window, spec: &ArchiveSpec, base: &Path) -> Result<(PathBuf, String)> {
-    download_and_extract_inner(window, spec, base, false).await
-}
-
-async fn download_and_extract(window: &Window, spec: &ArchiveSpec, base: &Path) -> Result<String> {
-    Ok(download_and_extract_inner(window, spec, base, true).await?.1)
-}
-
-async fn download_and_extract_inner(
+/// Streams `spec` into `part`, emitting `runtime:progress`. `room` vets the
+/// size the server announces before a byte is written. Returns the etag.
+async fn fetch(
     window: &Window,
     spec: &ArchiveSpec,
-    base: &Path,
-    extract: bool,
-) -> Result<(PathBuf, String)> {
+    part: &Path,
+    room: impl Fn(u64) -> Result<(), swap::Failure>,
+) -> Result<String> {
     let url = format!("{PUB_BASE}/{}", spec.key);
     let mut resp = reqwest::Client::new().get(&url).send().await?.error_for_status()?;
     let total = resp.content_length().unwrap_or(0);
+    if total > 0 {
+        room(total)?;
+    }
     let etag = resp
         .headers()
         .get("etag")
@@ -855,123 +1241,26 @@ async fn download_and_extract_inner(
         .map(|s| s.trim_matches('"').to_string())
         .unwrap_or_default();
 
-    let tmp = base.join(format!("{}.tmp", spec.key));
-    {
-        let mut out = tokio::fs::File::create(&tmp).await?;
-        let mut received: u64 = 0;
-        let mut last_pct: u64 = u64::MAX;
-        while let Some(chunk) = resp.chunk().await? {
-            out.write_all(&chunk).await?;
-            received += chunk.len() as u64;
-            // Emit once per integer percent.
-            let pct = if total > 0 { received * 100 / total } else { 0 };
-            if pct != last_pct {
-                last_pct = pct;
-                let _ = window.emit(
-                    "runtime:progress",
-                    serde_json::json!({
-                        "label": spec.label,
-                        "phase": "download",
-                        "received": received,
-                        "total": total,
-                        "percent": pct,
-                    }),
-                );
-            }
-        }
-        out.flush().await?;
-    }
-
-    // The caller asked for the archive only: it has something installed that
-    // it is not willing to remove until this much has succeeded.
-    if !extract {
-        return Ok((tmp, etag));
-    }
-    extract_archive(window, spec, &tmp, base).await?;
-    Ok((tmp, etag))
-}
-
-/// Unpacks an archive `download_archive` left behind, and removes it.
-async fn extract_archive(
-    window: &Window,
-    spec: &ArchiveSpec,
-    tmp: &Path,
-    base: &Path,
-) -> Result<()> {
-    let total = tokio::fs::metadata(tmp).await.map(|m| m.len()).unwrap_or(0);
-    let _ = window.emit(
-        "runtime:progress",
-        serde_json::json!({
-            "label": spec.label,
-            "phase": "extract",
-            "received": total,
-            "total": total,
-            "percent": 100,
-        }),
-    );
-
-    let zip_path = tmp.to_path_buf();
-    let dest = base.to_path_buf();
-    tokio::task::spawn_blocking(move || -> Result<()> {
-        // On macOS / Linux shell out to the system `unzip`: the Rust `zip`
-        // crate's `extract()` does not restore symlinks (rewrites them as
-        // text files) or +x bits, and Linux archives that store entries
-        // out-of-order vs. their parent dirs trip its file-create with
-        // ENOENT ("os error 2") before the parent dir entry is processed.
-        // `unzip` handles all three correctly.
-        #[cfg(unix)]
-        {
-            use std::process::Command;
-            fs::create_dir_all(&dest)?;
-            let out = Command::new("unzip")
-                .arg("-q")
-                .arg("-o")
-                .arg(&zip_path)
-                .arg("-d")
-                .arg(&dest)
-                .output()
-                .map_err(|e| anyhow::anyhow!(
-                    "system `unzip` not found ({e}); install with `apt install unzip` / `brew install unzip`"
-                ))?;
-            // unzip exit codes: 0 = clean, 1 = warnings (e.g. archives
-            // zipped on Windows have backslashes; extraction still
-            // completes correctly), 2+ = real fatal errors per unzip(1).
-            let code = out.status.code().unwrap_or(-1);
-            if code > 1 {
-                let stderr = String::from_utf8_lossy(&out.stderr);
-                anyhow::bail!(
-                    "unzip failed for {} (exit {}): {}",
-                    zip_path.display(),
-                    code,
-                    stderr.trim()
-                );
-            }
-            return Ok(());
-        }
-        #[cfg(not(unix))]
-        {
-            let f = fs::File::open(&zip_path)?;
-            let mut archive = zip::ZipArchive::new(f)?;
-            archive.extract(&dest)?;
-            Ok(())
-        }
-    })
-    .await??;
-
-    let _ = fs::remove_file(tmp);
-
-    // Linux/mac archives produced on Windows lose every Unix exec bit;
-    // restore +x on every ELF/Mach-O file under the runtime tree (not
-    // just the main binary — chrome spawns chrome_crashpad_handler,
-    // chrome_sandbox, etc., and they all need the exec bit).
-    #[cfg(unix)]
-    {
-        if let Ok(root) = runtime_dir() {
-            fix_unix_exec_bits(&root);
+    let mut out = tokio::fs::File::create(part).await?;
+    let mut received: u64 = 0;
+    let mut last_pct: u64 = u64::MAX;
+    while let Some(chunk) = resp.chunk().await? {
+        out.write_all(&chunk).await?;
+        received += chunk.len() as u64;
+        // Emit once per integer percent.
+        let pct = if total > 0 { received * 100 / total } else { 0 };
+        if pct != last_pct {
+            last_pct = pct;
+            progress(window, spec, "download", received, total, pct);
         }
     }
-
-    Ok(())
+    out.flush().await?;
+    out.sync_all().await?;
+    // A connection cut mid-body still ends as a 200: the announced length says so.
+    if total > 0 && received != total {
+        anyhow::bail!("the download stopped at {received} of {total} bytes");
+    }
+    Ok(etag)
 }
 
 /// First-4-bytes magic check; matches ELF + every Mach-O flavour.

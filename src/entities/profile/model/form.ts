@@ -16,6 +16,9 @@ export const defaultForm = (): ProfileForm => ({
   screen_w: 0,
   screen_h: 0,
   screen_custom: false,
+  screen_host: false,
+  screen_dpr: 0,
+  keep_focus: false,
   cookies_file: "",
 
   // Empty until snapped to gpusForOs[0] by useEffect.
@@ -30,6 +33,7 @@ export const defaultForm = (): ProfileForm => ({
 
   timezone: AUTO_TZ,
   language: AUTO_LANG,
+  ui_language: "system",
 
   webrtc: "auto",
   do_not_track: false,
@@ -74,9 +78,11 @@ export function fromStored(stored: any): ProfileForm {
   // Every profile has a screen, so its size alone says nothing about who chose
   // it. Only the marker does, and only it may travel back to disk.
   f.screen_custom = stored?._meta?.screen_custom === true;
+  f.keep_focus = stored?.window?.keep_focus === true;
   f.device_memory = stored?.navigator?.device_memory ?? 16;
   f.timezone = stored?.timezone ?? AUTO_TZ;
   f.language = stored?.navigator?.language ?? AUTO_LANG;
+  f.ui_language = stored?.ui_language === "profile" ? "profile" : "system";
   f.webrtc = (stored?.webrtc === "replace" ? "tcp_only" : stored?.webrtc) ?? "auto";
   f.do_not_track = !!stored?.navigator?.do_not_track;
 
@@ -90,7 +96,7 @@ export function fromStored(stored: any): ProfileForm {
   // Fonts default OFF (real); mirrors C++ default.
   f.noise_fonts = noiseMode(noise.fonts);
   f.blocked_ports = Array.isArray(stored?.blocked_ports)
-    ? stored.blocked_ports.filter((n: any) => typeof n === "number")
+    ? [...new Set<number>(stored.blocked_ports.filter((n: any) => typeof n === "number"))]
     : DEFAULT_BLOCKED_PORTS.slice();
 
   const geo = stored?.geolocation ?? {};
@@ -149,6 +155,9 @@ export function toStored(f: ProfileForm, lib: FingerprintEntry | null, prev?: an
   // "auto" sentinel: resolver replaces at launch; persists across edits.
   base.timezone = f.timezone;
   base.icu_locale = f.language === AUTO_LANG ? null : f.language;
+  // Absent = this computer's language, as before; only the opt-in is written.
+  if (f.ui_language === "profile") base.ui_language = "profile";
+  else delete base.ui_language;
   base.webrtc = f.webrtc;
 
   base.navigator = {
@@ -181,8 +190,9 @@ export function toStored(f: ProfileForm, lib: FingerprintEntry | null, prev?: an
   // A chosen resolution replaces the template's. avail_* keeps the template's
   // own insets — the menubar or taskbar strip — instead of being invented,
   // because a screen whose avail equals its full height is a screen with no
-  // system chrome, which no ordinary desktop has.
-  if (f.screen_custom && f.screen_w > 0 && f.screen_h > 0) {
+  // system chrome, which no ordinary desktop has. This computer's screen (a
+  // new profile's default) is written the same way, without the mark.
+  if ((f.screen_custom || f.screen_host) && f.screen_w > 0 && f.screen_h > 0) {
     const tpl = (base.screen || {}) as Record<string, number>;
     const insetW = Math.max((tpl.width ?? f.screen_w) - (tpl.avail_width ?? tpl.width ?? f.screen_w), 0);
     const insetH = Math.max((tpl.height ?? f.screen_h) - (tpl.avail_height ?? tpl.height ?? f.screen_h), 0);
@@ -194,6 +204,8 @@ export function toStored(f: ProfileForm, lib: FingerprintEntry | null, prev?: an
       height: f.screen_h,
       avail_width: availW,
       avail_height: availH,
+      // This computer's size goes with its scale (launch.rs `claim_host_screen`).
+      ...(f.screen_host && f.screen_dpr > 0 ? { device_pixel_ratio: f.screen_dpr } : {}),
     };
     // The window has to move with it. Without a window block the engine has no
     // --window-size to pass, and Chromium then sizes the window from the REAL
@@ -218,6 +230,32 @@ export function toStored(f: ProfileForm, lib: FingerprintEntry | null, prev?: an
     base.screen = { ...JSON.parse(JSON.stringify(lib.payload.screen)), refresh_rate: f.refresh_rate };
     if (lib.payload.window) base.window = JSON.parse(JSON.stringify(lib.payload.window));
     else delete base.window;
+  }
+
+  // "Always focused": one flag inside the window block, written only while it
+  // is on, so a profile that never asked for it keeps its window exactly as it
+  // was. Last of the window work on purpose — the branches above rebuild the
+  // block and would drop the flag.
+  if (f.keep_focus) {
+    const win = { ...(base.window || {}) };
+    win.keep_focus = true;
+    // A block with no size is one the launcher replaces at start when the
+    // profile claims a screen (fill_window_from_screen) — and the flag would go
+    // with it. So give it the very block the launcher would derive: the window
+    // fills the work area one pixel short, the viewport 87 px shorter again.
+    const scr = base.screen || {};
+    if (!(win.outer_width > 0 && win.outer_height > 0) && scr.width > 0 && scr.height > 0) {
+      const availW = Math.max(scr.avail_width ?? scr.width, 1);
+      const availH = Math.max(scr.avail_height ?? scr.height, 1);
+      const outerH = Math.max(availH - 1, 1);
+      win.outer_width = availW;
+      win.outer_height = outerH;
+      win.inner_width = availW;
+      win.inner_height = Math.max(outerH - 87, 1);
+    }
+    base.window = win;
+  } else if (base.window) {
+    delete base.window.keep_focus;
   }
 
   base.media_devices = {

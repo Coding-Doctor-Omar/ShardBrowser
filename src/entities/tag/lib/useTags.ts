@@ -1,16 +1,33 @@
 import { create } from "zustand";
 import { LABEL_COLORS, type LabelColorId } from "../../../shared/constants";
+import { handOver, windowStorage } from "../../../shared/lib/handOver";
+import { writeQueue } from "../../../shared/lib/writeQueue";
+import { onSpaceMoved } from "../../../shared/api/invoke";
+import { toast } from "../../../shared/model/toast";
+import { t } from "../../../shared/i18n";
 import type { Tag } from "../model/types";
+import { tagAssign, tagDelete, tagImport, tagList, tagSave } from "../model/api";
+import { fromLegacy, whole } from "./stored";
+import { teamRefusal } from "../../space";
 
-/// Tags and which profiles carry them. Kept by the app on this computer
-/// (owner decision, Phase 4: frontend only), in the shape the backend should
-/// store later: a registry of tags, and tag ids by profile id.
-const KEY = "shardx.tags";
-const VERSION = 1;
+/** Which of these profiles a team lets this person tag (Edit on each), and why not the rest.
+ *  The profile store says (it holds the rows); everyone may, until it does. */
+type AssignGuard = (profileIds: string[]) => { refused: string[]; reason: string | null };
+let assignGuard: AssignGuard = () => ({ refused: [], reason: null });
+export function setTagAssignGuard(fn: AssignGuard): void { assignGuard = fn; }
+
+/** A tag a team's server saved under another id than sent (tag_save in a team): the new one. */
+const renamed = new Map<string, string>();
+const finalId = (id: string) => renamed.get(id) ?? id;
+const remapped = (byProfile: Record<string, string[]>) =>
+  Object.fromEntries(Object.entries(byProfile).map(([pid, ids]) => [pid, ids.map(finalId)]));
+
+/// Tags, and tag ids by profile id. The backend keeps them (tags.rs); this
+/// store shows each change at once and sends it after.
+/** Where builds before the backend kept them, handed over once. */
+const LEGACY_KEY = "shardx.tags";
 /** Longest tag name; a chip has to stay a chip. */
 export const TAG_NAME_MAX = 32;
-
-type Saved = { version: number; tags: Tag[]; byProfile: Record<string, string[]> };
 
 const COLOR_IDS = LABEL_COLORS.map((c) => c.id) as readonly string[];
 
@@ -20,28 +37,15 @@ export function nextTagColor(tags: readonly Pick<Tag, "color">[]): LabelColorId 
   return COLOR_IDS[tags.length % COLOR_IDS.length] as LabelColorId;
 }
 
-/** A saved value, or nothing at all when it is missing, broken or of another version. */
-function load(): Pick<Saved, "tags" | "byProfile"> {
-  try {
-    const raw = JSON.parse(localStorage.getItem(KEY) ?? "null") as Partial<Saved> | null;
-    if (!raw || raw.version !== VERSION || !Array.isArray(raw.tags)) return { tags: [], byProfile: {} };
-    const tags = raw.tags.filter((t): t is Tag =>
-      !!t && typeof t.id === "string" && typeof t.name === "string" && COLOR_IDS.includes(t.color));
-    const known = new Set(tags.map((t) => t.id));
-    const byProfile: Record<string, string[]> = {};
-    for (const [pid, ids] of Object.entries(raw.byProfile ?? {})) {
-      if (!Array.isArray(ids)) continue;
-      const kept = ids.filter((id) => typeof id === "string" && known.has(id));
-      if (kept.length) byProfile[pid] = [...new Set(kept)];
-    }
-    return { tags, byProfile };
-  } catch {
-    return { tags: [], byProfile: {} };
+/** The changed profiles' whole lists, as `tag_assign` takes them: an empty list clears one. */
+function changedLists(before: Record<string, string[]>, after: Record<string, string[]>, ids: Iterable<string>): Record<string, string[]> {
+  const out: Record<string, string[]> = {};
+  for (const pid of ids) {
+    const next = after[pid] ?? [];
+    const prev = before[pid] ?? [];
+    if (next.length !== prev.length || next.some((x, i) => x !== prev[i])) out[pid] = next;
   }
-}
-
-function save(tags: Tag[], byProfile: Record<string, string[]>) {
-  try { localStorage.setItem(KEY, JSON.stringify({ version: VERSION, tags, byProfile })); } catch { /* private mode */ }
+  return out;
 }
 
 /** Trims, collapses internal whitespace and caps the length: the one
@@ -57,6 +61,11 @@ const newId = () => `t-${Math.random().toString(36).slice(2, 10)}`;
 export type TagStore = {
   tags: Tag[];
   byProfile: Record<string, string[]>;
+  /** Reads the tags from the backend once, after handing it the copy a
+   *  build before it kept here. Never rejects: a failure is shown. */
+  load: () => Promise<void>;
+  /** Reads them again (a change made elsewhere, another space). Never rejects. */
+  reload: () => Promise<void>;
   /** A new tag, or the one that already has this name (any case). Null for an empty name. */
   create: (name: string, color?: LabelColorId) => Tag | null;
   /** False when the name is empty or another tag has it. */
@@ -64,7 +73,8 @@ export type TagStore = {
   recolor: (id: string, color: LabelColorId) => void;
   /** Deletes the tag and takes it off every profile. */
   remove: (id: string) => void;
-  /** Puts a deleted tag back with the profiles it was on (Undo), at its old place in the list. */
+  /** Puts a deleted tag back with the profiles it was on (Undo), at its old place in the list;
+   *  a tag made since with its name gets those profiles instead. */
   restoreTag: (tag: Tag, byProfile: Record<string, string[]>, at?: number) => void;
   /** Gives the tag to every profile, or takes it off all when all have it. */
   toggle: (profileIds: string[], tagId: string) => void;
@@ -78,43 +88,128 @@ export type TagStore = {
   moveProfile: (from: string, to: string) => void;
 };
 
+let loading: Promise<void> | null = null;
+
 export const useTags = create<TagStore>((set, get) => {
-  const commit = (tags: Tag[], byProfile: Record<string, string[]>) => {
-    save(tags, byProfile);
-    set({ tags, byProfile });
+  let queue: ReturnType<typeof writeQueue> | null = null;
+  const read = async () => {
+    const s = await tagList();
+    set(whole(s.tags, s.by_profile, COLOR_IDS));
+    // A change made while this read was out shows again after it is sent.
+    queue?.shown();
+  };
+  const load = () => loading ??= (async () => {
+    try {
+      await handOver(windowStorage(), [LEGACY_KEY], (raw) => tagImport(fromLegacy(raw[LEGACY_KEY], COLOR_IDS)));
+      await read();
+    } catch (e) {
+      toast.fail({ title: t("useTags.loadFailed"), detail: e });
+    }
+  })();
+  // Sent after the first read, in order: a change can never land before the handed-over copy.
+  const send = (call: () => Promise<unknown>) => {
+    queue ??= writeQueue(load(), (e) => toast.fail({ title: t("useTags.saveFailed"), detail: e }), read);
+    void queue(call);
+  };
+  /** Shows the new lists and sends the profiles whose list changed. A profile a
+   *  team does not let this person tag keeps its list, and the toast says why. */
+  const assign = (wanted: Record<string, string[]>, touched: Iterable<string>) => {
+    const asked = [...touched];
+    const { refused, reason } = assignGuard(asked);
+    const byProfile = { ...wanted };
+    for (const pid of refused) {
+      const had = get().byProfile[pid];
+      if (had) byProfile[pid] = had; else delete byProfile[pid];
+    }
+    if (refused.length > 0) toast.fail({ title: t("useTags.saveFailed"), detail: reason });
+    const changes = changedLists(get().byProfile, byProfile, asked.filter((pid) => !refused.includes(pid)));
+    set({ byProfile });
+    // Ids read as it goes: a tag the team saved under another id is sent by that one.
+    if (Object.keys(changes).length) send(() => tagAssign(remapped(changes)));
+  };
+  /** A team's server answered a new tag with its own id: everything that names it follows. */
+  const settleId = (sent: Tag, saved: Tag | null | undefined) => {
+    if (!saved?.id || saved.id === sent.id) return;
+    renamed.set(sent.id, saved.id);
+    set({
+      tags: get().tags.map((x) => (x.id === sent.id ? { ...x, id: saved.id } : x)),
+      byProfile: Object.fromEntries(Object.entries(get().byProfile).map(([pid, ids]) => [pid, ids.map((x) => (x === sent.id ? saved.id : x))])),
+    });
+  };
+  /** Why a team does not take this tag change, said once; null when it does. */
+  const refuse = (action: "create" | "edit" | "delete"): boolean => {
+    const why = teamRefusal(action);
+    if (why) toast.fail({ title: t("useTags.saveFailed"), detail: why });
+    return !!why;
   };
   return {
-    ...load(),
+    tags: [],
+    byProfile: {},
+    load,
+    reload: async () => {
+      await load();
+      try { await read(); } catch (e) { toast.fail({ title: t("useTags.loadFailed"), detail: e }); }
+    },
     create: (name, color) => {
       const n = clean(name);
       if (!n) return null;
       const existing = get().tags.find((t) => same(t.name, n));
       if (existing) return existing;
+      if (refuse("create")) return null;
       const tag: Tag = { id: newId(), name: n, color: color ?? nextTagColor(get().tags) };
-      commit([...get().tags, tag], get().byProfile);
+      set({ tags: [...get().tags, tag] });
+      // A team lists its tags by name and may answer another id: the reply's is kept.
+      send(async () => settleId(tag, await tagSave(tag)));
       return tag;
     },
     rename: (id, name) => {
       const n = clean(name);
       if (!n || tagNameTaken(get().tags, n, id)) return false;
-      commit(get().tags.map((t) => (t.id === id ? { ...t, name: n } : t)), get().byProfile);
+      const tag = get().tags.find((t) => t.id === id);
+      if (!tag) return false;
+      if (refuse("edit")) return false;
+      const next = { ...tag, name: n };
+      set({ tags: get().tags.map((t) => (t.id === id ? next : t)) });
+      send(() => tagSave(next));
       return true;
     },
-    recolor: (id, color) => commit(get().tags.map((t) => (t.id === id ? { ...t, color } : t)), get().byProfile),
+    recolor: (id, color) => {
+      const tag = get().tags.find((t) => t.id === id);
+      if (!tag) return;
+      if (refuse("edit")) return;
+      const next = { ...tag, color };
+      set({ tags: get().tags.map((t) => (t.id === id ? next : t)) });
+      send(() => tagSave(next));
+    },
     remove: (id) => {
+      if (refuse("delete")) return;
       const byProfile: Record<string, string[]> = {};
       for (const [pid, ids] of Object.entries(get().byProfile)) {
         const kept = ids.filter((x) => x !== id);
         if (kept.length) byProfile[pid] = kept;
       }
-      commit(get().tags.filter((t) => t.id !== id), byProfile);
+      set({ tags: get().tags.filter((t) => t.id !== id), byProfile });
+      send(() => tagDelete(id));
     },
     restoreTag: (tag, byProfile, at) => {
-      const tags = [...get().tags];
-      if (!tags.some((x) => x.id === tag.id)) tags.splice(at ?? tags.length, 0, tag);
+      // A tag made since under its name takes its profiles: no two tags share a name.
+      const twin = get().tags.find((x) => x.id !== tag.id && same(x.name, tag.name));
+      if (!twin) {
+        if (refuse("create")) return;
+        const tags = [...get().tags];
+        if (!tags.some((x) => x.id === tag.id)) tags.splice(at ?? tags.length, 0, tag);
+        set({ tags });
+        send(async () => settleId(tag, await tagSave(tag, at)));
+      }
+      const back = twin?.id ?? tag.id;
       const merged = { ...get().byProfile };
-      for (const [pid, ids] of Object.entries(byProfile)) if (ids.includes(tag.id)) merged[pid] = [...new Set([...(merged[pid] ?? []), tag.id])];
-      commit(tags, merged);
+      const touched: string[] = [];
+      for (const [pid, ids] of Object.entries(byProfile)) {
+        if (!ids.includes(tag.id)) continue;
+        merged[pid] = [...new Set([...(merged[pid] ?? []), back])];
+        touched.push(pid);
+      }
+      assign(merged, touched);
     },
     toggle: (profileIds, tagId) => {
       const cur = get().byProfile;
@@ -125,25 +220,25 @@ export const useTags = create<TagStore>((set, get) => {
         const next = all ? ids.filter((x) => x !== tagId) : ids.includes(tagId) ? ids : [...ids, tagId];
         if (next.length) byProfile[pid] = next; else delete byProfile[pid];
       }
-      commit(get().tags, byProfile);
+      assign(byProfile, profileIds);
     },
     untag: (profileId, tagId) => {
       const ids = (get().byProfile[profileId] ?? []).filter((x) => x !== tagId);
       const byProfile = { ...get().byProfile };
       if (ids.length) byProfile[profileId] = ids; else delete byProfile[profileId];
-      commit(get().tags, byProfile);
+      assign(byProfile, [profileId]);
     },
     setTags: (profileId, tagIds) => {
       const known = new Set(get().tags.map((t) => t.id));
       const ids = [...new Set(tagIds)].filter((id) => known.has(id));
       const byProfile = { ...get().byProfile };
       if (ids.length) byProfile[profileId] = ids; else delete byProfile[profileId];
-      commit(get().tags, byProfile);
+      assign(byProfile, [profileId]);
     },
     forgetProfiles: (profileIds) => {
       const byProfile = { ...get().byProfile };
       for (const pid of profileIds) delete byProfile[pid];
-      commit(get().tags, byProfile);
+      assign(byProfile, profileIds);
     },
     moveProfile: (from, to) => {
       const ids = get().byProfile[from];
@@ -151,9 +246,16 @@ export const useTags = create<TagStore>((set, get) => {
       const byProfile = { ...get().byProfile };
       delete byProfile[from];
       byProfile[to] = [...new Set([...(byProfile[to] ?? []), ...ids])];
-      commit(get().tags, byProfile);
+      assign(byProfile, [from, to]);
     },
   };
+});
+
+// Another space: none of the old tags show while its own are read.
+onSpaceMoved(() => {
+  if (!loading) return;
+  useTags.setState({ tags: [], byProfile: {} });
+  void useTags.getState().reload();
 });
 
 /** The tags of one profile, in the registry's order. */

@@ -583,6 +583,64 @@ test("Mod+S commits the number being typed: a retry count past its range is save
   await expect(retry).toHaveValue("50");
 });
 
+// #66: the runner expands {{variables}} in every step number (runner.rs,
+// param_f64), so the editor has to let one be typed into a number box. The
+// reporter's own steps: add a wait step, type {{delay}} into Seconds.
+/** The last step of Pricing scrape 6h — the one just added — as it was saved. */
+const storedSeconds = (page: Page) =>
+  page.evaluate(() => {
+    const blocks = (window as unknown as SaveMock).__shardxMock.state.automation.find((p) => p.id === "proj-pricing")!.blocks;
+    return blocks[blocks.length - 1].params.seconds;
+  });
+
+test("{{delay}} typed into a wait step's Seconds is taken and saved", async ({ page }) => {
+  await openEditor(page);
+  await page.getByRole("button", { name: "Add step" }).click();
+  const picker = page.getByRole("dialog", { name: "Add a step" });
+  await picker.getByRole("combobox").fill("Wait");
+  await picker.getByRole("option", { name: /Pauses before the next step/ }).click();
+  const seconds = page.getByRole("textbox", { name: "Seconds" });
+  await expect(seconds).toHaveValue("2");
+
+  // A plain number is unchanged: taken as typed, nothing to complain about.
+  await seconds.fill("3");
+  await page.keyboard.press("Tab");
+  await expect(seconds).toHaveValue("3");
+  await expect(page.getByText("Enter a number.")).toHaveCount(0);
+
+  // Neither a number nor a reference: the message it always had.
+  await seconds.fill("later");
+  await page.keyboard.press("Tab");
+  await expect(page.getByText("Enter a number.")).toBeVisible();
+
+  // Half a reference is a name being typed, not a mistake.
+  await seconds.fill("{{d");
+  await expect(page.getByText("Enter a number.")).toHaveCount(0);
+
+  // Finished, it goes into the step and shows as itself.
+  await seconds.fill("{{delay}}");
+  await page.keyboard.press("Tab");
+  await expect(page.getByRole("textbox", { name: "Seconds" })).toHaveValue("{{delay}}");
+  await expect(page.getByText("Enter a number.")).toHaveCount(0);
+  await saveButton(page).click();
+  await expect(notice(page, "Project saved")).toBeVisible();
+  expect(await storedSeconds(page)).toBe("{{delay}}");
+});
+
+test("a number the run never expands still refuses a variable", async ({ page }) => {
+  await openEditor(page);
+  // A retry count is read as a number, never expanded, so {{times}} would only
+  // break the run: that box takes none.
+  const failOf = () => page.evaluate(() => (window as unknown as SaveMock).__shardxMock.state.automation.find((p) => p.id === "proj-pricing")!.blocks.find((b) => b.id === "b2")!.on_fail);
+  await page.locator('[data-step-card="b2"]').click();
+  const retry = page.getByRole("textbox", { name: "Try again" });
+  await retry.fill("{{times}}");
+  await page.keyboard.press("Tab");
+  await expect(page.getByText("Enter a number from 1 to 50.")).toBeVisible();
+  await expect(retry).toHaveValue("{{times}}");
+  expect(await failOf()).toEqual({ retry: 2 });
+});
+
 // Controller Ruling 9: Export writes the stored project, so unsaved changes
 // ask first, as Run does; the file's name and content are the saved ones.
 const exports = (page: Page) => page.evaluate(() => (window as unknown as SaveMock).__shardxMock.calls.automation_export ?? 0);

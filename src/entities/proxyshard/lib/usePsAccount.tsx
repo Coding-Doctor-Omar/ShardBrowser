@@ -39,7 +39,8 @@ export const usePsAccount = create<PsAccountStore>((set, get) => ({
         initing = true;
         try {
             const k = await psGetKey();
-            set({ key: k, keyLoaded: true });
+            // "checking" as the key lands: a waiter (the plans' keyWorks) never settles on "idle" in between.
+            set({ key: k, keyLoaded: true, ...(k ? { status: "checking" as const, err: "" } : {}) });
             if (k) get().refreshMe();
             else set({ status: "idle" });
         } catch {

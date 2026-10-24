@@ -2,6 +2,7 @@ import { Fragment, useMemo } from "react";
 import { Badge, Button, DataList, EmptyState, Tooltip, cn, type MenuItem } from "@proxyshard/shardx-ui-kit";
 import { blockIcon, runOrder, type LastRun, type LastRuns, type Project, type RunningOn } from "../../entities/automation";
 import { formatExactRun, formatRelativeRun } from "../../entities/profile";
+import { teamRefusal, useRightsChange } from "../../entities/space";
 import { AddIcon, ChevronRightIcon, CopyIcon, DeleteIcon, DownloadIcon, NavAutomationIcon, PlayIcon, RenameIcon, StepIcon, StopIcon } from "../../shared/icons";
 import { useLang, useT, type Lang, type T } from "../../shared/i18n";
 import { ListColumn } from "../../shared/ui/ListColumn";
@@ -151,12 +152,16 @@ export function ProjectsList({ projects, loading, failed, loadError, onRetry, ru
   const t = useT();
   const newest = useMemo(() => [...projects].sort((a, b) => b.updated_at - a.updated_at), [projects]);
   const byId = new Map(projects.map((p) => [p.id, p]));
+  // A team's projects: each item needs its right in the team, and says so when closed.
+  useRightsChange();
+  const closed = (why: string | null) => (why ? { disabled: true, hint: why } : {});
+  const noCreate = teamRefusal("create");
   const menuItems = (p: Project): MenuItem[] => [
-    { label: t("automation.rename"), icon: <RenameIcon className="size-3.5" />, onSelect: () => onRename(p) },
-    { label: t("automation.duplicate"), icon: <CopyIcon className="size-3.5" />, disabled: busy === p.id, onSelect: () => onDuplicate(p) },
-    { label: t("projectEditor.export"), icon: <DownloadIcon className="size-3.5" />, onSelect: () => onExport(p) },
+    { label: t("automation.rename"), icon: <RenameIcon className="size-3.5" />, onSelect: () => onRename(p), ...closed(teamRefusal("edit")) },
+    { label: t("automation.duplicate"), icon: <CopyIcon className="size-3.5" />, disabled: busy === p.id, onSelect: () => onDuplicate(p), ...closed(noCreate) },
+    { label: t("projectEditor.export"), icon: <DownloadIcon className="size-3.5" />, onSelect: () => onExport(p), ...closed(teamRefusal("take_out")) },
     { type: "separator" },
-    { label: t("automation.delete"), icon: <DeleteIcon className="size-3.5" />, danger: true, onSelect: () => onDelete(p) },
+    { label: t("automation.delete"), icon: <DeleteIcon className="size-3.5" />, danger: true, onSelect: () => onDelete(p), ...closed(teamRefusal("delete")) },
   ];
 
   return (
@@ -172,7 +177,7 @@ export function ProjectsList({ projects, loading, failed, loadError, onRetry, ru
         status={loading ? "loading" : failed ? "error" : "ready"}
         loading={<LoadingCards minWidth={CARD_MIN_WIDTH} height={CARD_HEIGHT} />}
         error={<LoadError what={t("listStates.projects")} error={loadError} onRetry={onRetry} />}
-        empty={<EmptyState icon={<NavAutomationIcon />} title={t("automation.emptyTitle")} hint={t("automation.emptyHint")} action={{ label: t("automation.emptyAction"), icon: <AddIcon />, onClick: onNew }} />}
+        empty={<EmptyState icon={<NavAutomationIcon />} title={t("automation.emptyTitle")} hint={t("automation.emptyHint")} action={noCreate ? undefined : { label: t("automation.emptyAction"), icon: <AddIcon />, onClick: onNew }} />}
         renderCard={(p, { active }) => (
           <ProjectCard p={p} active={active} running={runningOn.get(p.id)} last={lastRuns.get(p.id)} busy={busy === p.id} now={now} onRun={onRun} onStop={onStop} />
         )}

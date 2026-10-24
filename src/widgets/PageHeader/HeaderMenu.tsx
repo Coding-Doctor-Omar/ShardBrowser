@@ -1,5 +1,5 @@
 import { useRef, useState, type ReactNode } from "react";
-import { Button, IconButton, Menu, type MenuItem } from "@proxyshard/shardx-ui-kit";
+import { Button, IconButton, Menu, Tooltip, type MenuItem } from "@proxyshard/shardx-ui-kit";
 import { ChevronDownIcon, MoreIcon } from "../../shared/icons";
 import { useT } from "../../shared/i18n";
 
@@ -33,20 +33,23 @@ export function HeaderMenu({ items, label, trigger = "more", tour }: {
           onClick={() => setOpen((v) => !v)}
         />
       ) : (
-        <Button
-          ref={anchor}
-          variant="primary"
-          mode="filled"
-          size="xsmall"
-          leftIcon={trigger.icon}
-          rightIcon={<ChevronDownIcon className="size-3.5" />}
-          data-tour={tour}
-          aria-haspopup="menu"
-          aria-expanded={open}
-          onClick={() => setOpen((v) => !v)}
-        >
-          {trigger.label}
-        </Button>
+        // Its words in a tooltip only while a narrow header shows its icon alone.
+        <Tooltip content={trigger.label} whenTruncated>
+          <Button
+            ref={anchor}
+            variant="primary"
+            mode="filled"
+            size="xsmall"
+            leftIcon={trigger.icon}
+            rightIcon={<ChevronDownIcon className="size-3.5" />}
+            data-tour={tour}
+            aria-haspopup="menu"
+            aria-expanded={open}
+            onClick={() => setOpen((v) => !v)}
+          >
+            {trigger.label}
+          </Button>
+        </Tooltip>
       )}
       <Menu open={open} onOpenChange={setOpen} anchor={anchor} align="end" aria-label={name} items={items} />
     </>

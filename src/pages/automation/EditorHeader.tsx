@@ -6,6 +6,7 @@ import { keyCaps } from "../../shared/commands";
 import { useT } from "../../shared/i18n";
 import { PageHeader } from "../../widgets/PageHeader";
 import { RunSettingsButton } from "./RunSettingsButton";
+import { teamRefusal, useRightsChange } from "../../entities/space";
 
 /// The editor's one header row: "Projects" (a Back button to the list), the
 /// name, the description, Save, the run's settings, the browser column's
@@ -43,6 +44,9 @@ export function EditorHeader({
   const t = useT();
   const more = useRef<HTMLButtonElement>(null);
   const nameField = useRef<HTMLInputElement>(null);
+  // A team's project changes with Edit in the team: Save says why it waits.
+  useRightsChange();
+  const noEdit = teamRefusal("edit");
   useEffect(() => {
     if (!selectName) return;
     nameField.current?.focus();
@@ -85,6 +89,7 @@ export function EditorHeader({
           placeholder={untitled}
           className="col-start-1 row-start-1 w-full min-w-0 truncate rounded-control bg-transparent px-1 py-0.5 text-panel-title text-text-strong-950 placeholder:text-text-soft-400 transition-hover hover:bg-bg-hover focus-ring-inset"
           value={project.name}
+          readOnly={!!noEdit}
           onChange={(e) => onRename(e.target.value)}
         />
       </h1>
@@ -95,6 +100,7 @@ export function EditorHeader({
           placeholder={t("projectEditor.descriptionPlaceholder")}
           className="min-w-0 flex-1 truncate rounded-control bg-transparent px-1 py-0.5 text-body text-text-soft-400 placeholder:text-text-soft-400 transition-hover hover:bg-bg-hover focus-ring-inset"
           value={project.notes}
+          readOnly={!!noEdit}
           onChange={(e) => onDescribe(e.target.value)}
         />
       </Tooltip>
@@ -116,11 +122,12 @@ export function EditorHeader({
             {saveError && <span role="alert" className="min-w-0 truncate text-secondary text-error-text">{saveError}</span>}
             {/* Always there, so a screen reader hears the words arrive; hidden while empty. */}
             <span aria-live="polite" className="min-w-0 truncate text-secondary text-text-sub-600 empty:hidden">
-              {!saveError && dirty ? t("projectEditor.unsaved") : null}
+              {saveError ? null : noEdit ?? (dirty ? t("projectEditor.unsaved") : null)}
             </span>
             <Button
               variant="neutral" mode="stroke" size="xsmall"
-              disabled={!dirty}
+              disabled={!dirty || !!noEdit}
+              aria-description={noEdit ?? undefined}
               isLoading={saving}
               // The word stays beside the spinner while it saves.
               leftIcon={saving ? <SpinnerIcon aria-hidden="true" className="size-3.5" /> : undefined}
@@ -129,7 +136,7 @@ export function EditorHeader({
               {saving ? t("projectEditor.saving") : t("unsaved.save")}
             </Button>
           </div>
-          <RunSettingsButton run={project.run} onChange={onRunOpts} />
+          <RunSettingsButton run={project.run} onChange={onRunOpts} readOnly={!!noEdit} />
           <Button
             variant="neutral" mode="stroke" size="xsmall"
             data-browser-toggle=""

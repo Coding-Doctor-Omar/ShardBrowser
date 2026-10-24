@@ -48,6 +48,18 @@ describe('Select', () => {
     expect(screen.queryByRole('listbox')).toBeNull()
   })
 
+  it('inside a disabled fieldset it is off, as a native select would be', () => {
+    const onChange = vi.fn()
+    render(<fieldset disabled><Harness onChange={onChange} /></fieldset>)
+    expect(trigger()).toHaveAttribute('aria-disabled', 'true')
+    expect(trigger()).not.toHaveAttribute('tabindex')
+    fireEvent.click(trigger())
+    fireEvent.keyDown(trigger(), { key: 'ArrowDown' })
+    expect(trigger()).toHaveAttribute('aria-expanded', 'false')
+    expect(screen.queryByRole('listbox')).toBeNull()
+    expect(onChange).not.toHaveBeenCalled()
+  })
+
   it('typing a letter while closed opens on the match', async () => {
     render(<Harness />)
     trigger().focus()

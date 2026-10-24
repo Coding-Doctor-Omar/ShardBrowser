@@ -6,7 +6,8 @@
 
 #![cfg(feature = "automation")]
 
-use crate::{automation, cdp, launch, migrate, process, profile, proxy, store, wasm};
+use crate::space::{automation, profile, proxy};
+use crate::{cdp, launch, migrate, process, store, wasm};
 use anyhow::{anyhow, Context, Result};
 use serde::Serialize;
 use serde_json::{json, Value};
@@ -49,6 +50,8 @@ struct Run {
     /// resolves out of this rather than re-reading the file per call, and
     /// editing a project mid-run cannot change a call already in flight.
     projects: Vec<automation::Project>,
+    /// The space the run started in: its profile steps and starts go there or nowhere.
+    space: crate::space::Ticket,
 }
 
 fn runs() -> &'static Mutex<HashMap<String, Arc<Run>>> {
@@ -487,8 +490,8 @@ async fn touch_front(profile: &str) {
 }
 
 fn bound_is_mobile(id: &str) -> bool {
-    crate::profile::load_raw(id)
-        .map(|st| crate::profile::claims_mobile(&st.config))
+    crate::space::profile::load_raw(id)
+        .map(|st| crate::space::profile::claims_mobile(&st.config))
         .unwrap_or(false)
 }
 
@@ -536,7 +539,8 @@ fn make_profile(
     }
     cfg.insert("_meta".into(), meta);
 
-    let pm = crate::save_profile_core(None, Value::Object(cfg), false).map_err(|e| anyhow!(e))?;
+    // A run writes only this machine's own profiles; in a team this is refused.
+    let pm = crate::save_profile_here(None, Value::Object(cfg), false).map_err(|e| anyhow!(e))?;
     Ok(pm.id)
 }
 
@@ -613,7 +617,7 @@ async fn ensure_browser(bound: &Bound, run: &Run) -> Result<()> {
     }
     if process::Tracker::shared().cdp(&bound.id).is_none() {
         let (port, token) = bus_details().await?;
-        launch::launch_profile_synced(&bound.id, true, false, None, port, &token).await?;
+        launch::launch_for_run(&run.space, &bound.id, port, &token).await?;
     }
     let info = process::Tracker::shared()
         .cdp(&bound.id)
@@ -1163,6 +1167,11 @@ async fn run_block(
     }
     ctx.refuse_laundering(block)?;
 
+    // A profile or proxy step reads and writes the space the run started in, or none.
+    if block.kind.starts_with("profile.") || block.kind.starts_with("proxy.") {
+        run.space.still()?;
+    }
+
     // Profile, proxy, variable and file blocks touch no page, so they run
     // before the "is a browser attached" check below.
     match block.kind.as_str() {
@@ -1445,6 +1454,7 @@ async fn run_block(
             let proxy = match via {
                 "host" => None,
                 "profile" if !bound.id.is_empty() => {
+                    run.space.still()?;
                     let stored = profile::load_raw(&bound.id)?;
                     let bound_proxy = stored
                         .meta
@@ -2649,7 +2659,7 @@ async fn run_worker(
             cdp::detach(&id);
             let _ = process::Tracker::shared().kill(&id).await;
         }
-        let _ = profile::delete(&id);
+        let _ = profile::forget_temporary(&id);
         run.log(format!("cleaned up temporary profile {id}"));
     }
 }
@@ -2661,7 +2671,10 @@ pub async fn start(project_id: &str) -> Result<()> {
     if status(project_id).map(|s| s.running).unwrap_or(false) {
         return Err(anyhow!("that project is already running"));
     }
+    // Taken before the list, so the projects are the space's the run keeps to.
+    let space = crate::space::Ticket::now();
     let projects = automation::list()?;
+    space.still()?;
     let project = projects
         .iter()
         .find(|p| p.id == project_id)
@@ -2690,7 +2703,7 @@ pub async fn start(project_id: &str) -> Result<()> {
     }
     let seeds: Vec<Option<String>> = (0..threads).map(|_| None).collect();
 
-    let names = crate::profile::list_all()
+    let names = crate::space::profile::list_all()
         .unwrap_or_default()
         .into_iter()
         .map(|p| (p.id, p.name))
@@ -2725,6 +2738,7 @@ pub async fn start(project_id: &str) -> Result<()> {
         stop: Arc::new(AtomicBool::new(false)),
         rules: project.rules.clone(),
         projects,
+        space,
     });
     runs()
         .lock()
@@ -2816,9 +2830,11 @@ mod tests {
             rules: Vec::new(),
             created_at: 0,
             updated_at: 0,
+            revision: None,
         }
     }
 
+    /// A run logs to the config dir, so a test that makes one takes a test_root first.
     fn a_run(projects: Vec<automation::Project>) -> Run {
         Run {
             state: Mutex::new(RunState {
@@ -2832,6 +2848,7 @@ mod tests {
             stop: Arc::new(AtomicBool::new(false)),
             rules: Vec::new(),
             projects,
+            space: crate::space::Ticket::now(),
         }
     }
 
@@ -2908,6 +2925,7 @@ mod tests {
     /// runs, sets a variable, and hands back only what the caller asked for.
     #[tokio::test]
     async fn a_flow_runs_and_returns_what_was_asked_for() {
+        let _root = crate::store::test_root("runner");
         let callee = project(
             "flow-1",
             "Sets a token",
@@ -2948,6 +2966,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_flow_that_never_sets_an_asked_for_variable_is_an_error() {
+        let _root = crate::store::test_root("runner");
         // var.set, not log: log sits below the runner's browser check, so a
         // flow made of it would fail for the wrong reason.
         let mut callee = project(
@@ -2971,6 +2990,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_flow_calling_itself_is_refused_as_a_loop() {
+        let _root = crate::store::test_root("runner");
         let mut callee = project(
             "flow-3",
             "Recursive",
@@ -2993,6 +3013,7 @@ mod tests {
 
     #[tokio::test]
     async fn an_entry_that_is_gone_is_an_error_not_a_run_from_the_top() {
+        let _root = crate::store::test_root("runner");
         let mut callee = project(
             "flow-4",
             "Has one entry",
@@ -3018,6 +3039,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_named_entry_starts_below_it() {
+        let _root = crate::store::test_root("runner");
         let mut callee = project(
             "flow-5",
             "Two halves",
@@ -3044,6 +3066,7 @@ mod tests {
     /// module frame anywhere in the chain is enough.
     #[tokio::test]
     async fn a_module_cannot_navigate_off_the_web() {
+        let _root = crate::store::test_root("runner");
         let run = a_run(Vec::new());
         let mut ctx = CallCtx::new();
         let mut bound = Bound::default();
@@ -3071,6 +3094,7 @@ mod tests {
     /// call's own parameters changes that.
     #[tokio::test]
     async fn an_ungranted_flow_is_refused() {
+        let _root = crate::store::test_root("runner");
         let run = a_run(vec![project("flow-7", "Someone else's", Vec::new())]);
         let mut ctx = CallCtx::new();
         let mut bound = Bound::default();
@@ -3091,6 +3115,7 @@ mod tests {
     /// `goto {{url}}` is the module's reach with one step in between.
     #[tokio::test]
     async fn the_guard_reaches_through_a_flow() {
+        let _root = crate::store::test_root("runner");
         let run = a_run(Vec::new());
         let mut ctx = CallCtx::new();
         let mut bound = Bound::default();
@@ -3112,6 +3137,7 @@ mod tests {
     /// the OPERATOR wrote to run it.
     #[tokio::test]
     async fn a_modules_text_cannot_become_code_through_a_variable() {
+        let _root = crate::store::test_root("runner");
         let run = a_run(Vec::new());
         let mut ctx = CallCtx::new();
         let mut bound = Bound::default();
@@ -3150,6 +3176,7 @@ mod tests {
 
     #[tokio::test]
     async fn without_in_or_out_a_flow_shares_the_run_s_variables() {
+        let _root = crate::store::test_root("runner");
         let mut callee = project(
             "flow-6",
             "Shares",

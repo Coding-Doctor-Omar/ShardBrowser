@@ -42,7 +42,12 @@ test("Cyrillic address shows decoded in Name, Address and menu", async ({ page }
   await expect(menu).toHaveAttribute("aria-label", READ);
   await expect(menu.locator("[role='presentation']").first()).toHaveText(READ);
   await page.keyboard.press("Escape");
-  // The whole address, scheme and all, on hover: read too.
+  // The whole address, scheme and all, on hover where it is cut: read too.
+  // (At 1280 the stretched Address column shows it whole: owner, 2026-10-23.)
+  await page.setViewportSize({ width: 1024, height: 680 });
+  await expect.poll(() => r.locator("[data-cell='address'] span.truncate").evaluate((el) => el.scrollWidth > el.clientWidth)).toBe(true);
+  // The right-click left the pointer over the address; its tooltip opens on a fresh entry.
+  await page.mouse.move(0, 0);
   await r.locator("[data-cell='address'] span.truncate").hover();
   await expect(page.getByRole("tooltip")).toHaveText(`https://${READ}`);
   // A search in the words as they read.

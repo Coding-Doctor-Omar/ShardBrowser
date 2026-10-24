@@ -1,8 +1,10 @@
+import { openUrl } from "@tauri-apps/plugin-opener";
 import { t } from "../../shared/i18n";
+import { siteUrl } from "../../shared/lib/utils";
 import {
-  ComputerIcon, FolderAddIconApp, HelpCircleIcon, KeyboardIcon, MoonIcon, NavAutomationIcon, NavBookmarksIcon, NavBrowsersIcon,
+  ComputerIcon, FolderAddIconApp, GlobeIcon, HelpCircleIcon, KeyboardIcon, MoonIcon, NavAutomationIcon, NavBookmarksIcon, NavBrowsersIcon,
   NavExtensionsIcon, NavFingerprintsIcon, NavPatchLogIcon, NavSettingsIcon, NavShopIcon, NavTrashIcon,
-  RouteIcon, StopIcon, SunIcon,
+  RouteIcon, SpaceTeamIcon, StopIcon, SunIcon, AddIcon, SyncedIcon,
 } from "../../shared/icons";
 import type { Section } from "../../shared/types";
 import { useNav, type SettingsTab } from "../../shared/model/navigation";
@@ -20,6 +22,14 @@ import { leaveEditor, useAutomation } from "../../entities/automation";
 import { toast } from "../../shared/model/toast";
 // The lib file, not the tour's index, so the registry does not load the tour's screens.
 import { takeTheTour } from "../tour/lib/entryPoints";
+// The stores alone, likewise: the team dialogs load with the sidebar and the Team page.
+import { activeTeam, adminRefusal, useSpace } from "../../entities/space";
+import { useCreateTeam } from "../create-team/model/store";
+import { useJoinTeam } from "../join-team/model/store";
+import { useTeamAsk } from "../team-admin/model/store";
+import { useTeamTrash } from "../team-trash/model/store";
+import { syncConnected, useSync } from "../../entities/sync";
+import { syncNow } from "../sync-setup/model/actions";
 
 // A theme picked here is stored at once and shows at once; a theme still
 // waiting unsaved in Settings gives way to it.
@@ -53,6 +63,7 @@ export const SETTINGS_TABS: Record<SettingsTab, () => string> = {
   api: () => t("settings.tabApi"),
   helper: () => t("settings.tabHelper"),
   storage: () => t("settings.tabStorage"),
+  sync: () => t("settings.tabSync"),
   other: () => t("settings.tabOther"),
   about: () => t("settings.tabAbout"),
 };
@@ -120,6 +131,8 @@ export const APP_COMMANDS: readonly Command[] = [
     focusAfter: true,
     label: () => t("commands.newFolder"),
     surfaces: ["palette", "pageMenu"],
+    // A team's folders are its admin's (doors.rs folder_add).
+    disabled: () => adminRefusal(),
     run: () => useProfileUi.getState().setFolderDialog({ mode: "create" }),
   },
   {
@@ -139,6 +152,14 @@ export const APP_COMMANDS: readonly Command[] = [
     keywords: () => ["tutorial", "welcome", "onboarding", "replay"],
     surfaces: ["palette"],
     run: () => { void takeTheTour(); },
+  },
+  {
+    // The product site, in the system browser.
+    ...APP, id: "app.website", group: "help", icon: GlobeIcon,
+    label: () => t("commands.openWebsite"),
+    keywords: () => ["website", "site", "web", "shardbrowser"],
+    surfaces: ["palette"],
+    run: () => { void openUrl(siteUrl("palette")).catch(() => {}); },
   },
   {
     // Every running browser at once, from any page (IFACE-10). Listed only
@@ -186,7 +207,37 @@ export const APP_COMMANDS: readonly Command[] = [
   // The pages' names before F5 made titles equal the nav labels still find them.
   { ...APP, id: "nav.automation", group: "navigate", icon: NavAutomationIcon, label: () => t("sidebar.navProjects"), keywords: () => ["projects"], surfaces: ["palette"], run: go("automation") },
   { ...APP, id: "nav.proxyshard", group: "navigate", icon: NavShopIcon, label: () => t("sidebar.navAccountShop"), keywords: () => ["account", "shop"], surfaces: ["palette"], run: go("proxyshard") },
-  { ...APP, id: "nav.trash", group: "navigate", icon: NavTrashIcon, label: () => t("sidebar.navTrash"), surfaces: ["palette"], run: go("trash") },
+  // In a team: for its admin, and for a member once they see rows of its Trash.
+  { ...APP, id: "nav.trash", group: "navigate", icon: NavTrashIcon, label: () => t("sidebar.navTrash"), surfaces: ["palette"], when: () => { const team = activeTeam(useSpace.getState().state); return !team || team.admin || useTeamTrash.getState().seen; }, run: go("trash") },
+  // The Team page has no row of its own: the space menu and these reach it.
+  {
+    ...APP, id: "nav.team", group: "navigate", icon: SpaceTeamIcon, label: () => t("team.pageTitle"),
+    keywords: () => ["team", "members", "rights", "access", "admin"], surfaces: ["palette"], run: go("team"),
+  },
+  {
+    ...APP, id: "team.create", group: "create", icon: SpaceTeamIcon, focusAfter: true,
+    label: () => t("commands.createTeam"), keywords: () => ["team", "server"], surfaces: ["palette"],
+    run: () => useCreateTeam.getState().setOpen(true),
+  },
+  {
+    ...APP, id: "team.join", group: "create", icon: SpaceTeamIcon, focusAfter: true,
+    label: () => t("commands.joinTeam"), keywords: () => ["team", "invite"], surfaces: ["palette"],
+    run: () => useJoinTeam.getState().setOpen(true),
+  },
+  {
+    // Only for the team's admin, in that team's space.
+    ...APP, id: "team.addMember", group: "create", icon: AddIcon, focusAfter: true,
+    label: () => t("commands.addTeamMember"), keywords: () => ["team", "invite", "member"], surfaces: ["palette"],
+    when: () => !!activeTeam(useSpace.getState().state)?.admin,
+    run: () => { useTeamAsk.getState().askAddMember(true); void useNav.getState().setSection("team"); },
+  },
+  {
+    // Personal sync: a sync of everything now, while it is connected.
+    ...APP, id: "sync.now", group: "run", icon: SyncedIcon,
+    label: () => t("commands.syncNow"), keywords: () => ["sync", "devices", "cloud"], surfaces: ["palette"],
+    when: () => syncConnected(),
+    run: () => syncNow(),
+  },
   { ...APP, id: "nav.settings", group: "navigate", icon: NavSettingsIcon, label: () => t("sidebar.navSettings"), keys: ["G S"], keyWhere: "app", singleKey: true, surfaces: ["palette", "sheet"], run: go("settings") },
   {
     ...APP, id: "nav.folders", group: "navigate",
@@ -198,6 +249,8 @@ export const APP_COMMANDS: readonly Command[] = [
     ...APP, id: `settings.${tab}`, group: "settings", icon: NavSettingsIcon,
     label: () => SETTINGS_TABS[tab](),
     surfaces: ["palette"],
+    // No Sync tab on a backend without sync commands.
+    ...(tab === "sync" ? { when: () => !useSync.getState().missing } : {}),
     run: () => { void useNav.getState().openSettings(tab, { focus: true }); },
   })),
   // The palette's own keys, for the sheet and the palette's footer.

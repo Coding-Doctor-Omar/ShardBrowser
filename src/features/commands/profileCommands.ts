@@ -1,14 +1,20 @@
 import { t } from "../../shared/i18n";
 import {
   AddIcon, ChevronDownIcon, ChevronRightIcon, CloseIcon, CopyIcon, DeleteIcon, DownloadIcon, EditIcon, FolderIcon, FolderMinusIconApp, IdCardIcon, PeekIcon, PinIconApp,
-  PlayIcon, RegenerateIcon, RenameIcon, RouteIcon, StopIcon, SyncIcon, TagIcon, UnpinIconApp, UploadIcon,
+  PlayIcon, RegenerateIcon, RenameIcon, RouteIcon, StopIcon, SyncIcon, SyncedIcon, SyncOffIcon, TagIcon, UnpinIconApp, UploadIcon,
 } from "../../shared/icons";
+import { syncConnected, useSync } from "../../entities/sync";
+import { openHereInstead, setProfilesSync } from "../profile-sync";
 import { processList, profileFocusWindow } from "../../entities/profile";
 import { clip } from "../../shared/lib/clipboard";
 import { toast } from "../../shared/model/toast";
 import { useNav } from "../../shared/model/navigation";
 import { defineCommands, type Command, type RunFrom, type Subject } from "../../shared/commands";
-import { findView, resolveId, selectVisible, setContinueByHand, syncBlockReason, useOverviewFolds, useProfile, useProfileUi, viewFolds, type ProfileMeta } from "../../entities/profile";
+import {
+  cloneRefusal, findView, folderNamesOf, isTeamRow, moveRefusal, profileRefusal, resolveId, selectVisible, setContinueByHand, startRefusal, syncBlockReason,
+  useOverviewFolds, useProfile, useProfileUi, viewFolds, type ProfileMeta, type ProfileRight,
+} from "../../entities/profile";
+import { createAnywhereRefusal, inTeam } from "../../entities/space";
 import { rowActionIcons } from "../../shared/ui/rowActionIcons";
 import { openProfileForm } from "../profile-form/model/useProfileForm";
 
@@ -50,6 +56,25 @@ const atRow = (id: string, from: RunFrom, then: () => void): void | Promise<void
 
 const LIST = { area: "profiles", page: "profiles" } as const;
 
+/// Why none of `list` may be acted on, or null when one may: a team's rights
+/// on each row, or another device holding it. Those that may are acted on;
+/// the store says which it left out (useProfile's guards).
+function noneMay(list: ProfileMeta[], why: (p: ProfileMeta, many: boolean) => string | null): string | null {
+  const many = list.length > 1;
+  let first: string | null = null;
+  for (const p of list) {
+    const r = why(p, many);
+    if (r === null) return null;
+    first ??= r;
+  }
+  return first;
+}
+const lacks = (right: ProfileRight) => (s: Subject) => noneMay(metas(s), (p, many) => profileRefusal(p, right, many));
+/** A new profile needs Create in some folder of the team. */
+const createRefusal = () => createAnywhereRefusal(folderNamesOf(data().profiles, data().folderRegistry));
+/** Only rows of the personal space: a team's cookies and pins are not offered yet (perm.rs, space/mod.rs). */
+const personalRows = (s: Subject) => metas(s).every((p) => !isTeamRow(p));
+
 /// Every run follows the registry's contract (`Command.run`): the ids a run
 /// answers with are the ones that failed, which its own toast already names,
 /// and the selection stays exactly as it was (owner rule: bulk actions keep
@@ -63,7 +88,15 @@ export const PROFILE_COMMANDS: readonly Command[] = [
     when: (s) => s.ids.some((id) => !isRunning(id)),
     // The bulk bar keeps Start whatever runs (it ignores \`when\`): with every
     // selected profile running, it says why it does nothing (EMIL-05).
-    disabled: (s) => (s.ids.length > 0 && s.ids.every(isRunning) ? t("commands.alreadyRunning") : null),
+    disabled: (s) => {
+      if (s.ids.length > 0 && s.ids.every(isRunning)) return t("commands.alreadyRunning");
+      // Every one left is open on another computer (personal sync).
+      const idle = metas(s).filter((p) => !isRunning(p.id));
+      const held = idle.find((p) => p.sync?.on && p.sync.open_on);
+      if (held && idle.every((p) => p.sync?.on && p.sync.open_on)) return t("errors.openElsewhere", { device: held.sync!.open_on! });
+      // A team's: no Start on any of them, or each open on another device.
+      return noneMay(idle, startRefusal);
+    },
     run: async (s) => {
       const idle = metas(s).filter((p) => !isRunning(p.id));
       // One: startStop resolves to the reason it failed, or null (C25).
@@ -94,6 +127,8 @@ export const PROFILE_COMMANDS: readonly Command[] = [
     label: () => t("commands.copyCdp"),
     surfaces: ["rowMenu", "paletteActions"],
     when: (s) => s.ids.length === 1 && s.ids.some(isLive),
+    // Without Cookies the team keeps the debugging address closed (process_list leaves it out).
+    disabled: (s) => (metas(s).some((p) => profileRefusal(p, "cookies")) ? t("rights.cdpNeedsCookies") : null),
     run: async (s) => {
       const one = metas(s).find((p) => isLive(p.id));
       if (!one) return;
@@ -140,6 +175,15 @@ export const PROFILE_COMMANDS: readonly Command[] = [
     },
   },
   {
+    // A profile another computer holds (personal sync): take it here and start it,
+    // for when that computer is off or lost.
+    ...LIST, id: "profile.takeLease", scope: "active", group: "run", icon: PlayIcon,
+    label: () => t("commands.openHereInstead"),
+    surfaces: ["rowMenu", "pinnedMenu", "paletteActions"],
+    when: (s) => metas(s).some((p) => !isRunning(p.id) && p.sync?.on && !!p.sync.open_on),
+    run: async (s) => { const p = metas(s)[0]; if (p && !(await openHereInstead(p))) return [p.id]; },
+  },
+  {
     ...LIST, id: "profile.openPeek", scope: "active", group: "open", icon: PeekIcon,
     focusAfter: true,
     label: () => t("commands.openPeek"), keys: ["Enter", "Space"], keysJoin: "or",
@@ -164,7 +208,16 @@ export const PROFILE_COMMANDS: readonly Command[] = [
     ...LIST, id: "profile.edit", scope: "active", group: "open", icon: EditIcon,
     focusAfter: true,
     label: () => t("commands.edit"),
-    paletteLabel: (s) => t("commands.editNamed", { name: metas(s)[0]?.name ?? "" }),
+    // Without Edit the form opens to read: the palette says so.
+    paletteLabel: (s) => {
+      const p = metas(s)[0];
+      return p && profileRefusal(p, "edit") ? t("commands.viewNamed", { name: p.name }) : t("commands.editNamed", { name: p?.name ?? "" });
+    },
+    // Without Edit the row's menu says View, as Peek does.
+    menuLabel: (s) => {
+      const p = metas(s)[0];
+      return p && profileRefusal(p, "edit") ? t("peek.view") : t("commands.edit");
+    },
     surfaces: ["rowMenu", "palette", "paletteActions"],
     run: (s, { from }) => atRow(s.ids[0], from, () => openProfileForm({ mode: "edit", id: s.ids[0] })),
   },
@@ -179,6 +232,7 @@ export const PROFILE_COMMANDS: readonly Command[] = [
     focusAfter: true,
     label: () => t("commands.rename"), keys: ["E"],
     surfaces: ["rowMenu", "paletteActions", "sheet"],
+    disabled: lacks("edit"),
     // `keyed`: its close gives the keyboard back to the row (merge-columns-fix1).
     run: (s, { from }) => atRow(s.ids[0], from, () => ui().startEdit(s.ids[0], "name", { keyed: from === "keys" })),
   },
@@ -186,13 +240,16 @@ export const PROFILE_COMMANDS: readonly Command[] = [
     ...LIST, id: "profile.clone", scope: "active", group: "open", icon: CopyIcon,
     label: () => t("commands.clone"),
     surfaces: ["rowMenu", "hover", "paletteActions", "peekMenu"],
+    // The copy is a new profile in the same folder.
+    disabled: (s) => noneMay(metas(s), (p) => cloneRefusal(p)),
     run: (s) => data().cloneProfile(s.ids[0]),
   },
   {
     ...LIST, id: "profile.pin", scope: "active", group: "open", icon: PinIconApp,
     label: () => t("commands.pin"),
     surfaces: ["rowMenu", "hover", "paletteActions", "peekMenu"],
-    when: (s) => metas(s).some((p) => !p.pinned),
+    // A pin is this computer's own mark, and a team's profiles keep none yet (space/mod.rs set_pin).
+    when: (s) => personalRows(s) && metas(s).some((p) => !p.pinned),
     run: async (s) => { const p = metas(s)[0]; if (p) await data().togglePin(p); },
   },
   {
@@ -200,7 +257,7 @@ export const PROFILE_COMMANDS: readonly Command[] = [
     ...LIST, id: "profile.unpin", scope: "active", group: "open", icon: UnpinIconApp,
     label: () => t("commands.unpin"),
     surfaces: ["rowMenu", "hover", "pinnedMenu", "paletteActions", "peekMenu"],
-    when: (s) => metas(s).some((p) => p.pinned),
+    when: (s) => personalRows(s) && metas(s).some((p) => p.pinned),
     run: async (s) => { const p = metas(s)[0]; if (p) await data().togglePin(p); },
   },
   {
@@ -208,6 +265,8 @@ export const PROFILE_COMMANDS: readonly Command[] = [
     focusAfter: true,
     label: () => t("commands.moveToFolder"), keys: ["M"],
     surfaces: ["rowMenu", "bulkBar", "palette", "paletteActions", "peekMenu", "sheet"],
+    // Where they may go is the picker's to say: each folder needs Create there.
+    disabled: lacks("edit"),
     run: (s, { from }) => {
       // The bar's button opens its picker and closes it again, as Tags does.
       if (from === "bulkBar" && ui().folderPicker?.from === "bar") { ui().setFolderPicker(null); return; }
@@ -222,6 +281,7 @@ export const PROFILE_COMMANDS: readonly Command[] = [
     label: () => t("commands.removeFromFolder"),
     surfaces: ["rowMenu", "palette", "paletteActions", "peekMenu"],
     when: (s) => metas(s).some((p) => p.folder !== ""),
+    disabled: (s) => noneMay(metas(s).filter((p) => p.folder !== ""), (p, many) => moveRefusal(p, "", many)),
     run: async (s) => {
       const ids = metas(s).filter((p) => p.folder !== "").map((p) => p.id);
       await data().moveMany(ids, "");
@@ -234,6 +294,8 @@ export const PROFILE_COMMANDS: readonly Command[] = [
     focusAfter: true,
     label: () => t("commands.editTags"), keys: ["T"],
     surfaces: ["rowMenu", "bulkBar", "palette", "paletteActions", "peekMenu", "sheet"],
+    // Which tags a profile carries is the profile's: Edit on it (doors.rs tag_assign).
+    disabled: lacks("edit"),
     run: (s, { from }) => {
       // The bar's button opens its picker and closes it again.
       if (from === "bulkBar" && ui().tagPicker?.from === "bar") { ui().setTagPicker(null); return; }
@@ -248,6 +310,7 @@ export const PROFILE_COMMANDS: readonly Command[] = [
     focusAfter: true,
     label: (n) => (n > 1 ? t("commands.assignProxies") : t("commands.changeProxy")), keys: ["P"],
     surfaces: ["rowMenu", "bulkBar", "palette", "paletteActions", "peekMenu", "sheet"],
+    disabled: lacks("edit"),
     run: (s, { from }) => {
       // One row the list shows (its menu, its keys, or the palette after it
       // brings the row into view): that row's proxy cell picker. Otherwise,
@@ -263,16 +326,42 @@ export const PROFILE_COMMANDS: readonly Command[] = [
     focusAfter: true,
     label: () => t("commands.regenerate"),
     surfaces: ["bulkMore", "palette", "paletteActions"],
+    disabled: lacks("edit"),
     // It asks first; a cancel is not a failure, and the store's own toast
     // names what it skipped or could not change (Pair 37 review, M2).
     run: async (s) => { await data().regenerateFingerprints(s.ids); },
+  },
+  {
+    // Personal sync, on the rows it can carry (they have `sync`: the personal
+    // space, while connected). Every profile syncs while All profiles is on.
+    ...LIST, id: "profile.sync", scope: "selection", group: "organize", icon: SyncedIcon,
+    label: (n) => (n > 1 ? t("commands.syncProfiles") : t("commands.syncProfile")),
+    surfaces: ["rowMenu", "bulkMore", "palette", "paletteActions", "peekMenu"],
+    when: (s) => syncConnected() && metas(s).some((p) => p.sync && !p.sync.on),
+    run: (s) => setProfilesSync(metas(s).filter((p) => p.sync && !p.sync.on).map((p) => p.id), true),
+  },
+  {
+    ...LIST, id: "profile.stopSync", scope: "selection", group: "organize", icon: SyncOffIcon,
+    label: () => t("commands.stopSyncing"),
+    surfaces: ["rowMenu", "bulkMore", "palette", "paletteActions", "peekMenu"],
+    when: (s) => syncConnected() && metas(s).some((p) => p.sync?.on),
+    disabled: (s) => {
+      // On for all of them: it cannot be turned off one by one.
+      if (useSync.getState().state?.kinds.profiles === "all") return t("commands.syncAllOn");
+      // Held by another computer: stopping here would let both run it.
+      const on = metas(s).filter((p) => p.sync?.on);
+      const held = on.find((p) => p.sync?.open_on);
+      if (held && on.every((p) => p.sync?.open_on)) return t("commands.syncStopLeased", { device: held.sync!.open_on! });
+      return null;
+    },
+    run: (s) => setProfilesSync(metas(s).filter((p) => p.sync?.on).map((p) => p.id), false),
   },
   {
     ...LIST, id: "profile.launchSynced", scope: "selection", group: "run", icon: SyncIcon,
     label: () => t("commands.launchSynced"),
     surfaces: ["bulkMore", "palette"],
     when: (s) => s.ids.length >= 2,
-    disabled: (s) => syncBlockReason(s.ids) || null,
+    disabled: (s) => syncBlockReason(s.ids) || metas(s).map((p) => startRefusal(p, true)).find((r) => r !== null) || null,
     // A cancel is not a failure; the store's own toast names one (M2).
     run: async (s) => { await data().launchSynced(s.ids); },
   },
@@ -280,6 +369,8 @@ export const PROFILE_COMMANDS: readonly Command[] = [
     ...LIST, id: "profile.export", scope: "selection", group: "copy", icon: CopyIcon,
     label: () => t("commands.exportJson"),
     surfaces: ["bulkMore", "palette"],
+    // A copy of its settings leaves the team: Take out.
+    disabled: lacks("take_out"),
     run: (s) => data().exportMany(s.ids),
   },
   {
@@ -295,12 +386,14 @@ export const PROFILE_COMMANDS: readonly Command[] = [
     ...LIST, id: "profile.exportCookies", scope: "active", group: "copy", icon: UploadIcon,
     label: () => t("commands.exportCookies"),
     surfaces: ["rowMenu", "paletteActions", "peekMenu"],
+    when: personalRows,
     run: async (s) => { const p = metas(s)[0]; if (p) await data().exportCookies(p); },
   },
   {
     ...LIST, id: "profile.importCookies", scope: "active", group: "copy", icon: DownloadIcon,
     label: () => t("commands.importCookies"),
     surfaces: ["rowMenu", "paletteActions", "peekMenu"],
+    when: personalRows,
     // A running browser holds its cookie store: the item says so before the
     // click (Pair 18 review, M6), rather than a toast after it.
     disabled: (s) => (s.ids.some(isRunning) ? t("profileRow.stopFirst") : null),
@@ -308,8 +401,10 @@ export const PROFILE_COMMANDS: readonly Command[] = [
   },
   {
     ...LIST, id: "profile.trash", scope: "selection", group: "danger", icon: DeleteIcon, danger: true,
-    label: () => t("commands.moveToTrash"), keys: ["Delete", "Backspace"], keysJoin: "or",
+    // A team's go to its server's Trash for 30 days, after a question.
+    label: () => (inTeam() ? t("commands.delete") : t("commands.moveToTrash")), keys: ["Delete", "Backspace"], keysJoin: "or",
     surfaces: ["rowMenu", "hover", "bulkBar", "palette", "paletteActions", "peekMenu", "sheet"],
+    disabled: lacks("delete"),
     run: async (s) => {
       // The selected ones, read before the optimistic removal prunes them.
       const { selected } = ui();
@@ -374,6 +469,7 @@ export const PROFILE_COMMANDS: readonly Command[] = [
     focusAfter: true,
     label: () => t("commands.newProfile"), keys: ["C"], keyWhere: "page", singleKey: true,
     surfaces: ["palette", "sheet"],
+    disabled: createRefusal,
     run: async () => {
       if (await useNav.getState().setSection("profiles")) openProfileForm({ mode: "create" });
     },
@@ -382,6 +478,7 @@ export const PROFILE_COMMANDS: readonly Command[] = [
     ...LIST, id: "profile.import", scope: "page", group: "create", icon: DownloadIcon,
     label: () => t("commands.importProfiles"),
     surfaces: ["pageMenu", "palette"],
+    disabled: createRefusal,
     run: async () => { if (await useNav.getState().setSection("profiles")) await data().importFromClipboard(); },
   },
   // Edit view: a custom View's own filters are locked on the list; this opens

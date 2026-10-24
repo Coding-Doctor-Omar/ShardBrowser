@@ -4,6 +4,7 @@ import { useT } from "../../shared/i18n";
 import { ViewIcon } from "../../shared/ui/ViewIcon";
 import { refocusPageFilter } from "../../shared/lib/focus";
 import { emptyFilters, leaveList, useCurrentView, useProfileUi, useViewModified, viewName } from "../../entities/profile";
+import { activeTeam, useSpace } from "../../entities/space";
 import { ImportProfilesButton, NewProfileButton } from "../../features/manage-profiles";
 
 /// What the Profiles list says when it shows no rows, by what hid them: the
@@ -20,6 +21,8 @@ export function ProfileListEmpty() {
   const resetView = useProfileUi((s) => s.resetView);
   const view = useCurrentView();
   const modified = useViewModified();
+  const team = useSpace((s) => activeTeam(s.state));
+  const unread = useSpace((s) => s.state?.team_status?.state !== undefined && s.state.team_status.state !== "ready" && !s.state.team_status.synced_at);
 
   if (search.trim()) {
     return (
@@ -55,13 +58,35 @@ export function ProfileListEmpty() {
       />
     );
   }
+  // A team's server that never answered gave nothing to list yet (the banner says why).
+  if (team && unread) {
+    return (
+      <EmptyState
+        icon={<span className="brand-mark grid [&>svg]:size-[21px]"><ShardLogo /></span>}
+        title={t("profileTable.teamUnreadTitle")}
+        hint={t("profileTable.teamUnreadHint")}
+      />
+    );
+  }
+  // A team's member sees only what its admin shows them: an empty list says so.
+  const member = !!team && !team.admin;
   if (folder !== "all") {
     return (
       <EmptyState
         icon={<FolderIcon />}
         title={t("profileTable.folderEmptyTitle", { folder })}
-        hint={t("profileTable.folderEmptyHint")}
+        hint={member ? t("profileTable.teamEmptyHint") : t("profileTable.folderEmptyHint")}
         actions={<NewProfileButton />}
+      />
+    );
+  }
+  if (member) {
+    return (
+      <EmptyState
+        icon={<span className="brand-mark grid [&>svg]:size-[21px]"><ShardLogo /></span>}
+        title={t("profileTable.teamEmptyTitle")}
+        hint={t("profileTable.teamEmptyHint")}
+        actions={<><NewProfileButton /><ImportProfilesButton /></>}
       />
     );
   }

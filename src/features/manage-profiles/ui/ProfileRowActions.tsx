@@ -1,13 +1,13 @@
-import type { ReactNode } from "react";
+import { useLayoutEffect, useRef, type ReactNode } from "react";
 import { Button, cn, IconButton, IconSwap, Tooltip } from "@proxyshard/shardx-ui-kit";
 import { MoreIcon, SpinnerIcon } from "../../../shared/icons";
-import { useProfile, type ProfileMeta } from "../../../entities/profile";
+import { RUN_BUTTON_MIN, setRunButtonWidth, startRefusal, useProfile, useSaving, type ProfileMeta } from "../../../entities/profile";
 import { useT } from "../../../shared/i18n";
 import { RowHoverActions, rowButtonDangerHoverClass, rowButtonHoverClass } from "../../../shared/ui/RowHoverActions";
 import { rowActionIcons } from "../../../shared/ui/rowActionIcons";
 import type { RowTone } from "../../../shared/ui/rowFill";
 import type { Command } from "../../../shared/commands";
-import { ariaOf, capOf, command, commandsFor, iconOf, labelOf, runCommand } from "../../commands";
+import { ariaOf, capOf, command, commandsFor, iconOf, labelOf, reasonOf, runCommand } from "../../commands";
 import { useTour } from "../../tour/model/useTour";
 
 const isPin = (c: Command) => c.id === "profile.pin" || c.id === "profile.unpin";
@@ -45,9 +45,15 @@ export function ProfileRowActions({ profile, onMore, tabIndex, editing, tone, le
   const isStarting = useProfile((s) => s.startBusy.has(p.id));
   // Cancel was pressed: the launch is being ended.
   const isCancelling = useProfile((s) => s.cancelling.has(p.id));
+  // Renders again when its session ends: startRefusal reads it.
+  useSaving((s) => s.ids.has(p.id));
   const tourShowsStart = useTour((s) => tourStart && s.run?.steps[s.run.index]?.target === "start");
   const runCmd = command(isRunning ? "profile.stop" : "profile.start");
   const runLabel = labelOf(runCmd.id);
+  // A team's: no Start, or another device has it open; a synced one open on another computer,
+  // as the menu says (it offers Open here instead). Said on the button, which does nothing.
+  const held = p.sync?.on ? p.sync.open_on : undefined;
+  const blocked = !isRunning && !isStarting ? startRefusal(p) ?? (held ? t("errors.openElsewhere", { device: held }) : null) : null;
   const cancelLabel = labelOf("profile.cancelStart");
   // The registry's hover commands, Pin first, where the row has always had
   // it (Task 5e; the Tab order of columns Task 8).
@@ -69,8 +75,8 @@ export function ProfileRowActions({ profile, onMore, tabIndex, editing, tone, le
               no spinner: the word alone fills the button's 76 px). Stop
               comes once the launch returns (UI-30, A11Y-04). */}
           <Tooltip
-            content={isStarting ? (isCancelling ? t("profileRowActions.cancellingTitle") : t("profileRowActions.cancelTitle")) : runLabel}
-            shortcut={isStarting ? undefined : capOf(runCmd)}
+            content={isStarting ? (isCancelling ? t("profileRowActions.cancellingTitle") : t("profileRowActions.cancelTitle")) : blocked ?? runLabel}
+            shortcut={isStarting || blocked ? undefined : capOf(runCmd)}
           >
             <Button
               variant={isStarting ? "neutral" : isRunning ? "error" : "primary"}
@@ -93,7 +99,7 @@ export function ProfileRowActions({ profile, onMore, tabIndex, editing, tone, le
                 )
               }
               onClick={() => {
-                if (isCancelling) return;
+                if (isCancelling || blocked) return;
                 if (isStarting) void useProfile.getState().cancelStart(p.id);
                 else void useProfile.getState().startStop(p);
               }}
@@ -103,6 +109,8 @@ export function ProfileRowActions({ profile, onMore, tabIndex, editing, tone, le
               aria-label={isStarting ? undefined : runLabel}
               aria-keyshortcuts={isStarting ? undefined : ariaOf(runCmd)}
               {...(isCancelling ? { "aria-disabled": true, "aria-busy": true, "data-loading": "" } : {})}
+              disabled={!!blocked}
+              {...(blocked ? { "aria-description": blocked, "data-blocked": "" } : {})}
             >
               {isCancelling ? t("profileRowActions.cancelling") : isStarting ? cancelLabel : runLabel}
             </Button>
@@ -130,6 +138,8 @@ export function ProfileRowActions({ profile, onMore, tabIndex, editing, tone, le
         // menu-only wording.
         const pin = isPin(c);
         const look = pin ? command("profile.pin") : c;
+        // One that cannot run here says why in its own name (a team's rights).
+        const why = reasonOf(c, { ids: [p.id] });
         return (
           <IconButton
             key={look.id}
@@ -143,8 +153,9 @@ export function ProfileRowActions({ profile, onMore, tabIndex, editing, tone, le
             // owner does not want a permanent red slab on every row.
             className={cn("pointer-events-auto", c.danger ? rowButtonDangerHoverClass : rowButtonHoverClass)}
             icon={iconOf(look, cn("size-3.5", pin && p.pinned && "text-primary-text"))}
-            label={look.label(1)}
-            shortcut={capOf(c)}
+            label={why ? t("rights.labelWhy", { label: look.label(1), why }) : look.label(1)}
+            disabled={!!why}
+            shortcut={why ? undefined : capOf(c)}
             aria-keyshortcuts={ariaOf(c)}
             // A double click must not also run the second click's action on
             // whatever this button became (or on the row that slid under the
@@ -154,5 +165,36 @@ export function ProfileRowActions({ profile, onMore, tabIndex, editing, tone, le
         );
       })}
     </RowHoverActions>
+  );
+}
+
+/// The row's Start, Stop and Cancel as this language words them, drawn unseen once
+/// in the list: the widest sets the actions' track (`setRunButtonWidth`), so the
+/// button never runs over the icons beside it ("Остановить" is wider than 76 px).
+export function RunButtonProbe() {
+  const t = useT();
+  const box = useRef<HTMLDivElement>(null);
+  // As the row draws them: Cancelling alone has no icon.
+  const words = [labelOf("profile.start"), labelOf("profile.stop"), labelOf("profile.cancelStart")];
+  const bare = t("profileRowActions.cancelling");
+  const key = [...words, bare].join("|");
+  useLayoutEffect(() => {
+    const el = box.current;
+    if (!el) return;
+    const read = () => setRunButtonWidth(Math.max(RUN_BUTTON_MIN, ...[...el.children].map((b) => (b as HTMLElement).offsetWidth)));
+    read();
+    let live = true;
+    void document.fonts?.ready.then(() => { if (live) read(); });
+    return () => { live = false; };
+  }, [key]);
+  return (
+    <div ref={box} aria-hidden="true" inert className="pointer-events-none invisible absolute left-0 top-0 flex h-0 w-max flex-col items-start overflow-hidden">
+      {words.map((w) => (
+        <Button key={w} variant="primary" mode="lighter" size="3xsmall" static tabIndex={-1} className="min-w-[76px]" leftIcon={<SpinnerIcon className="size-3.5" />}>
+          {w}
+        </Button>
+      ))}
+      <Button variant="primary" mode="lighter" size="3xsmall" static tabIndex={-1} className="min-w-[76px]">{bare}</Button>
+    </div>
   );
 }

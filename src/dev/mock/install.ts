@@ -13,6 +13,15 @@
 //   invoke("plugin:event|emit", { event, payload })
 import { handlers, type Ctx } from "./handlers";
 import { loadState, resetState, saveState, sleep } from "./store";
+import { bindSync } from "./syncServer";
+import { mirror, moveSpace, refusal, setTeamStatus, settle, spaceEpoch, withdraw } from "./spaces";
+import { setLease, setMyGrants, teamDoor, teamView } from "./teamRights";
+import { savedElsewhere } from "./teamProjects";
+import { sessionEnded, sessionResent } from "./teamSessions";
+import { addTeamTrash, type MockTrashRow } from "./teamTrash";
+import type { SessionOutcome } from "../../entities/space/model/sessions";
+import type { Grant } from "../../entities/team/model/types";
+import type { TeamStatus } from "../../entities/space/model/types";
 import { toast } from "../../shared/model/toast";
 
 type Callback = (payload: unknown) => void;
@@ -21,8 +30,13 @@ type Callback = (payload: unknown) => void;
  *  call, never a backend round trip): no latency for these. A secret's
  *  clipboard-clear timer (SEC-11) races a real setTimeout against the fake
  *  clock a test installs with page.clock, so the read/write it depends on
- *  must settle before the test advances the clock. */
-const FAST = new Set(["process_list", "helper_profiles", "automation_run_status", "automation_fleet", "sync_status", "plugin:event|listen", "plugin:event|unlisten", "plugin:event|emit", "clipboard_write", "clipboard_read"]);
+ *  must settle before the test advances the clock. Tag and folder writes land
+ *  at once too: a reload right after one finds it, as in the app. */
+const FAST = new Set([
+  "process_list", "helper_profiles", "automation_run_status", "automation_fleet", "sync_status",
+  "plugin:event|listen", "plugin:event|unlisten", "plugin:event|emit", "clipboard_write", "clipboard_read",
+  "tag_save", "tag_delete", "tag_assign", "tag_import", "folder_add", "folder_meta_set", "folder_import",
+]);
 
 function install(): void {
   if ("__TAURI_INTERNALS__" in window) return;
@@ -57,6 +71,7 @@ function install(): void {
     save: () => saveState(state),
     emit,
   };
+  bindSync(() => state, emit, () => saveState(state));
 
   const events: Record<string, (args: any) => unknown> = {
     "plugin:event|listen": ({ event, handler }) => {
@@ -98,6 +113,11 @@ function install(): void {
       delete failWith[cmd];
       throw message;
     }
+    // `window.__shardxMockGpuCapsHang = true`: the engine's GPU check never answers
+    // (a VPS without a display). Not counted in flight: the UI must not wait on it.
+    if ((cmd === "gpu_caps" || cmd === "gpu_caps_compat") && (window as { __shardxMockGpuCapsHang?: boolean }).__shardxMockGpuCapsHang) {
+      return new Promise<never>(() => {});
+    }
     // Slow (non-polling) calls in flight, so tests can wait for the UI to settle.
     const slow = !FAST.has(cmd);
     if (slow) pending++;
@@ -113,7 +133,20 @@ function install(): void {
       // Across the real IPC both ways are JSON: the app never shares an object
       // with the backend's state, so neither may mutate the other's.
       const copy = <T,>(v: T): T => (v === undefined ? v : JSON.parse(JSON.stringify(v)));
-      return copy(await fn(copy(args), ctx));
+      // The space in use's lists in place; a write the edition places is refused first (spaces.ts).
+      settle(state, emit);
+      const refused = refusal(state, cmd, args);
+      if (refused) throw refused;
+      // A team's door, by the rights its permission carries (teamRights.ts).
+      const door = teamDoor(state, cmd, args);
+      if (door) throw door;
+      const out = copy(teamView(state, cmd, await fn(copy(args), ctx)));
+      mirror(state);
+      // `window.__shardxMockLate = { cmd: ms }`: the answer is read now and arrives ms later,
+      // as a read of a space the launcher has left since.
+      const late = (window as { __shardxMockLate?: Record<string, number> }).__shardxMockLate?.[cmd];
+      if (late) await sleep(late);
+      return out;
     } catch (e) {
       // Tauri rejects with the Err value itself; the app does String(e).
       throw typeof e === "string" ? e : (e as Error)?.message ?? String(e);
@@ -174,6 +207,27 @@ function install(): void {
     /** Analytics hits the app sent (swallowed here, counted for tests). */
     get analyticsHits() { return analyticsHits; },
     emit,
+    /** The space's edition now. */
+    get epoch() { return spaceEpoch(); },
+    /** As live.rs moves the launcher; `{ tell: false }`: the window has not heard yet. */
+    moveSpace(space: NonNullable<typeof state.space>, opts?: { tell?: boolean }) { moveSpace(state, space, emit, opts?.tell ?? true); saveState(state); },
+    /** The team in use's reach as its next read finds it, told with "team-status". */
+    teamStatus(next: Partial<TeamStatus>) { setTeamStatus(state, next, emit); },
+    /** The rules the member this launcher joined as holds now, told as a new permission is. */
+    teamGrants(grants: Grant[]) { setMyGrants(state, grants, emit); saveState(state); },
+    /** Another device opens a team profile (`null`: it closed it there). */
+    teamOpenOn(id: string, on: { device_name: string; member_name: string } | null) { setLease(state, id, on, emit); saveState(state); },
+    /** Another member saves a team project: its revision moves on, unannounced. */
+    teamProjectSaved(id: string) { savedElsewhere(state, id); saveState(state); },
+    /** A team profile's browser closes here and its session ends so (open.rs `tell`); `why` for not_saved. */
+    teamSessionEnds(id: string, outcome: SessionOutcome, why?: string, unsent?: boolean) { delete state.running[id]; saveState(state); sessionEnded(state, id, outcome, emit, why, unsent); },
+    /** Its browser closes and the server does not take its session: sent again until `teamSessionEnds`. */
+    teamSessionResends(id: string, why?: string) { sessionResent(state, id, emit, why); saveState(state); },
+    /** Another device deletes something in the team in use: a row in its trash. */
+    teamTrashAdd(row: MockTrashRow) { addTeamTrash(state, row, emit); saveState(state); },
+    /** As live.rs: the team in use withdraws this launcher ("revoked": its open profiles close
+     *  unsaved) or replaces its invite ("replaced": they close, kept here); then the space moves. */
+    teamWithdraw(kind: "revoked" | "replaced") { withdraw(state, kind, emit); saveState(state); },
     reset() { state = resetState(); location.reload(); },
     save: () => saveState(state),
   };

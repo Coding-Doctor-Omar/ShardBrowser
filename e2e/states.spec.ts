@@ -201,30 +201,6 @@ async function settle(page: Page, s: State) {
   await waitForIdle(page);
 }
 
-/** Forced-colors shots only. Curved edges (the logo, the info circle, round
- *  buttons, the active nav row's corner) rasterized 1 to 6/255 differently
- *  from session to session, so `fresh-install` and `profiles-peek` differed
- *  by 1 to 3 pixels on a re-run right after being re-baselined. Nothing
- *  blinks or runs in them (`getAnimations()` is empty, no spinner, and
- *  `steadyCaret` holds the one caret still): which tiles were repainted in
- *  place and which kept an older raster depended on what had run before
- *  (Peek opens with a 475 ms translate).
- *  One repaint of the whole page, after its transitions have ended, makes
- *  every session draw the same pixels (24 of 24 identical per state; without
- *  it 16 sessions gave two to four different results). The opacity step
- *  keeps focus, which a `visibility: hidden` step would drop. */
-async function repaintAll(page: Page) {
-  await page.waitForFunction(() => document.getAnimations().length === 0);
-  await page.evaluate(async () => {
-    const frames = () => new Promise<void>((r) => requestAnimationFrame(() => requestAnimationFrame(() => r())));
-    const root = document.documentElement;
-    root.style.opacity = "0.99";
-    await frames();
-    root.style.opacity = "";
-    await frames();
-  });
-}
-
 /** Forced-colors shots only. The palette opens with its search field focused
  *  and the text caret blinks there, so about half the runs caught the caret
  *  and half caught the gap between two blinks: 16 px at x=395, the field's
@@ -244,10 +220,8 @@ async function shoot(page: Page, s: State, theme: Theme, file: string, { forced 
   await openApp(page, { section: s.section ?? "profiles", theme });
   await s.open(page);
   await settle(page, s);
-  if (forced) {
-    await steadyCaret(page);
-    await repaintAll(page);
-  }
+  // Curved edges once differed by session here; whole-tile raster (playwright.config.ts) settled it.
+  if (forced) await steadyCaret(page);
   await expect(page).toHaveScreenshot(file);
 }
 

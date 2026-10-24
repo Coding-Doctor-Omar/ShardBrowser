@@ -87,6 +87,9 @@ export type StepIconData = typeof Globe02Icon;
 
 export type ParamKind =
   | "text"
+  /** A number, or a `{{variable}}` the runner expands into one before it
+   *  parses it (runner.rs, `param_f64`) — every number below is read that
+   *  way, so every one of them may hold a reference instead. */
   | "number"
   | "url"
   | "key"

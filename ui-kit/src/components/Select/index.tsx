@@ -1,6 +1,7 @@
 import { useEffect, useId, useMemo, useRef, useState } from 'react'
 import { cn } from '@/lib/cn'
 import { mergeRefs } from '@/lib/mergeRefs'
+import { useFieldsetDisabled } from '@/lib/fieldset'
 import { useLabels } from '@/lib/labels'
 import { Portal } from '@/lib/overlay/Portal'
 import { usePresence } from '@/lib/overlay/usePresence'
@@ -79,7 +80,7 @@ const LIST_MIN = 96
  * list and moves focus into its search.
  */
 export default function Select({
-  options, value, onChange, placeholder, label, hint, error, size = 'medium', disabled = false,
+  options, value, onChange, placeholder, label, hint, error, size = 'medium', disabled: disabledProp = false,
   isSearchable = false, searchPlaceholder, className, id, noResultsText, ...aria
 }: SelectProps) {
   const labels = useLabels()
@@ -89,6 +90,8 @@ export default function Select({
   const listId = `${auto}-list`
   const msgId = `${auto}-msg`
   const fieldRef = useRef<HTMLDivElement>(null)
+  // Off inside a disabled fieldset too, as a native <select> would be.
+  const disabled = useFieldsetDisabled(fieldRef) || disabledProp
   const popupRef = useRef<HTMLDivElement>(null)
   const scrollTo = useRef<((i: number) => void) | null>(null)
   const [open, setOpen] = useState(false)

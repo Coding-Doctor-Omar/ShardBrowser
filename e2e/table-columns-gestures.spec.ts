@@ -111,43 +111,77 @@ test("Name can't be dragged, and nothing lands before it", async ({ page }) => {
   expect(await titles(page)).toEqual(["Name", "Tags", "Status", "Folder", "Proxy", "Notes"]);
 });
 
-test("an edge drags to resize: col-resize cursor, the rows follow, the width is kept; a double click puts it back", async ({ page }) => {
+// The row stretches to the list (owner, 2026-10-23): an edge is the border
+// with the next column, which gives the px (past its content, the one after
+// it), so the columns before it hold still. Only the dragged column is kept.
+test("an edge drags to resize: col-resize cursor, the rows follow, the columns after it give the room; only it is kept; a double click puts it back", async ({ page }) => {
   await openApp(page);
   expect(await edge(page, "tags").evaluate((el) => getComputedStyle(el).cursor)).toBe("col-resize");
   const before = await width(cellOf(page, "tags"));
+  const right = (id: string) => cellOf(page, id).evaluate((el) => Math.round(el.getBoundingClientRect().right));
+  const folderEnd0 = await right("folder");
+  const notesEnd0 = await right("notes");
+  // More than Proxy has past its content: Notes gives the rest.
   await dragEdge(page, "tags", 60, { release: false });
   expect(await htmlCursor(page)).toBe("col-resize");
   near(await width(cellOf(page, "tags")), before + 60);
   near(await width(row(page, "Etsy craft shop").locator("[data-cell='tags']")), before + 60);
+  near(await right("folder"), folderEnd0);
+  near(await right("notes"), notesEnd0);
   await page.mouse.up();
-  near((await stored(page)).widths.tags, before + 60);
+  // Nothing moves when it lets go.
   near(await width(cellOf(page, "tags")), before + 60);
+  near(await right("folder"), folderEnd0);
+  const kept = (await stored(page)).widths;
+  expect(Object.keys(kept)).toEqual(["tags"]);
+  near(kept.tags, before + 60);
   expect(await htmlCursor(page)).toBe("auto");
   await edge(page, "tags").dblclick();
   expect((await stored(page)).widths).toEqual({});
   near(await width(cellOf(page, "tags")), before);
 });
 
-test("a resize past a column's range stops at its minimum or maximum; wider than the room, the list scrolls inside its card, never the page (Review Focus 3, 5)", async ({ page }) => {
+test("a resize past a column's range stops at its minimum or maximum, and in a full row where the columns before it would have to give; a row with no room to spare scrolls inside its card, never the page (Review Focus 3, 5)", async ({ page }) => {
   await openApp(page);
   // Proxy: its content (a flag, a type and an address) sets it well over its 80 px minimum.
   await dragEdge(page, "proxy", -400);
   expect((await stored(page)).widths.proxy).toBe(80);
-  await dragEdge(page, "notes", 900);
-  expect((await stored(page)).widths.notes).toBe(640);
+  // A stretched row: Status past its 240 px max, as far as the columns after it give; Name stays where it was.
+  const name = await width(cellOf(page, "name"));
+  await dragEdge(page, "status", 400);
+  const status = (await stored(page)).widths.status;
+  expect(status).toBeGreaterThan(240);
+  near(await width(cellOf(page, "status")), status);
+  near(await width(cellOf(page, "name")), name);
+  // Name can take no more than the columns after it can give: the row never scrolls for it.
+  await dragEdge(page, "name", 900);
   const grid = page.getByRole("treegrid", { name: "Profiles" });
+  expect(await grid.evaluate((el) => el.scrollWidth <= el.clientWidth)).toBe(true);
+});
+
+test("in a row with no room to spare a column grows as before, to its maximum, and the list scrolls inside its card, never the page", async ({ page }) => {
+  await page.setViewportSize({ width: 1024, height: 680 });
+  await openApp(page);
+  const grid = page.getByRole("treegrid", { name: "Profiles" });
+  await dragEdge(page, "proxy", 500);
+  expect((await stored(page)).widths.proxy).toBe(480);
   expect(await grid.evaluate((el) => el.scrollWidth > el.clientWidth)).toBe(true);
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
 });
 
-test("an edge answers the keyboard: the arrows, Home and End; Shift+F10 opens its column's menu", async ({ page }) => {
+test("an edge answers the keyboard: the arrows, Home and End, by the drag's rule; Shift+F10 opens its column's menu", async ({ page }) => {
   await openApp(page);
   await edge(page, "tags").focus();
   await expect(edge(page, "tags")).toHaveAccessibleName("Resize Tags");
   const v0 = Number(await edge(page, "tags").getAttribute("aria-valuenow"));
+  // The value is the width on screen.
+  near(v0, await width(cellOf(page, "tags")));
+  const folderEnd0 = await cellOf(page, "folder").evaluate((el) => Math.round(el.getBoundingClientRect().right));
   await page.keyboard.press("ArrowRight");
   await page.keyboard.press("ArrowRight");
   await expect(edge(page, "tags")).toHaveAttribute("aria-valuenow", String(v0 + 16));
+  near(await width(cellOf(page, "tags")), v0 + 16);
+  near(await cellOf(page, "folder").evaluate((el) => Math.round(el.getBoundingClientRect().right)), folderEnd0);
   await page.keyboard.press("Home");
   await expect(edge(page, "tags")).toHaveAttribute("aria-valuenow", "64");
   await page.keyboard.press("Shift+F10");
@@ -157,8 +191,29 @@ test("an edge answers the keyboard: the arrows, Home and End; Shift+F10 opens it
   expect(await titles(page)).toEqual(["Name", "Status", "Tags", "Folder", "Proxy", "Notes"]);
   await expect(said(page)).toHaveText("Tags moved to position 3 of 6");
   await expect(edge(page, "tags")).toBeFocused();
+  // End: as wide as the columns after it can make room for, in a row that still fits.
   await page.keyboard.press("End");
-  await expect(edge(page, "tags")).toHaveAttribute("aria-valuenow", "480");
+  await expect.poll(async () => Number(await edge(page, "tags").getAttribute("aria-valuenow"))).toBeGreaterThan(64);
+  near(Number(await edge(page, "tags").getAttribute("aria-valuenow")), await width(cellOf(page, "tags")));
+  const grid = page.getByRole("treegrid", { name: "Profiles" });
+  expect(await grid.evaluate((el) => el.scrollWidth <= el.clientWidth)).toBe(true);
+});
+
+// The last column's edge is the row's end in a stretched row: no pointer
+// handle there (its width comes from the border before it); the keys still
+// size it, from the border on its left.
+test("the last column's edge takes no drag in a full row; its keys move the border before it", async ({ page }) => {
+  await page.setViewportSize({ width: 1600, height: 800 });
+  await openApp(page);
+  const notes = edge(page, "notes");
+  expect(await notes.evaluate((el) => getComputedStyle(el).pointerEvents)).toBe("none");
+  const proxyStart = await cellOf(page, "proxy").evaluate((el) => Math.round(el.getBoundingClientRect().left));
+  const w0 = await width(cellOf(page, "notes"));
+  await notes.focus();
+  await page.keyboard.press("ArrowRight");
+  near(await width(cellOf(page, "notes")), w0 + 8);
+  near(await cellOf(page, "proxy").evaluate((el) => Math.round(el.getBoundingClientRect().left)), proxyStart);
+  expect(Object.keys((await stored(page)).widths)).toEqual(["notes"]);
 });
 
 test("Esc during a resize puts the width back (Review Focus 3)", async ({ page }) => {

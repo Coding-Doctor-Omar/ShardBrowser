@@ -1,14 +1,19 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { Badge, Button, DataList, DialogModal, EmptyState, Input, Tooltip } from "@proxyshard/shardx-ui-kit";
+import { Badge, Button, DataList, DialogModal, EmptyState, Input, Tooltip, useLatched, type MenuItem } from "@proxyshard/shardx-ui-kit";
 import { PageBody, PageHeader } from "../../widgets/PageHeader";
-import { AddExtensionMenu } from "../../features/manage-extensions";
+import { AddExtensionMenu, LinkStoreDialog, UpdateConfirmDialog, UpdateStatus, stopAndUpdate } from "../../features/manage-extensions";
 import { useStoreChanged } from "../../shared/hooks/useStoreChanged";
 import { useHeldLoading } from "../../shared/hooks/useHeldLoading";
 import { useArrivedIds } from "../../shared/hooks/useArrivedIds";
-import { AddIcon, NavExtensionsIcon, SearchIcon } from "../../shared/icons";
+import { AddIcon, CloseIcon, DownloadIcon, ExternalLinkIcon, GlobeIcon, NavExtensionsIcon, RefreshIcon, SearchIcon, StopIcon, UndoIcon } from "../../shared/icons";
 import { LoadError, LoadingCards } from "../../shared/ui/ListStates";
 import { rowActionIcons } from "../../shared/ui/rowActionIcons";
-import { extensionKey, extensionLinkAllowed, extensionName, iconSrc, installCounts, isStoreLink, normalizeExtensionLink, useExtensions, type ExtensionEntry } from "../../entities/extension";
+import {
+  canUpdate, extensionKey, extensionLinkAllowed, extensionName, goneFromStore, iconSrc, installCounts, isStoreLink, normalizeExtensionLink, storeIdOf,
+  useExtensionUpdates, useExtensions, versionAtLeast, type ExtensionEntry, type ExtensionUpdate,
+} from "../../entities/extension";
+import { useGpuCompat } from "../../shared/model/gpuCompat";
+import { teamRefusal, useRightsChange } from "../../entities/space";
 import { fmtBytes } from "../../shared/lib/format";
 import { useDialogLife } from "../../shared/lib/useDialogLife";
 import { useT } from "../../shared/i18n";
@@ -16,16 +21,17 @@ import { useScrollMemory } from "../../shared/model/scrollMemory";
 import { refocusPageFilter } from "../../shared/lib/focus";
 import { showMeAround } from "../../features/tour";
 
-/** `copies`: how many times this name and version is installed (1 when once). */
-function ExtensionCard({ e, copies }: { e: ExtensionEntry; copies: number }) {
+/** `copies`: how many times it is installed, by Web Store item or else name and version (1 when once).
+ *  `update`: where its Web Store update stands, when it has a record. */
+function ExtensionCard({ e, copies, update, linking }: { e: ExtensionEntry; copies: number; update?: ExtensionUpdate; linking: boolean }) {
   const t = useT();
   const src = iconSrc(e.icon);
   const name = extensionName(e);
   return (
     // Content on its own element: an article. The grid item around it is the
     // tile (the kit DataList's) and what takes focus; Remove is in its menu (CRAFT-03).
-    // It fills its grid cell and its description takes the room left, so
-    // every card in a row is as tall and their bottoms line up (UI-39).
+    // It fills its grid cell, so every card in a row is as tall and their
+    // bottoms line up (UI-39).
     // min-w-0: the card is never wider than its cell, whatever its text; the
     // name is cut and the description wraps inside it.
     <article className="flex h-full w-full min-w-0 flex-col gap-2.5 rounded-tile px-cell py-[10px]">
@@ -52,7 +58,10 @@ function ExtensionCard({ e, copies }: { e: ExtensionEntry; copies: number }) {
           </div>
         </div>
       </div>
-      <p className="m-0 line-clamp-2 min-h-[2.4em] flex-1 break-words text-secondary text-text-sub-600">
+      <UpdateStatus update={update} linking={linking} />
+      {/* Not stretched to the card's height: a third line would show under the clamp
+          when a card beside it is taller (an update's status). */}
+      <p className="m-0 line-clamp-2 min-h-[2.4em] break-words text-secondary text-text-sub-600">
         {e.description || <span className="text-text-soft-400">{t("extensions.noDescription")}</span>}
       </p>
     </article>
@@ -108,6 +117,70 @@ function LinkDialog({ open, onClose }: { open: boolean; onClose: () => void }) {
   );
 }
 
+/// A card's update actions by where its update stands (the contract's table):
+/// Update, Stop N profiles and update, Cancel, Skip, Link, Open in Web Store.
+/// A Web Store flag closes Update and says why.
+function useUpdateMenu() {
+  const t = useT();
+  return (e: ExtensionEntry, u: ExtensionUpdate | undefined, busy: boolean): MenuItem[] => {
+    const store = useExtensionUpdates.getState();
+    const icon = (I: typeof DownloadIcon) => <I className="size-3.5" />;
+    const flagged = !!u?.flags.length;
+    const update = (label: string, run: () => void): MenuItem => ({
+      label, icon: icon(DownloadIcon), disabled: busy || flagged, hint: flagged ? t("extensions.flagged") : undefined, onSelect: run,
+    });
+    const cancel: MenuItem = { label: t("extensions.cancelUpdate"), icon: icon(CloseIcon), onSelect: () => void store.cancel(e) };
+    const skip: MenuItem = { label: t("extensions.skipVersion"), icon: icon(UndoIcon), disabled: busy, onSelect: () => void store.skip(e) };
+    const out: MenuItem[] = [];
+    // A link under way downloads to compare files: nothing to cancel or update yet.
+    if (store.linking[e.id]) return out;
+    switch (u?.state) {
+      case "unlinked":
+        out.push({ label: t("extensions.linkStore"), icon: icon(GlobeIcon), onSelect: () => store.setLinkFor(e) });
+        break;
+      case "available":
+        out.push(update(t("extensions.updateItem"), () => void store.update(e)), skip);
+        break;
+      case "ready":
+        out.push(update(t("extensions.updateItem"), () => void store.update(e)), cancel, skip);
+        break;
+      // The question is in the record already: the dialog opens at once.
+      case "confirm":
+        out.push(update(t("extensions.updateConfirmItem"), () => store.setAsk({ entry: e, update: u })), cancel, skip);
+        break;
+      case "downloading":
+        out.push(cancel);
+        break;
+      // Cancel would only offer it again, to be downloaded and refused again:
+      // Update once the engine here is new enough, else Skip.
+      case "needs_engine": {
+        const engine = useGpuCompat.getState().caps?.engine_version;
+        if (engine && u.needs_engine && versionAtLeast(engine, u.needs_engine)) out.push(update(t("extensions.updateItem"), () => void store.update(e)));
+        if (u.latest) out.push(skip);
+        break;
+      }
+      case "waiting": {
+        const n = u.waiting_on.length;
+        if (n > 0) {
+          out.push({
+            label: n === 1 ? t("extensions.stopAndUpdateOne", { n }) : t("extensions.stopAndUpdateMany", { n }),
+            icon: icon(StopIcon), onSelect: () => void stopAndUpdate(e, u),
+          });
+        }
+        out.push(cancel);
+        break;
+      }
+      // Taken down from the Web Store: Update would only be refused again. Skip hides the failed version.
+      case "failed":
+        if (!goneFromStore(u)) out.push(update(t("extensions.updateItem"), () => void store.update(e)));
+        if (u.latest) out.push(skip);
+        break;
+    }
+    if (storeIdOf(e)) out.push({ label: t("extensions.openInStore"), icon: icon(ExternalLinkIcon), onSelect: () => store.openInStore(e) });
+    return out;
+  };
+}
+
 export function ExtensionsPage() {
   const t = useT();
   // The grid scrolls itself; it keeps its place across page switches (WIG-06).
@@ -126,8 +199,22 @@ export function ExtensionsPage() {
 
   const reload = useExtensions((s) => s.reload);
   useEffect(() => { init(); }, [init]);
-  // Pick up extensions added through the automation API.
-  useStoreChanged(reload);
+  // Pick up extensions added through the automation API (an update's own changes are read by the Shell).
+  useStoreChanged(reload, ["extensions"]);
+
+  // Web Store updates: read on every page (App.tsx), shown and acted on here.
+  const updates = useExtensionUpdates((s) => s.byId);
+  const working = useExtensionUpdates((s) => s.working);
+  const linking = useExtensionUpdates((s) => s.linking);
+  const checking = useExtensionUpdates((s) => s.checking);
+  const updatingAll = useExtensionUpdates((s) => s.updatingAll);
+  const linkFor = useExtensionUpdates((s) => s.linkFor);
+  const linkStoreFor = useLatched(linkFor);
+  const linkStoreLife = useDialogLife(linkFor !== null);
+  const updateMenu = useUpdateMenu();
+  // Linked ones only: a check of none asks nothing (§3.2.1).
+  const anyLinked = Object.values(updates).some((u) => u.state !== "unlinked");
+  const updatable = items.filter((e) => canUpdate(updates[e.id])).length;
 
   const shown = useMemo(() => {
     const q = search.trim().toLowerCase();
@@ -140,6 +227,10 @@ export function ExtensionsPage() {
   const counts = useMemo(() => installCounts(items), [items]);
 
   const remove = useExtensions((s) => s.remove);
+  // A team's rules: adding and removing each need their right in the team.
+  useRightsChange();
+  const noCreate = teamRefusal("create");
+  const noDelete = teamRefusal("delete");
   const loading = useHeldLoading(status === "idle" || status === "loading");
   // Nothing to count or filter yet (LAYOUT-20).
   const empty = status === "ready" && items.length === 0;
@@ -155,7 +246,7 @@ export function ExtensionsPage() {
       actions={<Button variant="neutral" mode="stroke" size="xsmall" onClick={() => { setSearch(""); refocusPageFilter(); }}>{t("listStates.clearSearch")}</Button>}
     />
   ) : (
-    <EmptyState icon={<NavExtensionsIcon />} title={t("extensions.emptyTitle")} hint={t("extensions.emptyHelp")} action={{ label: t("extensions.emptyAction"), icon: <AddIcon />, onClick: () => setLinkOpen(true) }} />
+    <EmptyState icon={<NavExtensionsIcon />} title={t("extensions.emptyTitle")} hint={t("extensions.emptyHelp")} action={noCreate ? undefined : { label: t("extensions.emptyAction"), icon: <AddIcon />, onClick: () => setLinkOpen(true) }} />
   );
 
   return (
@@ -165,7 +256,27 @@ export function ExtensionsPage() {
         count={!loading && status === "ready" && !empty ? shown.length : undefined}
         help={{ title: t("pageHelp.extensions.title"), body: t("pageHelp.extensions.body"), onTour: () => showMeAround("extensions") }}
         filter={empty ? undefined : { value: search, onChange: setSearch }}
-        actions={<AddExtensionMenu />}
+        actions={
+          <>
+            {/* Its words in a tooltip only while a narrow header shows its icon alone. */}
+            {anyLinked && !empty && (
+              <Tooltip content={t("extensions.checkUpdates")} whenTruncated>
+                <Button variant="neutral" mode="stroke" size="xsmall" leftIcon={<RefreshIcon className="size-3.5" />} isLoading={checking} onClick={() => void useExtensionUpdates.getState().check()}>
+                  {checking ? t("extensions.checking") : t("extensions.checkUpdates")}
+                </Button>
+              </Tooltip>
+            )}
+            {/* Stays while it runs: the first one going in drops the count. */}
+            {(updatable >= 2 || updatingAll) && (
+              <Tooltip content={t("extensions.updateAll")} whenTruncated>
+                <Button variant="neutral" mode="stroke" size="xsmall" leftIcon={<DownloadIcon className="size-3.5" />} isLoading={updatingAll} onClick={() => void useExtensionUpdates.getState().updateAll()}>
+                  {t("extensions.updateAll")}
+                </Button>
+              </Tooltip>
+            )}
+            <AddExtensionMenu />
+          </>
+        }
       />
       {/* The grid scrolls itself; the page does not. The list recipe's card
           grid (F5, IFACE-11): one Tab stop, arrows move by what is beside,
@@ -187,20 +298,32 @@ export function ExtensionsPage() {
           error={<LoadError what={t("listStates.extensions")} error={loadError} onRetry={() => void init()} />}
           empty={emptyState}
           arrived={arrived}
-          renderCard={(e) => <ExtensionCard e={e} copies={counts.get(extensionKey(e)) ?? 1} />}
+          renderCard={(e) => <ExtensionCard e={e} copies={counts.get(extensionKey(e)) ?? 1} update={updates[e.id]} linking={!!linking[e.id]} />}
           onDelete={(ids) => {
             for (const id of ids) {
               const e = items.find((x) => x.id === id);
               if (e) void remove(e);
             }
           }}
-          menuItems={(e) => [
-            { label: t("extensions.removeItem"), icon: rowActionIcons.trash({ className: "size-3.5" }), danger: true, onSelect: () => void remove(e) },
-          ]}
+          menuItems={(e) => {
+            const first = updateMenu(e, updates[e.id], !!working[e.id]);
+            // The backend refuses it while the new version goes in.
+            const swapping = updates[e.id]?.state === "downloading" || updates[e.id]?.state === "applying";
+            const noRemove = noDelete ?? (swapping ? t("extensions.removeWhileUpdating") : null);
+            return [
+              ...first,
+              ...(first.length > 0 ? [{ type: "separator" as const }] : []),
+              { label: t("extensions.removeItem"), icon: rowActionIcons.trash({ className: "size-3.5" }), danger: true, disabled: !!noRemove, hint: noRemove ?? undefined, onSelect: () => void remove(e) },
+            ];
+          }}
         />
       </PageBody>
 
       {linkLife.mounted && <LinkDialog key={linkLife.session} open={linkOpen} onClose={() => setLinkOpen(false)} />}
+      {linkStoreLife.mounted && linkStoreFor && (
+        <LinkStoreDialog key={linkStoreLife.session} entry={linkStoreFor} open={linkFor !== null} onClose={() => useExtensionUpdates.getState().setLinkFor(null)} />
+      )}
+      <UpdateConfirmDialog />
     </>
   );
 }

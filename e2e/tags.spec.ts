@@ -1,5 +1,5 @@
 import { expect, test, type Locator, type Page } from "@playwright/test";
-import { openApp, openEditForm } from "./support/app";
+import { openApp, openEditForm, reloadApp, storedTags, waitForIdle } from "./support/app";
 import { filterBy } from "./support/filters";
 import { openSearch } from "./support/search";
 
@@ -38,6 +38,24 @@ test("a broken tags value means no tags, not a broken app", async ({ page }) => 
   await expect(page.getByRole("columnheader", { name: "Tags" })).toHaveCount(0);
 });
 
+test("tags an older build kept move to the backend once: the key goes, and a second hand-over changes nothing", async ({ page }) => {
+  await seedTags(page, TAGS);
+  await openApp(page);
+  await expect(row(page, "Etsy craft shop").locator("[data-cell='tags'] [data-tag]")).toHaveText(["Warm-up", "VIP"]);
+  const moved = await storedTags(page);
+  expect(moved.tags.map((t) => t.id)).toEqual(["t-warm", "t-vip"]);
+  expect(moved.by_profile).toEqual(TAGS.byProfile);
+  expect(await page.evaluate(() => localStorage.getItem("shardx.tags"))).toBeNull();
+  // The key back with other tags (an older build run since): handed over, ignored, gone.
+  await page.evaluate(() => localStorage.setItem("shardx.tags", JSON.stringify({
+    version: 1, tags: [{ id: "t-old", name: "Old", color: "red" }], byProfile: { f62a9d43: ["t-old"] },
+  })));
+  await reloadApp(page);
+  await expect(row(page, "Sandbox").locator("[data-cell='tags'] [data-tag]")).toHaveText(["Warm-up"]);
+  expect(await storedTags(page)).toEqual(moved);
+  expect(await page.evaluate(() => localStorage.getItem("shardx.tags"))).toBeNull();
+});
+
 test("the profile form gives a new tag and takes one away, and Save writes them", async ({ page }) => {
   await seedTags(page, TAGS);
   await openApp(page);
@@ -73,8 +91,8 @@ test("T opens the picker for the active row; a name already used picks that tag"
   await page.keyboard.press("Escape");
   await page.keyboard.press("Escape");
   await expect(row(page, "Scraper pricing").locator("[data-cell='tags'] [data-tag]")).toHaveText(["VIP"]);
-  const stored = await page.evaluate(() => JSON.parse(localStorage.getItem("shardx.tags")!));
-  expect(stored.tags).toHaveLength(2);
+  await expect.poll(async () => (await storedTags(page)).by_profile.e51f8c32).toEqual(["t-vip"]);
+  expect((await storedTags(page)).tags).toHaveLength(2);
   await expect(row(page, "Scraper pricing")).toBeFocused();
 });
 
@@ -156,7 +174,7 @@ test("a profile deleted for good from the Trash takes its tags with it", async (
   await page.getByRole("menuitem", { name: "Move to Trash" }).click();
   // The row leaves at once; the Undo toast says the move has landed.
   await expect(page.locator("[data-toast]").getByRole("button", { name: "Undo" })).toBeVisible();
-  const stored = () => page.evaluate(() => JSON.parse(localStorage.getItem("shardx.tags")!).byProfile);
+  const stored = async () => (await storedTags(page)).by_profile;
   // In the Trash it keeps them: Undo or Restore brings them back.
   expect((await stored()).f62a9d43).toEqual(["t-warm"]);
   await page.locator("aside").getByText("Trash", { exact: true }).click();
@@ -200,9 +218,8 @@ test("the bulk bar's picker keeps its profiles until closed, and never reopens b
   await expect(picker).toHaveCount(0);
   await bar.getByRole("button", { name: "Edit tags" }).click();
   await picker.getByRole("option", { name: /VIP/ }).click();
-  const stored = await page.evaluate(() => JSON.parse(localStorage.getItem("shardx.tags")!).byProfile);
-  expect(stored.f62a9d43).toEqual(["t-warm", "t-vip"]);
-  expect(stored.aed41005).toEqual(["t-warm"]);
+  await expect.poll(async () => (await storedTags(page)).by_profile.f62a9d43).toEqual(["t-warm", "t-vip"]);
+  expect((await storedTags(page)).by_profile.aed41005).toEqual(["t-warm"]);
 });
 
 test("T on a selection scrolled out of view opens the picker in sight, and Esc gives the keys back to the list", async ({ page }) => {
@@ -231,8 +248,7 @@ test("tags of profiles deleted for good elsewhere are dropped at start; the Tras
   await openApp(page, { section: "settings" });
   await page.getByRole("tab", { name: "Tags" }).click();
   await expect(page.locator("[data-tag-row='t-vip']")).toContainText("1 profile");
-  const stored = () => page.evaluate(() => JSON.parse(localStorage.getItem("shardx.tags")!).byProfile);
-  await expect.poll(async () => Object.keys(await stored()).sort()).toEqual(["aed41005", "f62a9d43", "t-1"]);
+  await expect.poll(async () => Object.keys((await storedTags(page)).by_profile).sort()).toEqual(["aed41005", "f62a9d43", "t-1"]);
 });
 
 test("Settings > Tags: an Enter that confirms an input method's text does not rename", async ({ page }) => {
@@ -244,7 +260,7 @@ test("Settings > Tags: an Enter that confirms an input method's text does not re
   await field.dispatchEvent("keydown", { key: "Enter", isComposing: true });
   // WebKit (macOS) sends that Enter after the composition ends, as key code 229.
   await field.dispatchEvent("keydown", { key: "Enter", keyCode: 229 });
-  const stored = () => page.evaluate(() => JSON.parse(localStorage.getItem("shardx.tags")!).tags[0].name);
+  const stored = async () => (await storedTags(page)).tags[0].name;
   expect(await stored()).toBe("Warm-up");
   // Save is the commit, and Enter is not one: the typed name waits for the bar.
   await field.press("Enter");
@@ -262,8 +278,8 @@ test("the tag picker: an Enter that confirms an input method's text creates noth
   await find.fill("新");
   await find.dispatchEvent("keydown", { key: "Enter", keyCode: 229 });
   await expect(page.getByRole("option", { name: /Create/ })).toBeVisible();
-  const stored = await page.evaluate(() => JSON.parse(localStorage.getItem("shardx.tags")!).tags);
-  expect(stored).toHaveLength(2);
+  await waitForIdle(page);
+  expect((await storedTags(page)).tags).toHaveLength(2);
 });
 
 test("a row's Tags cell and its menu's Edit tags open the picker for that row", async ({ page }) => {

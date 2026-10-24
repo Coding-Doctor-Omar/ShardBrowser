@@ -1,4 +1,4 @@
-import { invoke } from "@tauri-apps/api/core";
+import { invoke } from "../../../shared/api/invoke";
 import type { ProxyEntry, ProxyTestSnapshot } from "./types";
 
 export const proxyList = () => invoke<ProxyEntry[]>("proxy_list");

@@ -268,7 +268,7 @@ server.tool(
 
 server.tool(
   "new_fingerprint",
-  "Generate a fresh uniquified fingerprint (random platform_version, host-aware CPU/RAM, clamped screen). Not persisted.",
+  "Generate a fresh uniquified fingerprint (random platform_version, host-aware CPU/RAM, this computer's screen on Windows/Linux, the template's on macOS/Android). Not persisted.",
   { platform: z.enum(["Windows", "macOS", "Linux"]).optional() },
   async ({ platform }) =>
     text(await api(platform ? `/fingerprint/new/${platform}` : "/fingerprint/new")),

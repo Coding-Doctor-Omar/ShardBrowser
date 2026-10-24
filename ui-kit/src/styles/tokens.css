@@ -1091,6 +1091,11 @@
   @media (prefers-contrast: more) {
     box-shadow: inset 0 0 0 1px var(--stroke-sub-300), var(--tile-shadow, var(--shadow-tile));
   }
+  /* Forced colors drop the fill and the shadow: the edge is a system line, as on `list-tile`. */
+  @media (forced-colors: active) {
+    outline: 1px solid CanvasText;
+    outline-offset: -1px;
+  }
 }
 
 /* A table on a tile (`list-tile`): rows always sit on a tile, never on the
@@ -1148,6 +1153,20 @@
     overflow: clip;
     background-color: var(--list-fill);
     --list-row-inset: 4px;
+    /* Forced colors: the sticky header's Canvas fill covered the outline's
+       top and sides; the edge is drawn over everything instead. */
+    @media (forced-colors: active) {
+      position: relative;
+      &::after {
+        content: "";
+        position: absolute;
+        inset: 0;
+        z-index: 10;
+        border: 1px solid CanvasText;
+        border-radius: inherit;
+        pointer-events: none;
+      }
+    }
   }
   &:has([data-list-header]) [role="row"]:not([data-list-header]) {
     margin-inline: 4px;

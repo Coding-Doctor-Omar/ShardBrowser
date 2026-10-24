@@ -1,16 +1,16 @@
 import { useCallback, useEffect, useRef } from "react";
 import { flushSync } from "react-dom";
 import { layoutRect, pageZoom } from "@proxyshard/shardx-ui-kit";
-import { clampWidth, columnVar, type ColumnsApi } from "../../lib/tableColumns";
+import { columnVar, type ColumnWidths, type ColumnsApi, type TableLayout } from "../../lib/tableColumns";
 
 /// Dragging a column's edge (owner feature 2026-09-26). While the pointer
-/// moves, only a custom property on the list changes (`--col-<id>`, which
+/// moves, only custom properties on the list change (`--col-<id>`, which
 /// the grid template falls back from), so the header and every row follow
-/// without a React render; the width is stored once, when the pointer lets
-/// go. Esc or a cancelled pointer puts it back. The width stays inside the
-/// column's own minimum and maximum.
-export function useColumnResize<Id extends string>({ api, listRef, wrapRef }: {
+/// without a React render; the widths are stored once, when the pointer lets
+/// go. Esc or a cancelled pointer puts it back.
+export function useColumnResize<Id extends string>({ api, layout, listRef, wrapRef }: {
   api: ColumnsApi<Id>;
+  layout: TableLayout<Id>;
   listRef: React.RefObject<HTMLElement | null>;
   wrapRef: React.RefObject<HTMLElement | null>;
 }) {
@@ -37,16 +37,20 @@ export function useColumnResize<Id extends string>({ api, listRef, wrapRef }: {
     // page zoom and the cell's rect by its own scale (older WebKit reports
     // rects zoom-adjusted and the pointer not).
     const z = pageZoom();
-    const from = layoutRect(cell).width;
+    const from = layout.drawn[id] ?? layoutRect(cell).width;
     const minBefore = wrap.style.minWidth;
     let width = from;
+    let preview: { widths: ColumnWidths<Id>; layout: TableLayout<Id> } | null = null;
     handle.setPointerCapture(pointer);
     document.documentElement.dataset.columnGesture = "resize";
     const onMove = (ev: PointerEvent) => {
-      width = clampWidth(def, from + (ev.clientX - x0) / z);
-      list.style.setProperty(columnVar(id), `${width}px`);
-      // The list's minimum grows with the column: it scrolls, never squeezes.
-      wrap.style.minWidth = `calc(${minBefore || "0px"} + ${Math.max(0, width - from)}px)`;
+      width = from + (ev.clientX - x0) / z;
+      // The same tracks the stored widths give: nothing moves when it lets go.
+      preview = layout.resize(id, width);
+      const l = preview.layout;
+      for (const c of l.shown) list.style.setProperty(columnVar(c), l.tracks[c]!);
+      // The list's minimum grows with the columns: it scrolls, never squeezes.
+      wrap.style.minWidth = `${l.minWidth}px`;
     };
     const end = (keep: boolean) => {
       handle.removeEventListener("pointermove", onMove);
@@ -58,10 +62,15 @@ export function useColumnResize<Id extends string>({ api, listRef, wrapRef }: {
       if (handle.hasPointerCapture(pointer)) handle.releasePointerCapture(pointer);
       delete document.documentElement.dataset.columnGesture;
       wrap.style.minWidth = minBefore;
-      // Rendered before the live width goes, so no frame shows the old one.
+      // Rendered before the live widths go, so no frame shows the old ones.
       // A press that barely moved (a double click's) stores nothing.
-      if (keep && Math.abs(width - from) >= 1) flushSync(() => api.setWidth(id, width));
-      list.style.removeProperty(columnVar(id));
+      const got = (preview as { widths: ColumnWidths<Id> } | null)?.widths;
+      if (keep && got && Math.abs(width - from) >= 1) {
+        flushSync(() => {
+          for (const c of layout.shown) if (got[c] !== api.widths[c]) api.setWidth(c, got[c] ?? null);
+        });
+      }
+      for (const c of layout.shown) list.style.removeProperty(columnVar(c));
     };
     const onUp = () => end(true);
     // A cancelled pointer, or one that loses capture without ever letting go
@@ -80,5 +89,5 @@ export function useColumnResize<Id extends string>({ api, listRef, wrapRef }: {
     handle.addEventListener("lostpointercapture", onCancel);
     window.addEventListener("keydown", onKey, true);
     endRef.current = () => end(false);
-  }, [api, listRef, wrapRef]);
+  }, [api, layout, listRef, wrapRef]);
 }

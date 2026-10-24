@@ -18,6 +18,8 @@ import { t, useT } from "../../shared/i18n";
 import { useScrollMemory } from "../../shared/model/scrollMemory";
 import { refocusPageFilter } from "../../shared/lib/focus";
 import { showMeAround } from "../../features/tour";
+import { useInTeam } from "../../entities/space";
+import { TeamTrashPage } from "./team";
 
 type TrashColumn = "name" | "folder" | "deleted" | "left" | "size";
 
@@ -87,10 +89,15 @@ const TRASH_COLUMNS: readonly ListColumnDef<TrashColumn, TrashEntry>[] = [
 /** The row's hover actions: Restore (74 px) and More (24), 4 apart. */
 const ACTIONS_TRACK = 104;
 
+/// The Trash of the space in use: the team's own on its server in a team.
+export function TrashPage() {
+  return useInTeam() ? <TeamTrashPage /> : <PersonalTrashPage />;
+}
+
 /// The Trash, on the one list recipe (F5): select many and Restore them at
 /// once, Restore on the row, Delete for good in the row's menu, the bar's
 /// menu and on the Delete key (it asks first), and a search.
-export function TrashPage() {
+function PersonalTrashPage() {
   const t = useT();
   const init = useTrash((s) => s.init);
   const reload = useTrash((s) => s.reload);

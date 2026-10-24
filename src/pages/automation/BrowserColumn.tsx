@@ -3,6 +3,7 @@ import { useId, useState, type ReactNode } from "react";
 import { Button, Card, IconButton, Input, TabPanel, Tabs, Tooltip, cn } from "@proxyshard/shardx-ui-kit";
 import { scriptRun, type RunState } from "../../entities/automation";
 import type { ProfileMeta } from "../../entities/profile/model/types";
+import { openElsewhere, profileRefusal, startRefusal } from "../../entities/profile";
 import { CloseIcon, PlayIcon } from "../../shared/icons";
 import { useT } from "../../shared/i18n";
 import { SelectField } from "../../shared/ui/SelectField";
@@ -17,6 +18,13 @@ export type BrowserTab = "page" | "requests" | "log";
 /// run that goes stay as they are); Page (the live view),
 /// Requests (Observe and the request list) and Run log under them; the
 /// console at the bottom.
+/** Why a team profile can't be driven from here, in an option's few words: Start and Cookies, and no other device on it. */
+function driveRefusal(t: ReturnType<typeof useT>, p: ProfileMeta): string | null {
+  const on = openElsewhere(p);
+  if (on) return t("rights.openOn", { device: on.device_name || t("rights.anotherDevice") });
+  return startRefusal(p) || profileRefusal(p, "cookies") ? t("rights.cannotDrive") : null;
+}
+
 export function BrowserColumn({
   profiles, target, onTarget, browser, recording, onRecording, tab, onTab, page, pageNote, requests, run, onClose,
 }: {
@@ -57,6 +65,8 @@ export function BrowserColumn({
     }
   };
 
+  const targetRow = target ? profiles.find((p) => p.id === target) : undefined;
+  const targetWhy = targetRow && !browser.live ? startRefusal(targetRow) ?? profileRefusal(targetRow, "cookies") : null;
   const running = run?.workers.filter((w) => w.status === "running").length ?? 0;
   const failed = run?.workers.filter((w) => w.status === "failed").length ?? 0;
 
@@ -70,7 +80,10 @@ export function BrowserColumn({
             onChange={(v) => onTarget(v || null)}
             options={[
               { value: "", label: t("projectEditor.chooseProfile") },
-              ...profiles.map((p) => ({ value: p.id, label: p.name })),
+              ...profiles.map((p) => {
+                const why = driveRefusal(t, p);
+                return why ? { value: p.id, label: p.name, hint: why, disabled: true } : { value: p.id, label: p.name };
+              }),
             ]}
           />
         </div>
@@ -93,11 +106,12 @@ export function BrowserColumn({
         ) : browser.busy ? (
           <StatusPill status={{ tone: "starting", label: t("liveView.starting"), dot: "info" }} />
         ) : (
-          <Tooltip content={t("liveView.chooseFirst")} disabled={!!target}>
+          <Tooltip content={targetWhy ?? t("liveView.chooseFirst")} disabled={!!target && !targetWhy}>
             <Button
               variant="neutral" mode="stroke" size="2xsmall"
               leftIcon={<PlayIcon className="size-3.5" />}
-              disabled={!target}
+              disabled={!target || !!targetWhy}
+              aria-description={targetWhy ?? undefined}
               onClick={() => void browser.start()}
             >
               {t("liveView.start")}

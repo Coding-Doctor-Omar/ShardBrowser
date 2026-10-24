@@ -3,10 +3,13 @@ import { DialogModal } from "@proxyshard/shardx-ui-kit";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { toast } from "../../../shared/model/toast";
 import { useT } from "../../../shared/i18n";
+import { overlayHasKeyboard } from "../../../shared/lib/keyboard";
+import { useWhatsNew } from "../../../shared/model/whatsNew";
+import { useShouldWelcome } from "../../onboarding/model/onboarding";
+import { useTour } from "../../tour/model/useTour";
 import { psTrialOffer, usePsAccount } from "../../../entities/proxyshard";
 
-/// The trial offer, on the Proxies page, for someone who has not connected a
-/// ProxyShard account yet.
+/// The trial offer, for someone who has not connected a ProxyShard account yet.
 ///
 /// Everything about the offer comes from the public site API — whether there
 /// is one at all, how much traffic it is for, and the link to claim it. The
@@ -14,14 +17,13 @@ import { psTrialOffer, usePsAccount } from "../../../entities/proxyshard";
 /// and no amount or address sits in this file. A campaign ends by the server
 /// saying no, not by an update.
 ///
-/// Asked once a run: on the first time the Proxies page is opened after the
-/// app starts, and only while no key is connected. A second visit in the same
-/// run is silent, and the next start asks again until a key is saved.
+/// Asked at every start of the app, on whatever page it opens, while no key is
+/// connected (owner, 2026-10-23); once a run, so moving between pages never
+/// brings it back. It waits for the welcome, What's new and a running tour.
 
 type Offer = { url: string; gb: number };
 
-/** One ask per run of the app: the page mounts again on every visit, these do
- *  not. `pending` holds the one request, so a second mount reads the answer
+/** One ask per run of the app: a remount does not ask again. `pending` holds the one request, so a second mount reads the answer
  *  already on its way instead of asking again — which is also what keeps the
  *  dialog working under React's double-invoked effects, where the first run's
  *  cleanup has already fired by the time the answer lands. `shown` closes the
@@ -62,26 +64,51 @@ function sizeOf(gb: number): { amount: number; unit: "mb" | "gb" } {
     : { amount: Math.round(gb * 10) / 10, unit: "gb" };
 }
 
+/** Resolves once no dialog, menu or list has the keyboard: now, or when the last one closes. */
+function whenNothingOpen(stop: { current: (() => void) | null }): Promise<void> {
+  return new Promise((resolve) => {
+    if (!overlayHasKeyboard()) { resolve(); return; }
+    const watch = new MutationObserver(() => {
+      if (overlayHasKeyboard()) return;
+      watch.disconnect();
+      resolve();
+    });
+    watch.observe(document.body, { childList: true, subtree: true, attributes: true, attributeFilter: ["data-ending-style"] });
+    stop.current = () => watch.disconnect();
+  });
+}
+
 export function PsTrialModal() {
   const t = useT();
   const key = usePsAccount((s) => s.key);
   const keyLoaded = usePsAccount((s) => s.keyLoaded);
+  const welcome = useShouldWelcome();
+  const touring = useTour((s) => s.run !== null);
+  const newsDecided = useWhatsNew((s) => s.decided);
+  const newsOpen = useWhatsNew((s) => s.open);
   const confirmRef = useRef<HTMLButtonElement>(null);
   const [offer, setOffer] = useState<Offer | null>(null);
   const [open, setOpen] = useState(false);
 
+  useEffect(() => { void usePsAccount.getState().init(); }, []);
+
   useEffect(() => {
     // `key` is null until it has been read from disk; "" means there is none.
-    if (!keyLoaded || key || shownThisRun) return;
+    if (!keyLoaded || key || shownThisRun || welcome || touring || !newsDecided || newsOpen) return;
     let live = true;
-    offerOnce().then((o) => {
-      if (!live || !o || shownThisRun) return;
+    const stop: { current: (() => void) | null } = { current: null };
+    void (async () => {
+      const o = await offerOnce();
+      if (!live || !o) return;
+      // Never on top of another dialog: it waits its turn.
+      await whenNothingOpen(stop);
+      if (!live || shownThisRun || useTour.getState().run !== null || useWhatsNew.getState().open) return;
       shownThisRun = true;
       setOffer(o);
       setOpen(true);
-    });
-    return () => { live = false; };
-  }, [key, keyLoaded]);
+    })();
+    return () => { live = false; stop.current?.(); };
+  }, [key, keyLoaded, welcome, touring, newsDecided, newsOpen]);
 
   if (!offer) return null;
   const { amount, unit } = sizeOf(offer.gb);

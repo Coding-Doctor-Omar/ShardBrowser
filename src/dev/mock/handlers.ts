@@ -1,12 +1,22 @@
 // One handler per Tauri command the frontend invokes. Handlers mutate the
 // mock state in place and return what the Rust command would return; a throw
 // rejects the invoke the way a Rust `Err` does (the app renders `String(e)`).
-import type { MockState, StoredProfile } from "./fixtures";
+import type { MockFolders, MockState, MockTags, StoredProfile } from "./fixtures";
 import {
   seed, metaOf, PS_ME, PS_PRODUCTS, PS_AVAILABLE, PS_ACTIVE, PS_TRAFFIC, psUsage,
   PS_COUNTRIES, PS_REGIONS, PS_CITIES, PS_ISPS,
 } from "./fixtures";
 import { newId, sleep } from "./store";
+import { joinTeamServer, teamHandlers } from "./teamServer";
+import { teamCreateRefusal, teamStartRefusal } from "./teamRights";
+import { syncHandlers, syncLease, syncTouched } from "./syncServer";
+import { alreadyInLibrary, extProfileClosed, extUpdateHandlers, importSame } from "./extUpdates";
+import { teamNew, teamSave } from "./teamProjects";
+import { openSessions, resendUnsent, sessionEnded } from "./teamSessions";
+import { intoTeamTrash, teamTrashHandlers } from "./teamTrash";
+import { NOT_IN_TEAM, profileFromFingerprint, settle, spaceStateOf, teamInUse, teamUnreachable, told } from "./spaces";
+import { SYNC_REFUSALS } from "../../entities/sync/model/types";
+import { TEAM_REFUSALS } from "../../shared/api/teamRefusals";
 import type { ProxyEntry, ProxyTestSnapshot } from "../../entities/proxy/model/types";
 import type { FingerprintEntry } from "../../entities/fingerprint/model/types";
 import type { Project, RunState, ModuleInfo } from "../../entities/automation/model/types";
@@ -43,6 +53,43 @@ function changed(ctx: Ctx, topic = "profiles") {
   ctx.emit("store-changed", topic);
 }
 
+/** What `space_state` answers (spaces.ts). */
+const spaceState = spaceStateOf;
+
+/** A write only the personal space takes (space/mod.rs `here`). */
+function personalOnly(state: MockState) {
+  if (teamInUse(state)) throw NOT_IN_TEAM;
+}
+
+/** The server of the team in use, when one is. */
+const teamServerInUse = (state: MockState) => {
+  const team = teamInUse(state);
+  return team ? state.teamServers?.[team] : undefined;
+};
+
+/** As tags.rs: the saved tags, made on the first write. */
+const tagsOf = (state: MockState): MockTags => (state.tags ??= { tags: [], by_profile: {} });
+/** As folders.rs: the saved folders, made on the first write. */
+const foldersOf = (state: MockState): MockFolders => (state.folders ??= { registry: [], meta: {} });
+const cleanTag = (name: unknown) => String(name ?? "").split(/\s+/).filter(Boolean).join(" ").slice(0, 32);
+
+/** As tags.rs `assign`: each listed profile gets exactly these known tags, once each. */
+function assignTags(s: MockTags, byProfile: Record<string, string[]>) {
+  const known = new Set(s.tags.map((t) => t.id));
+  for (const [pid, ids] of Object.entries(byProfile)) {
+    const kept = [...new Set(ids.filter((id) => known.has(id)))];
+    if (kept.length) s.by_profile[pid] = kept; else delete s.by_profile[pid];
+  }
+}
+
+/** As folders.rs `rename`: a kept entry keeps its place, the look follows; a folder never kept stays unkept. */
+function renameFolder(s: MockFolders, old: string, next: string) {
+  const to = next.trim();
+  if (!to) { s.registry = s.registry.filter((f) => f !== old); delete s.meta[old]; return; }
+  s.registry = [...new Set(s.registry.map((f) => (f === old ? to : f)))];
+  if (Object.prototype.hasOwnProperty.call(s.meta, old)) { s.meta[to] = s.meta[old]; delete s.meta[old]; }
+}
+
 function stopProcess(state: MockState, id: string): boolean {
   const run = state.running[id];
   if (!run) return false;
@@ -51,6 +98,16 @@ function stopProcess(state: MockState, id: string): boolean {
   delete state.running[id];
   return true;
 }
+
+/** As launch.rs refuses a profile whose bound proxy is gone: the reason, or null. */
+function proxyGone(state: MockState, id: string): string | null {
+  const bound = profile(state, id)._meta.proxy_id;
+  if (!bound || state.proxies.some((p) => p.id === bound)) return null;
+  return `profile ${id} is bound to a proxy that no longer exists (${bound}) — bind another proxy, or none, then start it again`;
+}
+
+/** Profiles with a start under way (launch.rs STARTING): a second start is refused BUSY. */
+const starting = new Set<string>();
 
 function startProcess(state: MockState, id: string): number {
   const p = profile(state, id);
@@ -67,33 +124,6 @@ function cloneProfile(src: StoredProfile, name: string): StoredProfile {
   copy._meta = { ...copy._meta, id: newId(), rev: 1, created_at: nowStamp(), last_launched_at: null, total_runtime_ms: 0, pinned: false };
   copy.name = name;
   return copy;
-}
-
-function profileFromFingerprint(fp: FingerprintEntry, name: string, folder = ""): StoredProfile {
-  const nav = { ...(fp.payload?.navigator ?? {}) } as Record<string, unknown>;
-  return {
-    _meta: {
-      id: newId(), rev: 1, proxy_id: null, last_launched_at: null, created_at: nowStamp(),
-      pinned: false, folder, total_runtime_ms: 0, gpu_preset_id: fp.id, extensions: [],
-      ...(fp.platform.startsWith("Linux arm") ? { android_media: true } : {}),
-    },
-    name,
-    notes: "",
-    timezone: "auto",
-    icu_locale: null,
-    webrtc: "auto",
-    navigator: { ...nav, do_not_track: null },
-    client_hints: { ...(fp.payload?.client_hints ?? {}) },
-    screen: { ...(fp.payload?.screen ?? {}) },
-    media_devices: { audio_input_count: 1, audio_output_count: 1, video_input_count: 1 },
-    geolocation: { mode: "auto" },
-    noise: {
-      canvas: { enabled: true, seed: 0 }, webgl: { enabled: true, seed: 0, intensity: 0.3 },
-      audio: { enabled: true, seed: 0 }, client_rects: { enabled: false, seed: 0, max_offset: 0 },
-      sensors: { enabled: false, seed: 0 }, fonts: { enabled: false, seed: 0 },
-    },
-    blocked_ports: [3389, 5900, 5901, 5800, 7070, 6568, 5938, 1080, 8080, 3128, 3030],
-  };
 }
 
 function testSnapshot(entry: ProxyEntry, previous?: ProxyTestSnapshot): ProxyTestSnapshot {
@@ -167,8 +197,14 @@ const moduleGrants: Record<string, { modules: string[]; flows: string[] }> = {};
 const runs: Record<string, RunState> = {};
 const runTimers: Record<string, ReturnType<typeof setInterval>> = {};
 
+/** Steps that write a profile on this machine: a team's run refuses them (runner.rs, space/mod.rs PERSONAL_ONLY). */
+const WRITES_PROFILE = new Set(["profile.keep", "proxy.set", "proxy.generate", "proxy.residential"]);
+
 function startRun(state: MockState, project: Project, ctx: Ctx): RunState {
   const ids = state.order.slice(0, Math.max(1, project.run.threads));
+  // A team's profile starts for a run only with Start and Cookies on it (doors.rs RUN).
+  const refused = new Map(ids.map((id) => [id, teamStartRefusal(state, id, true)] as const));
+  const at = () => new Date().toLocaleTimeString();
   const run: RunState = {
     project_id: project.id,
     project_name: project.name,
@@ -176,12 +212,13 @@ function startRun(state: MockState, project: Project, ctx: Ctx): RunState {
     running: true,
     workers: ids.map((id) => ({
       profile_id: id, profile_name: state.profiles[id]?.name ?? id, pass: 1, step: 0,
-      steps_total: project.blocks.length, status: "starting", note: "opening the browser",
+      steps_total: project.blocks.length,
+      ...(refused.get(id) ? { status: "failed" as const, note: refused.get(id)! } : { status: "starting" as const, note: "opening the browser" }),
     })),
-    log: [`${new Date().toLocaleTimeString()} run started, ${ids.length} worker(s)`],
+    log: [`${at()} run started, ${ids.length} worker(s)`, ...ids.filter((id) => refused.get(id)).map((id) => `${at()} ${state.profiles[id]?.name ?? id}: ${refused.get(id)}`)],
   };
   runs[project.id] = run;
-  for (const id of ids) startProcess(state, id);
+  for (const id of ids) if (!refused.get(id)) startProcess(state, id);
   runTimers[project.id] = setInterval(() => {
     let live = false;
     for (const w of run.workers) {
@@ -190,6 +227,13 @@ function startRun(state: MockState, project: Project, ctx: Ctx): RunState {
       w.status = "running";
       w.step += 1;
       w.note = project.blocks[w.step - 1]?.label ?? "";
+      if (teamInUse(state) && WRITES_PROFILE.has(project.blocks[w.step - 1]?.kind ?? "")) {
+        w.status = "failed";
+        w.note = TEAM_REFUSALS.personalOnly;
+        run.log.push(`${new Date().toLocaleTimeString()} ${w.profile_name}: ${w.note}`);
+        stopProcess(state, w.profile_id);
+        continue;
+      }
       run.log.push(`${new Date().toLocaleTimeString()} ${w.profile_name}: step ${w.step}/${w.steps_total} ${w.note}`);
       if (w.step >= w.steps_total) {
         if (project.run.loops === 0 || w.pass < project.run.loops) { w.pass += 1; w.step = 0; }
@@ -221,6 +265,47 @@ const engineOffline = () => engineMode() === "offline";
 let engineDownloaded = false;
 const engineInstalled = () => engineDownloaded || (engineMode() !== "offline" && engineMode() !== "missing");
 const engineStepMs = () => Number((window as { __shardxMockEngineStepMs?: number }).__shardxMockEngineStepMs ?? 150);
+
+/** An install that stops short (#122), as runtime.rs `engine_failed` reports it.
+ *  `__shardxMockEngineFail`: each install stops at that stage (read on every call);
+ *  `__shardxMockEngineBusy`: the browsers a busy stop counts (else the running profiles);
+ *  `__shardxMockEngineError`: the stop an earlier start recorded (install-error.json);
+ *  `__shardxMockEngineStaged`: an earlier try left the update unpacked;
+ *  `__shardxMockEngineRemote`: the etag the update offers;
+ *  `__shardxMockEngineManifestLost`: the status after a stop could not read the manifest (it drops the stop);
+ *  `__shardxMockEngineManifestDown`: an install cannot read the manifest at all, so tries nothing;
+ *  `__shardxMockEngineBusyKind`: "starting" (a profile starts) or "untracked" (one left from before). */
+type EngineStage = "download" | "space" | "extract" | "verify" | "busy" | "swap";
+type EngineError = { stage: EngineStage; message: string; running_browsers: number; starting: number; engine_kept: boolean; target: string | null; at_ms: number };
+type EngineKnobs = {
+  __shardxMockEngineFail?: EngineStage; __shardxMockEngineBusy?: number; __shardxMockEngineError?: EngineError; __shardxMockEngineStaged?: boolean;
+  __shardxMockEngineRemote?: string; __shardxMockEngineManifestLost?: boolean; __shardxMockEngineManifestDown?: boolean;
+  __shardxMockEngineBusyKind?: "starting" | "untracked";
+};
+const engineKnobs = () => window as EngineKnobs;
+let engineError: EngineError | null | undefined;
+let engineStaged: boolean | undefined;
+const lastEngineError = () => (engineError === undefined ? (engineError = engineKnobs().__shardxMockEngineError ?? null) : engineError);
+const engineIsStaged = () => (engineStaged === undefined ? (engineStaged = !!engineKnobs().__shardxMockEngineStaged) : engineStaged);
+const remoteEtag = () => (engineMode() === "update" ? engineKnobs().__shardxMockEngineRemote ?? "a91c3e07" : "e2f22d25");
+/** swap.rs `busy`, by the browsers it found. */
+const busyMessage = (n: number) => {
+  const kind = engineKnobs().__shardxMockEngineBusyKind;
+  if (kind === "starting") return "The engine update is ready, but a profile is starting. Wait for it, close the profiles that are running, and try again.";
+  const said = n === 1 ? "The engine update is ready, but 1 profile is still running on the current engine. Close it and try again."
+    : n > 1 ? `The engine update is ready, but ${n} profiles are still running on the current engine. Close them and try again.`
+      : "The engine update is ready, but 1 browser process is still running from the engine folder. Close it (or restart the computer) and try again.";
+  return kind === "untracked" && n > 0
+    ? `${said} If ShardBrowser shows none running, one is left from an earlier session: end it in Task Manager (Activity Monitor on a Mac) or restart the computer.`
+    : said;
+};
+const ENGINE_STOPS: Record<Exclude<EngineStage, "busy">, string> = {
+  space: "Not enough free disk space to update the ShardBrowser engine: it needs about 1460 MB, and 312 MB is free on the disk with /Users/you/Library/Application Support/com.proxyshard.shardx/runtime. Free up space and try again; the engine you have was not touched.",
+  download: "Downloading the engine failed (error decoding response body). The engine you have was not touched.",
+  extract: "Unpacking the engine update failed (invalid zip header). The engine you have was not touched.",
+  verify: "The unpacked engine update is missing ShardX.app/Contents/MacOS/ShardX; an antivirus may have removed it. Allow the engine folder and try again. The engine you have was not touched.",
+  swap: "The engine folder is in use and could not be replaced (Access is denied. (os error 5)). Close every browser window that ShardBrowser opened, and any program that has that folder open, then try again. The update is kept.",
+};
 
 const DATA_ROOT = "/Users/you/Library/Application Support/com.proxyshard.shardx";
 
@@ -276,28 +361,80 @@ function emptyAfterReset(s: MockState, backups: string[]) {
     backup: backups[0],
   });
   delete s.psBalance;
+  // tags.json and folders.json go to the backup with the settings.
+  delete s.tags;
+  delete s.folders;
 }
 
 export const handlers: Record<string, Handler> = {
   // ---- runtime, host, launcher ---------------------------------------------
-  runtime_status: () => ({
-    installed: engineInstalled(), binary_path: `${DATA_ROOT}/engine/ShardX.app`, installed_browser_etag: "e2f22d25", remote_browser_etag: "e2f22d25",
-    update_available: engineMode() === "update" && !engineDownloaded, spec: { browser: { key: "ShardX-Mac-arm64.zip", label: "macOS (Apple Silicon)" }, widevine: null },
-    fingerprints_installed: engineInstalled(), needs_newer_launcher: false, min_launcher_version: "2.0.1", launcher_version: "2.0.3",
-  }),
+  runtime_status: () => {
+    const update_available = engineMode() === "update" && !engineDownloaded;
+    return {
+      installed: engineInstalled(), binary_path: `${DATA_ROOT}/engine/ShardX.app`, installed_browser_etag: engineDownloaded ? remoteEtag() : "e2f22d25", remote_browser_etag: remoteEtag(),
+      update_available, spec: { browser: { key: "ShardX-Mac-arm64.zip", label: "macOS (Apple Silicon)" } },
+      fingerprints_installed: engineInstalled(), needs_newer_launcher: false, min_launcher_version: "2.0.1", launcher_version: "2.0.3",
+      install_error: update_available || !engineInstalled() ? lastEngineError() : null,
+      update_staged: update_available && engineIsStaged(),
+    };
+  },
   runtime_install: async (_a, ctx) => {
-    if (engineOffline()) {
-      ctx.emit("runtime:progress", { label: "ShardX-Mac-arm64.zip", phase: "download", received: 0, total: 2e7, percent: 0 });
-      throw "Could not reach the download server.";
+    const step = (phase: "download" | "extract", received: number, percent: number) =>
+      ctx.emit("runtime:progress", { label: "ShardX-Mac-arm64.zip", phase, received, total: 2e7, percent });
+    // With an engine to keep the window opens on it; with none it is an error.
+    const stop = (stage: EngineStage, message: string, browsers = 0, starting = 0) => {
+      const kept = engineInstalled();
+      engineError = { stage, message, running_browsers: browsers, starting, engine_kept: kept, target: remoteEtag(), at_ms: Date.now() };
+      ctx.emit("runtime:failed", { ...engineError, update_staged: engineIsStaged() });
+      if (!kept) throw message;
+      const status = handlers.runtime_status({}, ctx) as Record<string, unknown>;
+      // The manifest unread: no update offered, so the stop is filtered out (runtime.rs).
+      return engineKnobs().__shardxMockEngineManifestLost
+        ? { ...status, remote_browser_etag: null, update_available: false, install_error: null, update_staged: false }
+        : status;
+    };
+    // The manifest unread: nothing is tried, yet runtime:done comes (runtime.rs).
+    if (engineKnobs().__shardxMockEngineManifestDown) {
+      ctx.emit("runtime:done");
+      return { ...(handlers.runtime_status({}, ctx) as Record<string, unknown>), remote_browser_etag: null, update_available: false, install_error: null, update_staged: false };
     }
-    for (let i = 1; i <= 4; i++) { await sleep(engineStepMs()); ctx.emit("runtime:progress", { label: "ShardX-Mac-arm64.zip", phase: i < 4 ? "download" : "extract", received: i * 5e6, total: 2e7, percent: i * 25 }); }
+    if (engineOffline()) {
+      step("download", 0, 0);
+      return stop("download", "Downloading the engine failed (error sending request for url (https://cdn.shardx.io/ShardX-Mac-arm64.zip)). The engine you have was not touched.");
+    }
+    const fail = engineKnobs().__shardxMockEngineFail;
+    if (engineIsStaged()) step("extract", 0, 100);
+    else {
+      if (fail === "space") return stop("space", ENGINE_STOPS.space);
+      for (let i = 1; i <= 4; i++) {
+        await sleep(engineStepMs());
+        step(i < 4 ? "download" : "extract", i * 5e6, i * 25);
+        if (fail === "download" && i === 2) return stop("download", ENGINE_STOPS.download);
+      }
+      if (fail === "extract" || fail === "verify") return stop(fail, ENGINE_STOPS[fail]);
+      engineStaged = true;
+    }
+    if (fail === "busy") {
+      // Refused only while something runs (or starts) from the engine, as swap.rs is.
+      const knob = engineKnobs().__shardxMockEngineBusy;
+      const n = knob ?? Object.keys(ctx.state.running).length;
+      const starting = engineKnobs().__shardxMockEngineBusyKind === "starting";
+      if (knob !== undefined || n > 0 || starting) return stop("busy", busyMessage(n), starting ? 0 : n, starting ? 1 : 0);
+    }
+    if (fail === "swap") return stop("swap", ENGINE_STOPS.swap);
     engineDownloaded = true;
+    engineStaged = false;
+    engineError = null;
     ctx.emit("runtime:done");
     return handlers.runtime_status({}, ctx);
   },
   launcher_update_check: () => ({ current: "2.0.3", latest: "2.0.3", update_available: false, release_url: "https://github.com/ProxyShard/ShardBrowser/releases/latest" }),
   host_platform: () => hostPlatform(),
-  host_screen: () => [window.screen.width, window.screen.height],
+  // `window.__shardxMockHostScreen = [w, h, dpr]` (or null: no monitor) stands in for the real one.
+  host_screen: () => {
+    const w = window as { __shardxMockHostScreen?: [number, number, number] | null };
+    return w.__shardxMockHostScreen !== undefined ? w.__shardxMockHostScreen : [window.screen.width, window.screen.height, window.devicePixelRatio];
+  },
   read_text_file: () => "",
   // The window's answer to a quit request (B48); recorded in __shardxMock.calls.
   app_quit_asking: () => null,
@@ -415,19 +552,29 @@ export const handlers: Record<string, Handler> = {
       created_at: prev?._meta.created_at ?? nowStamp(),
       total_runtime_ms: prev?._meta.total_runtime_ms ?? 0,
       pinned: prev?._meta.pinned ?? false,
-      folder: prev?._meta.folder ?? "",
+      // A new one takes the settings' own folder (write.rs create_profile); a save never moves one.
+      folder: prev?._meta.folder ?? incoming?._meta?.folder ?? "",
     };
     state.profiles[id] = { ...incoming, _meta: meta };
     if (!prev) state.order.push(id);
     // The backend signals "store-changed" only for API writes; the UI reloads
     // after its own saves as it needs to.
     ctx.save();
+    if (prev) syncTouched(state, [id], { [id]: prev });
     return metaOf(state.profiles[id]);
   },
   profile_delete: ({ id }, ctx) => {
     const { state } = ctx;
     const p = profile(state, id);
     stopProcess(state, id);
+    if (teamInUse(state)) {
+      // Into the team's trash on its server: its folder cannot go while it waits there.
+      intoTeamTrash(ctx, "profile", id, p.name, p, { folder: p._meta.folder, revision: p._meta.rev });
+      delete state.profiles[id];
+      state.order = state.order.filter((x) => x !== id);
+      ctx.save();
+      return null;
+    }
     (state.trashed ??= {})[id] = structuredClone(p);
     // As the backend (trash.rs RETENTION_DAYS): seven days.
     state.trash.unshift({ id, name: p.name, folder: p._meta.folder, deleted_at: Math.floor(Date.now() / 1000), expires_at: Math.floor(Date.now() / 1000) + 7 * 86400, size_bytes: 40_000_000 + Math.round(Math.random() * 150_000_000) });
@@ -453,6 +600,9 @@ export const handlers: Record<string, Handler> = {
   profile_import: ({ payloads }, ctx) => {
     let n = 0;
     for (const p of payloads as StoredProfile[]) {
+      // As lib.rs in a team: each is written in turn, and the first refused stops the rest.
+      const refused = teamCreateRefusal(ctx.state, String(p?._meta?.folder ?? ""));
+      if (refused) { ctx.save(); throw refused; }
       const id = newId();
       ctx.state.profiles[id] = { ...p, _meta: { ...(p._meta ?? {}), id, rev: 1, created_at: nowStamp(), last_launched_at: null, total_runtime_ms: 0, pinned: false, folder: p._meta?.folder ?? "", proxy_id: p._meta?.proxy_id ?? null, gpu_preset_id: p._meta?.gpu_preset_id ?? "", extensions: p._meta?.extensions ?? [] } };
       ctx.state.order.push(id); n++;
@@ -472,12 +622,46 @@ export const handlers: Record<string, Handler> = {
     ctx.save();
     return metaOf(p);
   },
-  process_list: (_a, { state }) => Object.entries(state.running).map(([profile_id, r]) => ({ profile_id, pid: r.pid, uptime_ms: Date.now() - r.started })),
-  process_kill: ({ profileId }, ctx) => { const ok = stopProcess(ctx.state, profileId); ctx.save(); return ok; },
+  process_list: (_a, { state }) => Object.entries(state.running).filter(([id]) => state.profiles[id]).map(([profile_id, r]) => ({ profile_id, pid: r.pid, uptime_ms: Date.now() - r.started })),
+  // A synced profile's session goes up as its browser closes.
+  process_kill: ({ profileId }, ctx) => {
+    const id = String(profileId);
+    // Only a team or synced one has a session to send (open.rs open_now); read while it runs.
+    const sends = openSessions(ctx.state).some((s) => s.profile_id === id);
+    const ok = stopProcess(ctx.state, profileId); ctx.save();
+    // A team profile's session goes back to its team as its browser closes;
+    // `window.__shardxMockSessionSaveMs` keeps it on its way that long (listed, a start refused).
+    const saveMs = (window as { __shardxMockSessionSaveMs?: number }).__shardxMockSessionSaveMs;
+    if (ok) syncTouched(ctx.state, [id]);
+    if (ok && saveMs && sends) {
+      (ctx.state.saving ??= {})[id] = true;
+      setTimeout(() => { sessionEnded(ctx.state, id, "saved", ctx.emit); ctx.save(); }, saveMs);
+    } else if (ok) sessionEnded(ctx.state, id, "saved", ctx.emit);
+    // An extension update that waited for this browser goes in.
+    extProfileClosed(ctx, String(profileId));
+    return ok;
+  },
+  // The quit dialog's list: team and synced profiles open here (lib.rs team_sessions).
+  team_sessions: (_a, { state }) => openSessions(state),
   launch: async ({ profileId }, ctx) => {
+    // A team's start takes its lease from the server first (open.rs open_team).
+    const offline = teamUnreachable(ctx.state);
+    if (offline) throw offline;
+    // A start under way (launch.rs Starting), or a closed team profile whose session is still sent (open.rs claim).
+    if (starting.has(String(profileId)) || ctx.state.saving?.[String(profileId)]) throw TEAM_REFUSALS.busy;
+    const resendMs = (window as { __shardxMockSessionSaveMs?: number }).__shardxMockSessionSaveMs ?? 1500;
+    if (resendUnsent(ctx.state, String(profileId), ctx.emit, ctx.save, resendMs)) { ctx.save(); throw TEAM_REFUSALS.busy; }
+    const gone = proxyGone(ctx.state, String(profileId));
+    if (gone) throw gone;
+    // As the backend: another device holds a synced profile's lease.
+    const lease = syncLease(ctx.state, String(profileId));
+    if (lease) throw SYNC_REFUSALS.leased(lease);
     // What the engine starts with is read now, as the backend does: recorded for tests.
-    const w = window as { __shardxMockLaunches?: { id: string; proxy_id: string | null }[] };
-    (w.__shardxMockLaunches ??= []).push({ id: String(profileId), proxy_id: profile(ctx.state, String(profileId))._meta.proxy_id });
+    const w = window as { __shardxMockLaunches?: { id: string; proxy_id: string | null }[]; __shardxMockStartPayloads?: { id: string; extensions: string[]; bookmarks: string[] }[] };
+    const meta = profile(ctx.state, String(profileId))._meta;
+    (w.__shardxMockLaunches ??= []).push({ id: String(profileId), proxy_id: meta.proxy_id });
+    // Its extensions and the team's bookmarks come with the start (items.rs, ?profile=), whatever the member's lists show.
+    (w.__shardxMockStartPayloads ??= []).push({ id: String(profileId), extensions: [...meta.extensions], bookmarks: ctx.state.bookmarks.map((b) => b.id) });
     // `launch_cancel` (below, B49) ends the launch with a "cancelled" error, at any moment of it.
     const cancels = (window as { __shardxMockLaunchCancelled?: string[] }).__shardxMockLaunchCancelled ??= [];
     const cancelled = () => {
@@ -487,15 +671,20 @@ export const handlers: Record<string, Handler> = {
       return true;
     };
     if (cancelled()) throw "Launch cancelled";
-    for (let waited = 0; waited < 900; waited += 50) {
-      await sleep(50);
-      if (cancelled()) throw "Launch cancelled";
+    starting.add(String(profileId));
+    try {
+      for (let waited = 0; waited < 900; waited += 50) {
+        await sleep(50);
+        if (cancelled()) throw "Launch cancelled";
+      }
+      // `window.__shardxMockLaunchFails = [ids]`, set before load, makes those launches fail.
+      if (((window as { __shardxMockLaunchFails?: string[] }).__shardxMockLaunchFails ?? []).includes(String(profileId))) {
+        throw "Engine could not start: port in use";
+      }
+      const pid = startProcess(ctx.state, profileId); ctx.save(); return pid;
+    } finally {
+      starting.delete(String(profileId));
     }
-    // `window.__shardxMockLaunchFails = [ids]`, set before load, makes those launches fail.
-    if (((window as { __shardxMockLaunchFails?: string[] }).__shardxMockLaunchFails ?? []).includes(String(profileId))) {
-      throw "Engine could not start: port in use";
-    }
-    const pid = startProcess(ctx.state, profileId); ctx.save(); return pid;
   },
   // Backend B49. `window.__shardxMockLaunchCancel` picks how the backend answers: unset, it has no
   // such command (Tauri rejects an unknown one, as the real backend does today); "now", it ends the
@@ -510,7 +699,24 @@ export const handlers: Record<string, Handler> = {
     ((window as { __shardxMockLaunchCancelled?: string[] }).__shardxMockLaunchCancelled ??= []).push(String(profileId));
     return null;
   },
-  sync_launch: async ({ profileIds, group }, ctx) => { await sleep(700); for (const id of profileIds) startProcess(ctx.state, id); ctx.save(); return group || `group-${newId().slice(0, 4)}`; },
+  sync_launch: async ({ profileIds, group }, ctx) => {
+    await sleep(700);
+    // As lib.rs: a profile that cannot start is left out; only all of them failing is an error.
+    const failed: string[] = [];
+    for (const id of profileIds) {
+      const gone = proxyGone(ctx.state, String(id));
+      const lease = syncLease(ctx.state, String(id));
+      // A team's profile starts only with Start on it (launch_profile_synced, open.rs passes).
+      const right = teamUnreachable(ctx.state) ?? teamStartRefusal(ctx.state, String(id), false);
+      if (right) failed.push(`${id}: ${right}`);
+      else if (gone) failed.push(`${id}: ${gone}`);
+      else if (lease) failed.push(`${id}: ${SYNC_REFUSALS.leased(lease)}`);
+      else startProcess(ctx.state, id);
+    }
+    ctx.save();
+    if (failed.length && failed.length === profileIds.length) throw `nothing launched — ${failed.join("; ")}`;
+    return group || `group-${newId().slice(0, 4)}`;
+  },
   sync_status: ({ group }, { state }) => ({ group, members: Object.keys(state.running).map((profile, i) => ({ profile, excluded: false, driving: i === 0 })), paused: false }),
   sync_set_paused: () => null,
   sync_arrange: () => null,
@@ -529,15 +735,111 @@ export const handlers: Record<string, Handler> = {
       const p = ctx.state.profiles[id];
       if (p._meta.folder === old) { p._meta.folder = String(next); n++; }
     }
+    // As space::profile::rename_folder: the kept entry and the look follow.
+    // A folder never kept makes no file.
+    if (ctx.state.folders) renameFolder(ctx.state.folders, String(old), String(next));
     ctx.save();
     return n;
   },
   folder_delete: ({ folder, deleteProfiles }, ctx) => {
     const ids = ctx.state.order.filter((id) => ctx.state.profiles[id]._meta.folder === folder);
     for (const id of ids) { if (deleteProfiles) handlers.profile_delete({ id }, ctx); else ctx.state.profiles[id]._meta.folder = ""; }
+    const server = teamServerInUse(ctx.state);
+    if (server) {
+      // As write.rs delete_folder: the server keeps it while profiles deleted from it wait in
+      // the team's trash; only a delete that took its profiles along lets that pass.
+      if ((server.trash ?? []).some((p) => p.folder === folder)) {
+        ctx.save();
+        if (!(deleteProfiles && ids.length)) throw TEAM_REFUSALS.folderInTrash;
+        return ids.length;
+      }
+      server.folders = server.folders.filter((x) => x.name !== folder);
+    }
+    // As folders.rs: a folder never kept makes no file.
+    const f = ctx.state.folders;
+    if (f) { f.registry = f.registry.filter((x) => x !== folder); delete f.meta[String(folder)]; }
     // As the backend: store-changed is for API writes only.
     ctx.save();
     return ids.length;
+  },
+  // ---- Tags and folders (tags.rs, folders.rs) ------------------------------------
+  tag_list: (_a, { state }) => state.tags ?? { tags: [], by_profile: {} },
+  tag_save: ({ tag, at }, ctx) => {
+    const s = tagsOf(ctx.state);
+    const name = cleanTag(tag?.name);
+    if (!name) throw "a tag needs a name";
+    if (!String(tag?.color ?? "").trim()) throw "a tag needs a color";
+    if (s.tags.some((t) => t.id !== tag.id && t.name.toLowerCase() === name.toLowerCase())) throw `a tag named ${name} already exists`;
+    const next = { id: String(tag.id || `t-${newId()}`), name, color: String(tag.color).trim() };
+    const i = s.tags.findIndex((t) => t.id === next.id);
+    if (i >= 0) s.tags[i] = next;
+    else s.tags.splice(Math.min(typeof at === "number" ? at : s.tags.length, s.tags.length), 0, next);
+    ctx.save();
+    return next;
+  },
+  tag_delete: ({ id }, ctx) => {
+    // As tags.rs: a change that changes nothing makes no file.
+    if (!ctx.state.tags) return null;
+    const s = ctx.state.tags;
+    const gone = s.tags.find((t) => t.id === id);
+    if (gone && teamInUse(ctx.state)) intoTeamTrash(ctx, "tag", gone.id, gone.name, gone);
+    s.tags = s.tags.filter((t) => t.id !== id);
+    for (const [pid, ids] of Object.entries(s.by_profile)) {
+      const kept = ids.filter((x) => x !== id);
+      if (kept.length) s.by_profile[pid] = kept; else delete s.by_profile[pid];
+    }
+    ctx.save();
+    return null;
+  },
+  tag_assign: ({ byProfile }, ctx) => { if (ctx.state.tags) { assignTags(ctx.state.tags, byProfile ?? {}); ctx.save(); } return null; },
+  // Taken only while nothing was ever saved: a second import changes nothing.
+  tag_import: ({ state: given }, ctx) => {
+    personalOnly(ctx.state);
+    if (ctx.state.tags) return false;
+    const seen = new Set<string>();
+    const tags = ((given?.tags ?? []) as MockTags["tags"]).filter((t) => t.id && t.name && t.color && !seen.has(t.id) && !!seen.add(t.id));
+    const s: MockTags = { tags, by_profile: {} };
+    assignTags(s, given?.by_profile ?? {});
+    ctx.state.tags = s;
+    ctx.save();
+    return true;
+  },
+  folder_list: (_a, { state }) => {
+    const server = teamServerInUse(state);
+    if (!server) return state.folders ?? { registry: [], meta: {} };
+    return {
+      registry: server.folders.map((f) => f.name),
+      meta: Object.fromEntries(server.folders.map((f) => [f.name, { color: f.color || null, icon: "folder" }])),
+    };
+  },
+  folder_add: ({ name }, ctx) => {
+    if (!String(name ?? "").trim()) throw "a folder needs a name";
+    const server = teamServerInUse(ctx.state);
+    if (server && !server.folders.some((x) => x.name === name)) server.folders.push({ name, color: "" });
+    const f = foldersOf(ctx.state);
+    if (!f.registry.includes(name)) f.registry.push(name);
+    ctx.save();
+    return null;
+  },
+  folder_meta_set: ({ name, meta }, ctx) => {
+    if (!String(name ?? "").trim()) throw "a folder needs a name";
+    foldersOf(ctx.state).meta[name] = { color: meta?.color ?? null, icon: meta?.icon ?? "folder" };
+    const server = teamServerInUse(ctx.state);
+    if (server) {
+      const f = server.folders.find((x) => x.name === name);
+      if (f) f.color = meta?.color ?? ""; else server.folders.push({ name, color: meta?.color ?? "" });
+    }
+    ctx.save();
+    return null;
+  },
+  folder_import: ({ state: given }, ctx) => {
+    personalOnly(ctx.state);
+    if (ctx.state.folders) return false;
+    const registry = [...new Set(((given?.registry ?? []) as string[]).filter((f) => typeof f === "string" && f.trim()))];
+    const meta = Object.fromEntries(Object.entries((given?.meta ?? {}) as MockFolders["meta"]).filter(([n]) => n.trim()));
+    ctx.state.folders = { registry, meta };
+    ctx.save();
+    return true;
   },
   cookies_export_to_file: () => 42,
   cookies_import: ({ cookies }) => (Array.isArray(cookies) ? cookies.length : 0),
@@ -557,6 +859,8 @@ export const handlers: Record<string, Handler> = {
     return e;
   },
   proxy_delete: ({ id }, ctx) => {
+    const gone = ctx.state.proxies.find((p) => p.id === id);
+    if (gone && teamInUse(ctx.state)) intoTeamTrash(ctx, "proxy", gone.id, gone.name || `${gone.host}:${gone.port}`, gone, { proxy_kind: gone.kind, country: gone.country });
     ctx.state.proxies = ctx.state.proxies.filter((p) => p.id !== id);
     delete ctx.state.snapshots[id];
     // As the backend (proxy.rs:116-126): profiles keep the id of a proxy that
@@ -623,21 +927,40 @@ export const handlers: Record<string, Handler> = {
 
   // ---- extensions, bookmarks, trash -------------------------------------------
   extension_list: (_a, { state }) => state.extensions,
-  extension_import: ({ paths }, ctx) => {
-    const added = (paths as string[]).map((path) => ({ id: `ext-${newId().slice(0, 6)}`, name: path.split("/").pop()?.replace(/\.(crx|zip)$/, "") || "Extension", version: "1.0.0", description: "Imported from disk.", icon: "", path, size_bytes: 500_000 + Math.round(Math.random() * 5e6), added_at: `@${Math.floor(Date.now() / 1000)}` }));
-    ctx.state.extensions.push(...added); changed(ctx, "extensions"); return added;
+  // As lib.rs: each file in turn, and each one refused is named with why (extensions.rs import_each).
+  extension_import: ({ paths, separate }, ctx) => {
+    const added: MockState["extensions"] = [];
+    const refused: { path: string; error: string }[] = [];
+    for (const path of paths as string[]) {
+      // The same extension again (extUpdates.ts knob): refused unless a separate copy.
+      const same = separate ? undefined : importSame(ctx.state);
+      if (same) { refused.push({ path, error: alreadyInLibrary(ctx.state, same) }); continue; }
+      // A file named "broken…" is no package.
+      if (/broken/i.test(path)) { refused.push({ path, error: "not a zip/crx archive: invalid Zip archive: Could not find EOCD" }); continue; }
+      added.push({ id: `ext-${newId().slice(0, 6)}`, name: path.split("/").pop()?.replace(/\.(crx|zip)$/, "") || "Extension", version: "1.0.0", description: "Imported from disk.", icon: "", path, size_bytes: 500_000 + Math.round(Math.random() * 5e6), added_at: `@${Math.floor(Date.now() / 1000)}` });
+    }
+    if (added.length) { ctx.state.extensions.push(...added); changed(ctx, "extensions"); }
+    return { added, refused };
   },
-  extension_import_url: ({ url }, ctx) => {
-    const id = /[a-p]{32}/.exec(String(url))?.[0]?.slice(0, 8) ?? newId();
-    const e = { id: `ext-${id}`, name: `Web Store ${id.slice(0, 4)}`, version: "3.2.1", description: `Downloaded from ${url}`, icon: "", path: `${DATA_ROOT}/extensions/${id}`, size_bytes: 1_200_000, added_at: `@${Math.floor(Date.now() / 1000)}` };
+  extension_import_url: ({ url, separate }, ctx) => {
+    const store = /[a-p]{32}/.exec(String(url))?.[0];
+    // One the library holds already (extensions.rs already_in_library).
+    const there = store ? ctx.state.extensions.find((x) => x.source?.kind === "webstore" && x.source.id === store) : undefined;
+    if (there && !separate) throw alreadyInLibrary(ctx.state, there);
+    const id = there ? newId().slice(0, 6) : store?.slice(0, 8) ?? newId();
+    const e = { id: `ext-${id}`, name: there?.name ?? `Web Store ${id.slice(0, 4)}`, version: there?.version ?? "3.2.1", description: `Downloaded from ${url}`, icon: "", path: `${DATA_ROOT}/extensions/${id}`, size_bytes: 1_200_000, added_at: `@${Math.floor(Date.now() / 1000)}`, ...(store ? { source: { kind: "webstore" as const, id: store } } : {}) };
     ctx.state.extensions.push(e); changed(ctx, "extensions"); return e;
   },
-  extension_delete: ({ id }, ctx) => { ctx.state.extensions = ctx.state.extensions.filter((e) => e.id !== id); for (const p of Object.values(ctx.state.profiles)) p._meta.extensions = p._meta.extensions.filter((x) => x !== id); changed(ctx, "extensions"); return null; },
+  extension_delete: ({ id }, ctx) => { const gone = ctx.state.extensions.find((e) => e.id === id); if (gone && teamInUse(ctx.state)) intoTeamTrash(ctx, "extension", gone.id, gone.name, gone); ctx.state.extensions = ctx.state.extensions.filter((e) => e.id !== id); delete ctx.state.extUpdates?.[id]; for (const p of Object.values(ctx.state.profiles)) p._meta.extensions = p._meta.extensions.filter((x) => x !== id); changed(ctx, "extensions"); return null; },
+  ...extUpdateHandlers,
   bookmark_list: (_a, { state }) => state.bookmarks,
-  bookmark_save: ({ entry }, ctx) => { const b = { ...entry }; if (!b.id) { b.id = `bm-${newId().slice(0, 6)}`; ctx.state.bookmarks.push(b); } else { const i = ctx.state.bookmarks.findIndex((x) => x.id === b.id); if (i >= 0) ctx.state.bookmarks[i] = b; else ctx.state.bookmarks.push(b); } ctx.save(); return b; },
-  bookmark_delete: ({ id }, ctx) => { ctx.state.bookmarks = ctx.state.bookmarks.filter((b) => b.id !== id); ctx.save(); return null; },
-  trash_list: (_a, { state }) => state.trash,
+  // As bookmarks.rs cleaned(): trimmed, the address made whole, an untitled one named by its address.
+  bookmark_save: ({ entry }, ctx) => { const b = { ...entry, title: String(entry.title ?? "").trim(), url: String(entry.url ?? "").trim(), folder: String(entry.folder ?? "").trim() }; if (!b.url) throw "a bookmark needs a URL"; if (!b.url.includes("://")) b.url = `https://${b.url}`; if (!b.title) b.title = b.url; if (!b.id) { b.id = `bm-${newId().slice(0, 6)}`; ctx.state.bookmarks.push(b); } else { const i = ctx.state.bookmarks.findIndex((x) => x.id === b.id); if (i >= 0) ctx.state.bookmarks[i] = b; else ctx.state.bookmarks.push(b); } ctx.save(); return b; },
+  bookmark_delete: ({ id }, ctx) => { const gone = ctx.state.bookmarks.find((b) => b.id === id); if (gone && teamInUse(ctx.state)) intoTeamTrash(ctx, "bookmark", gone.id, gone.title || gone.url, gone); ctx.state.bookmarks = ctx.state.bookmarks.filter((b) => b.id !== id); ctx.save(); return null; },
+  // A team keeps no trash here (space/mod.rs trash::list).
+  trash_list: (_a, { state }) => (teamInUse(state) ? [] : state.trash),
   trash_restore: ({ id }, ctx) => {
+    personalOnly(ctx.state);
     const t = ctx.state.trash.find((x) => x.id === id);
     if (!t) throw `nothing in the trash with id ${id}`;
     // As the backend unpacks the archive: the profile as it went in. Seeded
@@ -659,8 +982,80 @@ export const handlers: Record<string, Handler> = {
     ctx.save();
     return metaOf(p);
   },
-  trash_purge: ({ id }, ctx) => { ctx.state.trash = ctx.state.trash.filter((x) => x.id !== id); delete ctx.state.trashed?.[id]; delete ctx.state.trashedAt?.[id]; ctx.save(); return null; },
-  trash_empty: (_a, ctx) => { const n = ctx.state.trash.length; ctx.state.trash = []; ctx.state.trashed = {}; ctx.state.trashedAt = {}; ctx.save(); return n; },
+  trash_purge: ({ id }, ctx) => { personalOnly(ctx.state); ctx.state.trash = ctx.state.trash.filter((x) => x.id !== id); delete ctx.state.trashed?.[id]; delete ctx.state.trashedAt?.[id]; ctx.save(); return null; },
+  // A team keeps no trash here: emptying it empties nothing (space/mod.rs trash::empty).
+  trash_empty: (_a, ctx) => { if (teamInUse(ctx.state)) return 0; const n = ctx.state.trash.length; ctx.state.trash = []; ctx.state.trashed = {}; ctx.state.trashedAt = {}; ctx.save(); return n; },
+
+  // ---- Spaces and teams (team.rs) ---------------------------------------------
+  space_state: (_a, { state }) => spaceState(state),
+  space_set: ({ space }, ctx) => {
+    const sp = space as NonNullable<MockState["space"]>;
+    const joined = sp.kind === "team" ? (ctx.state.teams ?? []).find((t) => t.id === sp.team_id) : undefined;
+    if (sp.kind === "team" && !joined) throw "not a member of that team";
+    // As team.rs set_space: a team that withdrew this launcher stays shut, and
+    // one whose token was replaced waits for the new invite.
+    if (joined?.revoked) throw `${joined.name} withdrew this launcher's access: join it again`;
+    if (joined?.needs_invite) throw `${joined.name}: the server does not know this token any more: paste the new invite from the team's admin`;
+    ctx.state.space = sp;
+    settle(ctx.state, ctx.emit);
+    ctx.save();
+    told(ctx.state, ctx.emit);
+    return spaceState(ctx.state);
+  },
+  // A member token is "stm_…", an admin token a JWT ("eyJ…"); anything else
+  // is what a server answers to a wrong token.
+  team_join: async ({ server, token }, ctx) => {
+    await sleep(300);
+    const url = String(server ?? "").trim();
+    const tok = String(token ?? "").trim();
+    // As team.rs server_base and join_refused word it.
+    let u: URL | null = null;
+    try { u = new URL(url); } catch { /* not an address */ }
+    if (!u || !/^https?:$/.test(u.protocol) || !u.host) throw "not a server address: give it as http://host:port";
+    const host = u.host;
+    const admin = tok.startsWith("eyJ");
+    if (!admin && !tok.startsWith("stm_")) throw "the server does not know this token";
+    const id = `team-${host}`;
+    const teams = (ctx.state.teams ?? []).filter((t) => t.id !== id);
+    const name = ctx.state.teamServers?.[id]?.name ?? host.split(".")[0].replace(/^./, (c) => c.toUpperCase()) + " team";
+    // The server answers who the token is: the admin, or one of its members.
+    joinTeamServer(ctx.state, id, name, tok, admin);
+    ctx.state.teams = [...teams, { id, name, server: url, admin }];
+    // Joined to work there: the launcher moves into it at once.
+    ctx.state.space = { kind: "team", team_id: id };
+    settle(ctx.state, ctx.emit);
+    ctx.save();
+    told(ctx.state, ctx.emit);
+    return spaceState(ctx.state);
+  },
+  team_leave: ({ teamId }, ctx) => {
+    // As lib.rs: its profiles open here go back to it and close first (close_team_and_wait).
+    for (const s of openSessions(ctx.state)) {
+      if (s.mine || s.team_id !== teamId) continue;
+      stopProcess(ctx.state, s.profile_id);
+      sessionEnded(ctx.state, s.profile_id, "saved", ctx.emit);
+    }
+    ctx.state.teams = (ctx.state.teams ?? []).filter((t) => t.id !== teamId);
+    if (ctx.state.space?.kind === "team" && ctx.state.space.team_id === teamId) {
+      ctx.state.space = { kind: "personal" };
+      settle(ctx.state, ctx.emit);
+      told(ctx.state, ctx.emit);
+    } else {
+      // As lib.rs team_leave: the windows hear of it either way.
+      ctx.emit("space-changed", spaceStateOf(ctx.state).space);
+    }
+    // What was read of it is forgotten with it.
+    if (ctx.state.spaceData) delete ctx.state.spaceData[String(teamId)];
+    ctx.save();
+    return spaceState(ctx.state);
+  },
+
+  // ---- Team admin and a member's own access (teamServer.ts) -------------------
+  ...teamHandlers,
+  ...teamTrashHandlers,
+
+  // ---- Personal sync (syncServer.ts) -------------------------------------------
+  ...syncHandlers,
 
   // ---- ProxyShard account -----------------------------------------------------
   ps_get_key: (_a, { state }) => state.psKey,
@@ -721,17 +1116,25 @@ export const handlers: Record<string, Handler> = {
   automation_list: (_a, { state }) => state.automation,
   automation_create: ({ name }, ctx) => {
     const p: Project = { id: `proj-${newId().slice(0, 6)}`, name: String(name || "Untitled"), notes: "", blocks: [], run: { threads: 1, loops: 1, hours: 0, profiles: [], start: "" }, rules: [], created_at: Math.floor(Date.now() / 1000), updated_at: Math.floor(Date.now() / 1000) };
-    ctx.state.automation.push(p); ctx.save(); return p;
+    ctx.state.automation.push(teamNew(ctx.state, p)); ctx.save(); return p;
   },
-  automation_save: ({ project }, ctx) => { const p = { ...(project as Project), updated_at: Math.floor(Date.now() / 1000) }; const i = ctx.state.automation.findIndex((x) => x.id === p.id); if (i >= 0) ctx.state.automation[i] = p; else ctx.state.automation.push(p); ctx.save(); return p; },
-  automation_delete: ({ id }, ctx) => { stopRun(ctx.state, id); ctx.state.automation = ctx.state.automation.filter((p) => p.id !== id); ctx.save(); return null; },
-  automation_duplicate: ({ id }, ctx) => { const src = ctx.state.automation.find((p) => p.id === id); if (!src) throw `project ${id} not found`; const copy: Project = JSON.parse(JSON.stringify(src)); copy.id = `proj-${newId().slice(0, 6)}`; copy.name = `${src.name} copy`; copy.created_at = copy.updated_at = Math.floor(Date.now() / 1000); ctx.state.automation.push(copy); ctx.save(); return copy; },
+  automation_save: ({ project }, ctx) => { const team = teamSave(ctx.state, project as Project); if (team) { ctx.save(); return team; } const p = { ...(project as Project), updated_at: Math.floor(Date.now() / 1000) }; const i = ctx.state.automation.findIndex((x) => x.id === p.id); if (i >= 0) ctx.state.automation[i] = p; else ctx.state.automation.push(p); ctx.save(); return p; },
+  automation_delete: ({ id }, ctx) => { stopRun(ctx.state, id); const gone = ctx.state.automation.find((p) => p.id === id); if (gone && teamInUse(ctx.state)) intoTeamTrash(ctx, "automation", gone.id, gone.name, gone); ctx.state.automation = ctx.state.automation.filter((p) => p.id !== id); ctx.save(); return null; },
+  automation_duplicate: ({ id }, ctx) => { const src = ctx.state.automation.find((p) => p.id === id); if (!src) throw `project ${id} not found`; const copy: Project = JSON.parse(JSON.stringify(src)); copy.id = `proj-${newId().slice(0, 6)}`; copy.name = `${src.name} copy`; copy.created_at = copy.updated_at = Math.floor(Date.now() / 1000); ctx.state.automation.push(teamNew(ctx.state, copy)); ctx.save(); return copy; },
   automation_attach: () => null,
   automation_detach: () => null,
   automation_attached: () => false,
   automation_screencast: () => null,
   automation_call: ({ method }) => { if (method === "Traffic.list") return { rulesJson: "[]" }; if (method === "Traffic.mount") return { ruleSetId: `rs-${newId().slice(0, 4)}` }; if (method === "Script.run") return { result: "null" }; return {}; },
-  automation_launch: async ({ profileId }, ctx) => { await sleep(700); const pid = startProcess(ctx.state, profileId); ctx.save(); return pid; },
+  automation_launch: async ({ profileId }, ctx) => {
+    const offline = teamUnreachable(ctx.state);
+    if (offline) throw offline;
+    const gone = proxyGone(ctx.state, String(profileId));
+    if (gone) throw gone;
+    const lease = syncLease(ctx.state, String(profileId));
+    if (lease) throw SYNC_REFUSALS.leased(lease);
+    await sleep(700); const pid = startProcess(ctx.state, profileId); ctx.save(); return pid;
+  },
   automation_pick: ({ x, y }) => ({ selector: "button.primary", tag: "button", label: "Continue", x, y, tried: ["#submit (not found)", "text=Continue (2 matches)"] }),
   automation_run: ({ projectId }, ctx) => { const p = ctx.state.automation.find((x) => x.id === projectId); if (!p) throw `project ${projectId} not found`; if (p.blocks.length === 0) throw "the project has no steps"; startRun(ctx.state, p, ctx); ctx.save(); return null; },
   automation_run_stop: ({ projectId }, ctx) => { stopRun(ctx.state, projectId); ctx.save(); return null; },
@@ -746,7 +1149,7 @@ export const handlers: Record<string, Handler> = {
   automation_module_remove: ({ id }, ctx) => { ctx.state.modules = ctx.state.modules.filter((m) => m.id !== id); ctx.save(); return null; },
   automation_modules_dir: () => `${DATA_ROOT}/modules`,
   automation_export: ({ projectId }, { state }) => { const p = state.automation.find((x) => x.id === projectId); if (!p) throw `project ${projectId} not found`; return { format: 1, exported_at: Math.floor(Date.now() / 1000), project: p, modules: [], needs: p.blocks.filter((b) => b.secrets.length).map((b) => ({ block_id: b.id, label: b.label, params: b.secrets })) }; },
-  automation_import: ({ bundle }, ctx) => { const p: Project = JSON.parse(JSON.stringify(bundle.project)); p.id = `proj-${newId().slice(0, 6)}`; ctx.state.automation.push(p); ctx.save(); return p; },
+  automation_import: ({ bundle }, ctx) => { const p: Project = JSON.parse(JSON.stringify(bundle.project)); p.id = `proj-${newId().slice(0, 6)}`; ctx.state.automation.push(teamNew(ctx.state, p)); ctx.save(); return p; },
   automation_display: () => ({ server: hostPlatform() === "macOS" ? "quartz" : "x11", limited: false, note: "", browser_placement: true, panels: true }),
 
   // ---- Tauri plugins ------------------------------------------------------------
@@ -755,6 +1158,9 @@ export const handlers: Record<string, Handler> = {
   "plugin:app|tauri_version": () => "2.5.0",
   "plugin:dialog|open": ({ options }) => {
     const o = options ?? {};
+    // `window.__shardxMockOpenFiles = [paths]`: what a multi-file pick answers.
+    const picked = (window as { __shardxMockOpenFiles?: string[] }).__shardxMockOpenFiles;
+    if (picked && o.multiple && !o.directory) return picked;
     if (o.directory) return o.multiple ? ["/Users/you/Desktop/ShardX-data"] : "/Users/you/Desktop/ShardX-data";
     const file = o.filters?.[0]?.extensions?.[0] ? `export.${o.filters[0].extensions[0]}` : "profile.json";
     return o.multiple ? [`/Users/you/Downloads/${file}`] : `/Users/you/Downloads/${file}`;

@@ -46,6 +46,10 @@ const CONFIG_ENTRIES: &[&str] = &[
     "proxies.json",
     "proxies-history.json",
     "bookmarks.json",
+    "tags.json",
+    "tags.json.tmp",
+    "folders.json",
+    "folders.json.tmp",
     "automation.json",
     "automation.json.tmp",
     "psapi.json",
@@ -433,8 +437,34 @@ pub(crate) fn lock_is_live(udd: &Path) -> bool {
     if host.is_empty() {
         return false;
     }
+    // A lock naming another machine is not ours to read a pid out of. A
+    // profile carried over from another computer, or restored from a backup,
+    // keeps that machine's SingletonLock, and its pid can easily exist here as
+    // something else entirely. While this answer only decided whether to show
+    // "Running" the cost of being wrong was a stuck row; Stop now acts on it,
+    // so being wrong would mean signalling a stranger's process. An unknown
+    // local name leaves the old behaviour alone rather than calling every lock
+    // dead.
+    if this_host().is_some_and(|here| here != host) {
+        return false;
+    }
     let Ok(pid) = pid.parse::<i32>() else { return false };
     pid_alive(pid)
+}
+
+/// This machine's name, the way Chromium writes it into `SingletonLock`.
+#[cfg(unix)]
+pub(crate) fn this_host() -> Option<String> {
+    let mut buf = [0 as libc::c_char; 256];
+    // SAFETY: gethostname writes at most buf.len() bytes and NUL-terminates
+    // whenever it returns 0; the buffer outlives the CStr borrowed from it.
+    if unsafe { libc::gethostname(buf.as_mut_ptr(), buf.len()) } != 0 {
+        return None;
+    }
+    unsafe { std::ffi::CStr::from_ptr(buf.as_ptr()) }
+        .to_str()
+        .ok()
+        .map(str::to_owned)
 }
 
 #[cfg(unix)]
@@ -785,7 +815,7 @@ fn start(plan: &Plan, stamp: &str) -> Result<Journal> {
 fn execute(plan: &Plan, stamp: &str, before: &mut dyn FnMut(&JStep) -> Result<()>) -> Result<Vec<PathBuf>> {
     // A browser's last write (its run time) waits for this, then finds no
     // profile to write to: it never brings one back.
-    let _profiles = crate::profile::file_lock();
+    let _profiles = crate::space::profile::file_lock();
     let j = start(plan, stamp)?;
     let mut failed = None;
     for step in &j.steps {
@@ -1302,7 +1332,17 @@ fn live_config() -> Result<PathBuf> {
 /// What Delete all data would move, counted. Reads only.
 #[tauri::command]
 pub async fn app_reset_plan() -> Result<PlanView, String> {
+    crate::space::open::refuse_while_open()?;
     blocking(|| Ok(current_plan()?.view(&stamp_now()))).await
+}
+
+/// The teams go with the data: a reset that kept a token would keep the access.
+/// Nothing of them goes into the backup.
+fn forget_teams() {
+    if let Err(e) = crate::space::forget_teams() {
+        eprintln!("[launcher] reset: the teams were not forgotten: {e:#}");
+        crate::notify_warning(format!("The team connections could not be removed: {e:#}"));
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -1334,6 +1374,8 @@ pub async fn app_reset(plan_id: String) -> Result<ResetDone, String> {
         return Err("Nothing was moved: your data is being moved. Try again when that finishes.".into());
     };
     refuse_while_starting()?;
+    // A team profile's copy lives under the data folder, with its lease and upload.
+    crate::space::open::refuse_while_open()?;
     if blocking(current_plan).await?.digest() != digest {
         return Err(CHANGED.into());
     }
@@ -1350,6 +1392,7 @@ pub async fn app_reset(plan_id: String) -> Result<ResetDone, String> {
     refuse_while_starting()?;
     match blocking(move || execute(&checked, &stamp, &mut |_| Ok(()))).await {
         Ok(backups) => {
+            forget_teams();
             crate::store::set_data_root(None);
             eprintln!("[launcher] all data moved to {backups:?}");
             if let Ok(mut last) = LAST_BACKUPS.lock() {
@@ -1429,6 +1472,7 @@ pub async fn app_reset_finish() -> Result<ResetDone, String> {
         return Err("Your data is being moved. Try again when that finishes.".into());
     };
     let backups = blocking(|| finish_pending(&live_config()?)).await?;
+    forget_teams();
     held.keep();
     Ok(done(backups))
 }
@@ -1523,7 +1567,7 @@ mod tests {
         put(&config.join("proxies.json"), r#"{"proxies":[{},{}]}"#);
         put(&config.join("bookmarks.json"), r#"{"bookmarks":[{}]}"#);
         put(&config.join("automation.json"), r#"{"projects":[{},{},{}]}"#);
-        for name in ["proxies-history.json", "psapi.json", "host-gl-caps.json"] {
+        for name in ["proxies-history.json", "psapi.json", "host-gl-caps.json", "tags.json", "folders.json"] {
             put(&config.join(name), "{}");
         }
         put(&config.join("automation-modules/m.wasm"), "wasm");
@@ -1630,6 +1674,7 @@ mod tests {
         let c = &fx.config;
         for gone in [
             "settings.json", "proxies.json", "proxies-history.json", "bookmarks.json",
+            "tags.json", "folders.json",
             "automation.json", "psapi.json", "host-gl-caps.json", "automation-modules",
             "automation-runs", "profiles", "user-data", "extensions", "trash",
             "fingerprints/mine.json", "fingerprints/.staging", "runtime/profile-icons",
@@ -2127,6 +2172,26 @@ mod tests {
 
     /// A browser from any run that still holds a profile stops the reset
     /// before anything moves; a stale lock does not.
+    /// A profile copied from another computer keeps that machine's
+    /// SingletonLock. Its pid means nothing here, and Stop acts on this
+    /// answer now, so a foreign host must read as "not running".
+    #[cfg(unix)]
+    #[test]
+    fn a_lock_from_another_machine_is_not_ours() {
+        use std::os::unix::fs::symlink;
+        let dir = std::env::temp_dir().join(format!("shardx-foreign-lock-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        // Our own live pid, so only the host can decide the answer.
+        symlink(format!("not-this-machine-{}", std::process::id()), dir.join("SingletonLock")).unwrap();
+        assert!(!lock_is_live(&dir));
+        let host = this_host().unwrap();
+        fs::remove_file(dir.join("SingletonLock")).unwrap();
+        symlink(format!("{host}-{}", std::process::id()), dir.join("SingletonLock")).unwrap();
+        assert!(lock_is_live(&dir));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
     #[cfg(unix)]
     #[test]
     fn a_browser_still_holding_a_profile_stops_the_reset() {
@@ -2134,7 +2199,10 @@ mod tests {
         let _s = serial();
         let fx = install();
         let lock = fx.config.join(format!("user-data/{P1}/SingletonLock"));
-        symlink(format!("some-host-{}", std::process::id()), &lock).unwrap();
+        // The host this machine writes: a lock naming another one is not
+        // ours and is ignored on purpose (a profile copied from elsewhere).
+        let host = this_host().unwrap();
+        symlink(format!("{host}-{}", std::process::id()), &lock).unwrap();
         let e = reset(&layout(&fx)).unwrap_err().to_string();
         assert_eq!(e, STILL_RUNNING);
         assert!(fx.config.join("proxies.json").exists());
@@ -2167,7 +2235,7 @@ mod tests {
         let _s = serial();
         let fx = install();
         let profiles = fx.config.join("profiles");
-        let held = crate::profile::file_lock();
+        let held = crate::space::profile::file_lock();
         let (tx, rx) = std::sync::mpsc::channel();
         let l = layout(&fx);
         let worker = std::thread::spawn(move || {

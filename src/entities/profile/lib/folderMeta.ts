@@ -2,6 +2,13 @@ import { create } from "zustand";
 import { FOLDER_ICON_GLYPHS } from "../../../shared/icons";
 import { LABEL_COLORS, type LabelColorId } from "../../../shared/constants";
 import { hasOwn } from "../../../shared/lib/utils";
+import { handOver, windowStorage } from "../../../shared/lib/handOver";
+import { writeQueue } from "../../../shared/lib/writeQueue";
+import { onSpaceMoved } from "../../../shared/api/invoke";
+import { toast } from "../../../shared/model/toast";
+import { t } from "../../../shared/i18n";
+import { folderImport, folderList, folderMetaSet } from "../model/api";
+import { fromLegacy, LEGACY_META, LEGACY_REGISTRY, looks, names } from "./folderStored";
 
 export type FolderIcon = keyof typeof FOLDER_ICON_GLYPHS;
 /** A Folder's look: a palette color id (or none) and an icon id. */
@@ -9,65 +16,85 @@ export type FolderMeta = { color: LabelColorId | null; icon: FolderIcon };
 
 export const DEFAULT_FOLDER_META: FolderMeta = { color: null, icon: "folder" };
 
-// Kept in this window's storage for now (owner decision, Phase 2C): the
-// backend Folder list with color and icon is left to the devs.
-const KEY = "shardx.folderMeta";
-
-// The first build stored hex values; they map onto the palette's ids.
-const LEGACY_HEX: Record<string, LabelColorId> = {
-  "#3b82f6": "blue", "#724fff": "violet", "#e040c8": "magenta", "#f04438": "red",
-  "#f97316": "orange", "#eab308": "yellow", "#12b76a": "green", "#0ba5ec": "sky",
+// The backend keeps the looks and the folders kept while empty (folders.rs).
+// Builds before it kept them in this window's storage, handed over once.
+const KNOWN = {
+  colors: LABEL_COLORS.map((c) => c.id),
+  icons: Object.keys(FOLDER_ICON_GLYPHS) as FolderIcon[],
 };
 
-/** Anything stored that isn't a known color or icon falls back to none / the folder. */
-function normalise(raw: unknown): FolderMeta {
-  const v = (raw && typeof raw === "object" ? raw : {}) as { color?: unknown; icon?: unknown };
-  const color = typeof v.color === "string"
-    ? (LABEL_COLORS.some((c) => c.id === v.color) ? (v.color as LabelColorId) : LEGACY_HEX[v.color.toLowerCase()] ?? null)
-    : null;
-  const icon = typeof v.icon === "string" && v.icon in FOLDER_ICON_GLYPHS ? (v.icon as FolderIcon) : "folder";
-  return { color, icon };
+// The profile store keeps the folders kept while empty; it imports this
+// module, so it says here where a read puts them.
+let applyRegistry: (registry: string[]) => void = () => {};
+export function onRegistry(fn: (registry: string[]) => void) { applyRegistry = fn; }
+
+let queue: ReturnType<typeof writeQueue> | null = null;
+
+async function read() {
+  const s = await folderList();
+  useFolderMeta.setState({ byName: looks(s.meta, KNOWN) });
+  applyRegistry(names(s.registry));
+  // A change made while this read was out shows again after it is sent.
+  queue?.shown();
 }
 
-function load(): Record<string, FolderMeta> {
-  try {
-    const parsed = JSON.parse(localStorage.getItem(KEY) || "{}");
-    if (!parsed || typeof parsed !== "object") return {};
-    return Object.fromEntries(Object.entries(parsed).map(([name, meta]) => [name, normalise(meta)]));
-  } catch {
-    return {};
-  }
+let loading: Promise<void> | null = null;
+/** Reads the folders from the backend once, after handing it the copy a
+ *  build before it kept here. Never rejects: a failure is shown. */
+export function loadFolders(): Promise<void> {
+  return loading ??= (async () => {
+    try {
+      await handOver(windowStorage(), [LEGACY_REGISTRY, LEGACY_META], (raw) => folderImport(fromLegacy(raw, KNOWN)));
+      await read();
+    } catch (e) {
+      toast.fail({ title: t("folderMeta.loadFailed"), detail: e });
+    }
+  })();
 }
 
-function save(byName: Record<string, FolderMeta>) {
-  try { localStorage.setItem(KEY, JSON.stringify(byName)); } catch { /* private mode: until reload */ }
+/** Reads them again (a change made elsewhere, another space). Never rejects. */
+export async function reloadFolders(): Promise<void> {
+  await loadFolders();
+  try { await read(); } catch (e) { toast.fail({ title: t("folderMeta.loadFailed"), detail: e }); }
+}
+
+// Another space: none of the old folders' looks or kept folders show while its own are read.
+onSpaceMoved(() => {
+  if (!loading) return;
+  useFolderMeta.setState({ byName: {} });
+  applyRegistry([]);
+  void reloadFolders();
+});
+
+/** Sends a folder change after the first read, in the order made. */
+export function sendFolders(call: () => Promise<unknown>) {
+  queue ??= writeQueue(loadFolders(), (e) => toast.fail({ title: t("folderMeta.saveFailed"), detail: e }), read);
+  void queue(call);
 }
 
 type FolderMetaState = {
   byName: Record<string, FolderMeta>;
   setMeta: (name: string, meta: FolderMeta) => void;
-  /** Moves a Folder's look to its new name. */
+  /** Moves a Folder's look to its new name here: `folder_rename` moved it in the backend. */
   renameMeta: (from: string, to: string) => void;
+  /** Drops a Folder's look here: `folder_delete` dropped it in the backend. */
   dropMeta: (name: string) => void;
 };
 
 export const useFolderMeta = create<FolderMetaState>((set, get) => ({
-  byName: load(),
+  byName: {},
   setMeta: (name, meta) => {
-    const byName = { ...get().byName, [name]: meta };
-    save(byName);
-    set({ byName });
+    set({ byName: { ...get().byName, [name]: meta } });
+    sendFolders(() => folderMetaSet(name, meta));
   },
   renameMeta: (from, to) => {
     const byName = { ...get().byName };
     if (hasOwn(byName, from)) { byName[to] = byName[from]; delete byName[from]; }
-    save(byName);
     set({ byName });
   },
   dropMeta: (name) => {
     const byName = { ...get().byName };
     delete byName[name];
-    save(byName);
     set({ byName });
   },
 }));

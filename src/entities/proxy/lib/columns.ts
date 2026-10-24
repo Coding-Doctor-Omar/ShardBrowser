@@ -1,7 +1,7 @@
 import { useMemo } from "react";
 import { create } from "zustand";
 import {
-  clampWidth, defaultSet, fromStored, layoutColumns, sameWidths, toStored,
+  defaultSet, fromStored, keptWidth, layoutColumns, sameWidths, toStored,
   type ColumnDef, type ColumnSet, type ColumnWidths, type ColumnsApi, type ContentWidths, type TableLayout,
 } from "../../../shared/lib/tableColumns";
 import { SELECT_TRACK } from "../../../shared/lib/selectionMode";
@@ -15,8 +15,8 @@ export type ProxyColumns = ColumnSet<ProxyColumnId>;
 /// while the list scrolls sideways (a proxy without a name reads as its
 /// address there). Every column sizes itself to its content until a person
 /// resizes it (owner, 2026-09-30; see proxyFits.ts in widgets/ProxyList);
-/// the spare room first lets a cut one show whole, and with no Notes here
-/// the rest stays empty at the row's end. Every chosen column stays: wider
+/// the spare room first lets a cut one show whole, then gives every column
+/// but the last the same px past its content (no Notes here). Every chosen column stays: wider
 /// than its card, the list scrolls sideways inside it. Live layer (Task 6):
 /// Type holds its widest protocol chip, SOCKS5 (60 px), even at its
 /// narrowest; proxyFits.ts measures the Test result and Type pills.
@@ -85,7 +85,7 @@ export const useProxyColumns = create<ProxyColumnsStore>((set, get) => ({
   setColumnWidth: (id, px) => {
     const widths = { ...get().widths };
     if (px === null) delete widths[id];
-    else widths[id] = clampWidth(PROXY_COLUMN[id], px);
+    else widths[id] = keptWidth(PROXY_COLUMN[id], px);
     persist(get().columns, widths);
     set({ widths });
   },

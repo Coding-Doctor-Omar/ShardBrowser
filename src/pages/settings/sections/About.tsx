@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { Button } from "@proxyshard/shardx-ui-kit";
-import { GH_REPO_URL } from "../../../shared/lib/utils";
+import { GH_REPO_URL, SITE_HOST, siteUrl } from "../../../shared/lib/utils";
 import type { RtUpdate } from "../../../shared/types";
 import { useWhatsNew } from "../../../shared/model/whatsNew";
 import { toast } from "../../../shared/model/toast";
@@ -10,6 +10,8 @@ import { useOnboarding } from "../../../features/onboarding";
 import { takeTheTour } from "../../../features/tour";
 import { useT } from "../../../shared/i18n";
 import { DetailRow, DetailsCard } from "../../../shared/ui/DetailsCard";
+
+const ABOUT_SITE = siteUrl("settings_about");
 
 export function AboutSection() {
   const t = useT();
@@ -54,6 +56,16 @@ export function AboutSection() {
         </DetailRow>
         <DetailRow id="updates" label={t("settings.aboutUpdatesLabel")}>
           <span className={info?.update_available ? "text-warning-text" : undefined}>{status}</span>
+        </DetailRow>
+        <DetailRow id="website" label={t("settings.aboutWebsiteLabel")}>
+          {/* A real href for the link's role; the click opens the system browser. */}
+          <a
+            href={ABOUT_SITE}
+            className="text-primary-text underline underline-offset-2"
+            onClick={(e) => { e.preventDefault(); openUrl(ABOUT_SITE).catch(() => {}); }}
+          >
+            {SITE_HOST}
+          </a>
         </DetailRow>
       </DetailsCard>
       <div className="flex flex-wrap items-center gap-2">

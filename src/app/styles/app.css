@@ -206,6 +206,16 @@
 [data-pin-first][data-no-lead] .list-pin-name::before {
   left: calc(var(--spacing-cell) * -1);
 }
+/* While columns pass under them, the fills also cover the tile's inset past the row's ends. */
+[data-x-more] .list-pin-end::before {
+  right: calc(-1 * (var(--spacing-cell) + var(--list-row-inset, 0px)));
+}
+[data-x-scrolled] .list-pin-check::before {
+  left: calc(10px - var(--spacing-cell) - var(--list-row-inset, 0px));
+}
+[data-x-scrolled][data-pin-first][data-no-lead] .list-pin-name::before {
+  left: calc(-1 * (var(--spacing-cell) + var(--list-row-inset, 0px)));
+}
 
 /* The header row is a translucent material (Live layer, spec 7, ListHeader):
    its pinned cells let it through, so rows passing under read the same
@@ -309,6 +319,12 @@
 :root {
   --list-pin-shadow: rgb(10 13 20 / 0.06);
 }
+
+/* A one-column page (`width="form"`) grows with a wide window, never past a
+   readable line (owner, 2026-10-23); Team and Settings take the window's width. */
+:root {
+  --page-form-width: clamp(760px, calc((var(--viewport-w) - 280px) * 0.75), 1000px);
+}
 [data-theme="dark"] {
   --list-pin-shadow: rgb(0 0 0 / 0.32);
 }
@@ -338,6 +354,50 @@ html[data-column-gesture="resize"] * {
   animation: search-open var(--motion-base) var(--ease-out);
   @variant reduced {
     animation: none;
+  }
+}
+
+/* A header too narrow for its actions' words (PageHeader `data-compact`,
+   measured in compact.ts): a button keeps only its icon, square at the
+   header's 30 px control height. The secondary ones first ("1"), then the
+   primary ("2"). The label stays in the button, unseen, so its name is read
+   and a `whenTruncated` tooltip still shows it; a right icon goes. At the
+   last level ("3") the title's count and info button go as well. */
+header[data-compact] [data-collapse="1"],
+header:is([data-compact="2"], [data-compact="3"]) [data-collapse="2"] {
+  inline-size: 30px;
+  padding-inline: 0;
+  > :nth-child(2) {
+    position: absolute;
+    inset-inline-start: 0;
+    inline-size: 1px;
+    block-size: 1px;
+    overflow: hidden;
+    clip-path: inset(50%);
+    white-space: nowrap;
+  }
+  > :nth-child(3) {
+    display: none;
+  }
+}
+header[data-compact="3"] [data-title-block] > :not([data-page-title]) {
+  display: none;
+}
+
+/* Peek's header too narrow for its name and state (PeekHeader `data-compact`):
+   Edit keeps only its icon, square at the header's 24 px controls; its word
+   stays in the button, unseen, so its name is read. */
+[data-peek-header][data-compact] [data-peek-extra] button {
+  inline-size: 24px;
+  padding-inline: 0;
+  > :nth-child(2) {
+    position: absolute;
+    inset-inline-start: 0;
+    inline-size: 1px;
+    block-size: 1px;
+    overflow: hidden;
+    clip-path: inset(50%);
+    white-space: nowrap;
   }
 }
 

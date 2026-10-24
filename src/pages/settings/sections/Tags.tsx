@@ -1,5 +1,5 @@
 import { useMemo } from "react";
-import { IconButton, Input } from "@proxyshard/shardx-ui-kit";
+import { IconButton, Input, Tooltip } from "@proxyshard/shardx-ui-kit";
 import { TAG_NAME_MAX, useTags, type Tag } from "../../../entities/tag";
 import { deferDelete } from "../../../shared/lib/deferDelete";
 import { focusAfterRowDelete } from "../rowDelete";
@@ -8,6 +8,7 @@ import { ColorRadios } from "../../../shared/ui/ColorRadios";
 import { useT } from "../../../shared/i18n";
 import { SettingsGroup } from "../SettingRow";
 import { queueTagOp, usePendingTag } from "../useSettingsDraft";
+import { teamRefusal, useRightsChange } from "../../../entities/space";
 
 /// Every tag, to rename, recolor or delete. A rename or a color waits for
 /// Save with the rest of the page (manual save); a delete runs at once,
@@ -43,12 +44,17 @@ function TagRow({ tag, count }: { tag: Tag; count: number }) {
   // What the page shows: the waiting rename and color over the saved ones.
   const { name, color, error } = usePendingTag(tag);
   const rename = (to: string) => queueTagOp({ kind: "rename", id: tag.id, name: to });
+  // A team's tags: changing one needs Edit in the team, deleting one Delete.
+  useRightsChange();
+  const noEdit = teamRefusal("edit");
+  const noDelete = teamRefusal("delete");
 
-  // Behind an Undo toast, nothing asked (ruling 18). Tags live on this
-  // computer: taking it off is the hide, and there is nothing more to run.
+  // Behind an Undo toast, nothing asked (ruling 18). The hide deletes it in
+  // the backend at once, so there is nothing more to run.
   // Undo puts it back where it was, on the profiles it was on. The keyboard
   // goes to the next row's Delete, read before the row leaves (A11Y-04).
   const del = (button: HTMLElement) => {
+    if (noDelete) return;
     const { tags, byProfile } = useTags.getState();
     const at = tags.findIndex((x) => x.id === tag.id);
     const next = focusAfterRowDelete(button);
@@ -66,11 +72,15 @@ function TagRow({ tag, count }: { tag: Tag; count: number }) {
 
   return (
     <li data-tag-row={tag.id} className="row-line relative flex items-center gap-4 px-cell py-3">
+      {/* Without Edit in the team the name and colour are shown, not changed, and say why. */}
+      <Tooltip content={noEdit ?? undefined}>
       <div className="w-[200px] shrink-0">
         <Input
           aria-label={t("settings.tagNameFor", { name: tag.name })}
           inputSize="xsmall"
           value={name}
+          disabled={!!noEdit}
+          aria-description={noEdit ?? undefined}
           maxLength={TAG_NAME_MAX}
           error={error}
           onChange={(e) => rename(e.target.value)}
@@ -83,11 +93,14 @@ function TagRow({ tag, count }: { tag: Tag; count: number }) {
           }}
         />
       </div>
-      <ColorRadios
-        label={t("settings.tagColor", { name: tag.name })}
-        value={color}
-        onChange={(c) => { if (c) queueTagOp({ kind: "recolor", id: tag.id, color: c }); }}
-      />
+      </Tooltip>
+      <fieldset disabled={!!noEdit} className="m-0 min-w-0 border-0 p-0">
+        <ColorRadios
+          label={t("settings.tagColor", { name: tag.name })}
+          value={color}
+          onChange={(c) => { if (c && !noEdit) queueTagOp({ kind: "recolor", id: tag.id, color: c }); }}
+        />
+      </fieldset>
       <span className="ml-auto whitespace-nowrap text-secondary tabular-nums text-text-soft-400">
         {count === 0 ? t("settings.tagsCountNone") : count === 1 ? t("settings.tagsCountOne") : t("settings.tagsCountMany", { n: count })}
       </span>
@@ -95,7 +108,8 @@ function TagRow({ tag, count }: { tag: Tag; count: number }) {
         data-row-delete
         size="2xsmall"
         icon={<DeleteIcon className="size-3.5" />}
-        label={t("settings.tagDelete", { name: tag.name })}
+        label={noDelete ? t("rights.labelWhy", { label: t("settings.tagDelete", { name: tag.name }), why: noDelete }) : t("settings.tagDelete", { name: tag.name })}
+        disabled={!!noDelete}
         onClick={(e) => del(e.currentTarget)}
       />
     </li>

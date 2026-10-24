@@ -1,7 +1,7 @@
 export { FolderDialog } from "./ui/FolderDialog";
 export { FolderPicker } from "./ui/FolderPicker";
 
-export { ProfileRowActions } from "./ui/ProfileRowActions";
+export { ProfileRowActions, RunButtonProbe } from "./ui/ProfileRowActions";
 export { InlineText } from "./ui/InlineText";
 export { ProxyCellPopover } from "./ui/ProxyCellPopover";
 export { FolderCellMenu } from "./ui/FolderCellMenu";

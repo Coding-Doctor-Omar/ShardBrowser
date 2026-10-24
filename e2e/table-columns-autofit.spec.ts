@@ -45,15 +45,16 @@ async function renameProfiles(page: Page, names: Record<string, string>) {
   }, names)).toBe(true);
 }
 
-/** Name's own track in the header's grid, px: its fit (`min`) and, while a
- *  cut name may grow into the room left over, the width all its rows fit in
- *  (`max`). */
-async function nameTrack(page: Page): Promise<{ min: number; max: number }> {
-  const template = await header(page, "Profiles").evaluate((el) => (el as HTMLElement).style.gridTemplateColumns);
-  const m = /--col-name,\s*(?:minmax\(([\d.]+)px,\s*([\d.]+)px\)|([\d.]+)px)/.exec(template);
+/** A column's own track in the header's grid, px: its fit (`min`, the width
+ *  it stretches from) and what it may grow to (`max`: the width all its rows
+ *  fit in, or its stretched width, an `fr` share of the row). */
+async function trackOf(page: Page, list: List, id: string): Promise<{ min: number; max: number }> {
+  const template = await header(page, list).evaluate((el) => (el as HTMLElement).style.gridTemplateColumns);
+  const m = new RegExp(`--col-${id},\\s*(?:minmax\\(([\\d.]+)px,\\s*([\\d.]+)(?:px|fr)\\)|([\\d.]+)px)`).exec(template);
   expect(m, template).not.toBeNull();
   return m![3] ? { min: +m![3], max: +m![3] } : { min: +m![1], max: +m![2] };
 }
+const nameTrack = (page: Page) => trackOf(page, "Profiles", "name");
 
 /** Name fits every name but the one long one: its fit is theirs (the
  *  nine-in-ten rule over 8 rows leaves out only the widest), within a px or
@@ -111,14 +112,17 @@ test("Profiles: a Name width dragged by hand stays after a reload; a double clic
   await page.mouse.down();
   await page.mouse.move(e.x + e.width / 2 + 60, e.y + e.height / 2, { steps: 6 });
   await page.mouse.up();
+  const drawn = await width(colOf(page, "Profiles", "name"));
+  expect(Math.abs(drawn - (auto + 60))).toBeLessThanOrEqual(1);
+  // Kept as the width Name stretches from with the row (owner, 2026-10-23).
   const mine = (await stored(page)).widths.name as number;
-  expect(Math.abs(mine - (auto + 60))).toBeLessThanOrEqual(1);
+  expect((await nameTrack(page)).min).toBe(mine);
   await reloadApp(page);
-  expect(Math.abs((await width(colOf(page, "Profiles", "name"))) - mine)).toBeLessThanOrEqual(0.5);
+  expect(Math.abs((await width(colOf(page, "Profiles", "name"))) - drawn)).toBeLessThanOrEqual(0.5);
   // Rows added or renamed never move a width a person set.
   await renameProfiles(page, { "9828bf28": "eBay" });
   await page.waitForTimeout(400);
-  expect(Math.abs((await width(colOf(page, "Profiles", "name"))) - mine)).toBeLessThanOrEqual(0.5);
+  expect(Math.abs((await width(colOf(page, "Profiles", "name"))) - drawn)).toBeLessThanOrEqual(0.5);
   await renameProfiles(page, { "9828bf28": WIDER["9828bf28"] });
 
   await edge(page, "Profiles", "name").dblclick();
@@ -140,29 +144,31 @@ test("Proxies: Name and Host:Port size to their content the same way; a long nam
   }, long);
   await expect(grid(page, "Proxies").locator("[role='row'][data-proxy-id='px-new'] [data-cell='name']")).toHaveText(long);
 
-  // Name: every name but the long one shows whole, at their width.
+  // Name: every name but the long one shows whole, at their width (the
+  // width it stretches from with the row).
   await expect.poll(async () => (await texts(page, "Proxies", "name", ".truncate")).filter((r) => !r.whole).map((r) => r.text)).toEqual([long]);
   const names = await texts(page, "Proxies", "name", ".truncate");
   const need = Math.max(...names.filter((r) => r.text !== long).map((r) => r.full));
-  const w = await width(colOf(page, "Proxies", "name"));
+  const w = (await trackOf(page, "Proxies", "name")).min;
   expect(w).toBeGreaterThanOrEqual(need);
   expect(w).toBeLessThanOrEqual(need + 3);
+  expect(await width(colOf(page, "Proxies", "name"))).toBeGreaterThanOrEqual(w - 0.5);
   await grid(page, "Proxies").locator("[role='row'][data-proxy-id='px-new'] [data-cell='name'] .truncate").hover();
   await expect(page.getByRole("tooltip")).toHaveText(long);
 
   // Host:Port: sized to its addresses (wider than its old 150 px default), each whole.
   const addresses = await texts(page, "Proxies", "address", "");
   for (const r of addresses) expect(r, r.text).toMatchObject({ whole: true });
-  const a = await width(colOf(page, "Proxies", "address"));
+  const a = (await trackOf(page, "Proxies", "address")).min;
   expect(a).toBeGreaterThan(150);
   expect(a).toBeLessThanOrEqual(Math.max(...addresses.map((r) => r.full)) + 3);
 });
 
 // Controller ruling (2026-09-30): the room left over first lets a column cut
-// at its content width show whole (each up to its maximum), then goes to
-// Notes, else stays empty at the row's end. "Frankfurt am Main" was cut
-// ("Frankfurt …") beside empty space.
-test("Proxies: the room left over lets a cut Country and Test result show whole; the rest stays empty at the row end", async ({ page }) => {
+// at its content width show whole (each up to its maximum). "Frankfurt am
+// Main" was cut ("Frankfurt …") beside empty space. The rest stretches every
+// column (owner, 2026-10-23): no gap is left at the row's end.
+test("Proxies: the room left over lets a cut Country and Test result show whole, then stretches the columns: no gap at the row end", async ({ page }) => {
   await openApp(page, { section: "proxies" });
   const row = grid(page, "Proxies").locator("[role='row'][data-proxy-id='px-de-1']");
   await expect(row.locator("[data-cell='country']")).toContainText("Frankfurt am Main");
@@ -178,14 +184,16 @@ test("Proxies: the room left over lets a cut Country and Test result show whole;
   }));
   expect(ips.length).toBeGreaterThan(0);
   for (const r of ips) expect(r, r.text).toMatchObject({ whole: true });
-  // No Notes here: the rest stays empty at the row's end. The last column is
-  // as wide as its results (pill, gap and IP), no wider.
+  // The last column stretches from the width of its results (pill, gap and
+  // IP), no wider; the actions cell after it is the Columns button's 24 px.
   const reach = await cells.evaluateAll((els) => els.map((cell) => {
     const range = document.createRange();
     range.selectNodeContents(cell);
     return range.getBoundingClientRect().right - cell.getBoundingClientRect().left;
   }));
-  expect(await width(colOf(page, "Proxies", "test"))).toBeLessThanOrEqual(Math.max(...reach) + 3);
+  expect((await trackOf(page, "Proxies", "test")).min).toBeLessThanOrEqual(Math.max(...reach) + 3);
+  expect(await width(colOf(page, "Proxies", "test"))).toBeGreaterThanOrEqual((await trackOf(page, "Proxies", "test")).min - 0.5);
+  expect(await width(header(page, "Proxies").locator(".list-pin-end"))).toBe(24);
 });
 
 // Controller ruling (merge point 3): at the smallest window the Test
@@ -220,14 +228,20 @@ test("Proxies, short of room: the Test result's IP moves into the pill's tooltip
   await expect(ips).toHaveCount(0);
 });
 
-// Pair 24 fix round, I3: a width a person gave the last column stays; the
-// room left over never goes to a sized column.
-test("Profiles: a Notes width set by hand stays, with room to spare beside it", async ({ page }) => {
+// Pair 24 fix round, I3: a width a person gave the last column stays. The
+// row still fills (owner, 2026-10-23): the column before it takes the rest.
+test("Profiles: a Notes width set by hand stays; the column before it takes the room left over", async ({ page }) => {
   await page.setViewportSize({ width: 1600, height: 800 });
   await page.addInitScript(() => localStorage.setItem("shardx.profiles.layout", JSON.stringify({ v: 2, order: ["name", "status", "folder", "tags", "proxy", "lastRun", "created", "runTime", "device", "extensions", "notes"], hidden: ["lastRun", "created", "runTime", "device", "extensions"], widths: { notes: 200 } })));
   await openApp(page);
   await expect(colOf(page, "Profiles", "notes")).toBeVisible();
   expect(await width(colOf(page, "Profiles", "notes"))).toBe(200);
+  // No gap after Notes: the row actions' cell starts one gap after it.
+  const notes = (await colOf(page, "Profiles", "notes").boundingBox())!;
+  const end = (await header(page, "Profiles").locator(".list-pin-end").boundingBox())!;
+  expect(Math.abs(end.x - (notes.x + notes.width) - 10)).toBeLessThanOrEqual(1);
+  expect(await width(colOf(page, "Profiles", "proxy"))).toBeGreaterThan((await trackOf(page, "Profiles", "proxy")).min);
+  expect((await stored(page)).widths).toEqual({ notes: 200 });
 });
 
 // Autofit review C1: a column most rows leave empty sized to the empty

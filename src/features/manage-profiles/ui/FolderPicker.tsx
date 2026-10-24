@@ -4,6 +4,7 @@ import { useT } from "../../../shared/i18n";
 import { hasOwn } from "../../../shared/lib/utils";
 import { FolderChip } from "../../../shared/ui/FolderChip";
 import { useFolderMeta, useFolders, useProfile, useProfileUi } from "../../../entities/profile";
+import { adminRefusal, inFolder, teamRefusal, useAccess, useRightsChange } from "../../../entities/space";
 
 /// Moves profiles into a Folder (EMIL-09, CRAFT-09): type to filter the
 /// Folders, each as its chip (one look for a Folder everywhere, owner
@@ -28,14 +29,22 @@ export function FolderPicker({ open, profileIds, anchorRef, anchorPoint, trigger
   const moving = profiles.filter((p) => profileIds.includes(p.id));
   // The Folder they all share, if any, shows as the current one.
   const shared = moving.length > 0 && moving.every((p) => p.folder === moving[0].folder) ? moving[0].folder : null;
+  // In a team a profile goes only where Create is given; only its admin makes a folder.
+  useRightsChange();
+  const access = useAccess((s) => s.read);
 
-  const options = useMemo<ComboboxOption[]>(() => folders.map((f) => ({
-    value: f,
-    label: f,
-    hint: String(profiles.filter((p) => p.folder === f).length),
-    // An own key only: a Folder may be named like an inherited property (SEC-14).
-    content: <FolderChip name={f} color={hasOwn(looks, f) ? looks[f].color : null} />,
-  })), [folders, looks, profiles]);
+  const options = useMemo<ComboboxOption[]>(() => folders.map((f) => {
+    const closed = f !== shared && !!teamRefusal("create", inFolder(f));
+    return {
+      value: f,
+      label: f,
+      hint: closed ? t("rights.noCreateHere") : String(profiles.filter((p) => p.folder === f).length),
+      disabled: closed,
+      // An own key only: a Folder may be named like an inherited property (SEC-14).
+      content: <FolderChip name={f} color={hasOwn(looks, f) ? looks[f].color : null} />,
+    };
+  // eslint-disable-next-line react-hooks/exhaustive-deps -- teamRefusal reads the access
+  }), [folders, looks, profiles, shared, access, t]);
 
   const move = (folder: string) => {
     onClose();
@@ -59,7 +68,7 @@ export function FolderPicker({ open, profileIds, anchorRef, anchorPoint, trigger
         options={options}
         value={shared || null}
         onChange={(folder) => { if (folder !== shared) move(folder); else onClose(); }}
-        onCreate={(name) => {
+        onCreate={adminRefusal() ? undefined : (name) => {
           onClose();
           useProfileUi.getState().setFolderDialog({ mode: "create", name, moveIds: profileIds });
         }}

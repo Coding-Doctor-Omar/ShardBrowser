@@ -1,5 +1,5 @@
 import { expect, test, type Page } from "@playwright/test";
-import { openApp } from "./support/app";
+import { appModule, openApp, storedTags } from "./support/app";
 
 // Ruling 18: a delete hides at once and offers Undo; the command runs when the toast goes.
 const row = (page: Page, name: string) => page.locator("[role='row'][data-proxy-id]", { hasText: name });
@@ -123,8 +123,31 @@ test("a tag in use deletes behind Undo and comes back with its profiles", async 
   await expect(page.locator("[data-tag-row='t1']")).toHaveCount(0);
   await undoToast(page).getByRole("button", { name: "Undo" }).click();
   await expect(page.locator("[data-tag-row='t1']")).toBeVisible();
-  const saved = await page.evaluate(() => JSON.parse(localStorage.getItem("shardx.tags")!));
-  expect(saved.byProfile.aed41005).toEqual(["t1"]);
+  await expect.poll(async () => (await storedTags(page)).by_profile.aed41005).toEqual(["t1"]);
+});
+
+test("Undo of a tag whose name was taken since gives its profiles the tag that has the name", async ({ page }) => {
+  await page.addInitScript(() => localStorage.setItem("shardx.tags", JSON.stringify({
+    version: 1, tags: [{ id: "t1", name: "warm-up", color: "green" }], byProfile: { aed41005: ["t1"] },
+  })));
+  await openApp(page, { section: "settings" });
+  await page.getByRole("tab", { name: "Tags" }).click();
+  await page.locator("[data-tag-row='t1']").getByRole("button", { name: /Delete/ }).click();
+  await expect(page.locator("[data-tag-row='t1']")).toHaveCount(0);
+  await expect.poll(async () => (await storedTags(page)).tags.length).toBe(0);
+  // Made again under the same name (a picker elsewhere) while the Undo is still on offer.
+  await appModule(page, "/src/entities/tag/index.ts", "__tag");
+  await page.evaluate(() => {
+    (window as unknown as { __tag: { useTags: { getState: () => { create: (n: string, c: string) => unknown } } } })
+      .__tag.useTags.getState().create("Warm-up", "blue");
+  });
+  await undoToast(page).getByRole("button", { name: "Undo" }).click();
+  await expect.poll(async () => {
+    const s = await storedTags(page);
+    return { names: s.tags.map((t) => t.name), on: s.by_profile.aed41005?.map((id) => s.tags.find((t) => t.id === id)?.name) };
+  }).toEqual({ names: ["Warm-up"], on: ["Warm-up"] });
+  await expect(page.locator("[data-tag-row]")).toHaveCount(1);
+  await expect(page.locator("[data-toast]", { hasText: "Couldn’t save tags" })).toHaveCount(0);
 });
 
 test("the confirms left are the three the rules keep", async ({ page }) => {

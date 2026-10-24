@@ -1,5 +1,5 @@
 import { create } from "zustand";
-import type { ConfirmButton, ConfirmReq } from "../types";
+import type { ConfirmButton, ConfirmItem, ConfirmReq } from "../types";
 import { t } from "../i18n";
 
 /// Imperative confirm dialog backed by a zustand store; the ConfirmHost
@@ -16,7 +16,7 @@ export const useConfirmStore = create<ConfirmState>((set) => ({
   clear: () => set({ req: null }),
 }));
 
-type ConfirmOptions = { title: string; message: string } & (
+type ConfirmOptions = { title: string; message: string; items?: ConfirmItem[] } & (
   | { buttons: ConfirmButton[] }
   /** The confirm button names its action: "Delete proxy", "Empty Trash" (WRITE-02). */
   | { confirmLabel: string; danger?: boolean; alert?: boolean }
@@ -35,6 +35,7 @@ export function confirmModal(opts: ConfirmOptions): Promise<any> {
     useConfirmStore.getState().ask({
       title: opts.title,
       message: opts.message,
+      items: opts.items,
       buttons,
       // An act that cannot be taken back (a purchase) is an alert dialog (A11Y-07).
       alert: "confirmLabel" in opts && !!opts.alert,

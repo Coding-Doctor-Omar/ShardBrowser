@@ -1,6 +1,6 @@
 import { useMemo } from "react";
 import type { BadgeColor } from "@proxyshard/shardx-ui-kit";
-import { useProfile, useProfileUi } from "../../entities/profile";
+import { may, useProfile, useProfileUi } from "../../entities/profile";
 import { useProxy } from "../../entities/proxy";
 import { isLifetime, type PlanUsage } from "../../entities/proxyshard";
 import { hideSignal, type Signal, type SignalInput, type SignalKind } from "../../entities/signals";
@@ -15,6 +15,12 @@ type T = (key: string, vars?: Record<string, string | number>) => string;
 
 /** One thing a card does: a verb, and what it runs. */
 export type CardAction = { id: string; label: string; run: () => unknown };
+
+/** A profile this person may change: always outside a team (its rights on the row). */
+const editable = (id: string) => {
+  const p = useProfile.getState().profiles.find((x) => x.id === id);
+  return !p || may(p, "edit");
+};
 
 /// One problem card, ready to draw: a title with its severity pill, what is
 /// wrong in one plain sentence, why it matters in one more, one detail line
@@ -138,7 +144,10 @@ function cardOf(s: Signal, input: SignalInput, t: T, lang: Lang, hide: () => voi
           why: t("overview.mattersLeakRealIp"),
           detail: t("overview.leakNoProxy", { names: named.map((p) => p.name).join(", ") }),
           // The Assign dialog for exactly these profiles; the selection stays.
-          fix: { id: "assign", label: t("overview.assignProxy"), run: () => useProfileUi.getState().openAssign(direct.map((p) => p.id)) },
+          // A team's profiles this person may not edit are left out; with none left, no fix.
+          fix: direct.some((p) => editable(p.id))
+            ? { id: "assign", label: t("overview.assignProxy"), run: () => useProfileUi.getState().openAssign(direct.filter((p) => editable(p.id)).map((p) => p.id)) }
+            : null,
           more: more(direct.length - named.length + mismatch.length),
         };
       }

@@ -132,7 +132,7 @@ export function useNewProfileFrom(entry: FingerprintEntry) {
     closePeek();
     openProfileForm({ mode: "create", tab: "basics", preset: { gpu_preset_id: entry.id } });
   };
-  // Decided on this machine's verdict, never before it is in.
+  // Decided on this machine's verdict if it comes within a second; a hung check does not hold the form.
   const start = async () => {
     if (running.current) return;
     running.current = true;

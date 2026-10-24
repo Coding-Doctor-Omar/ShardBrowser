@@ -159,7 +159,8 @@ const detailOf = explainError;
 export type ToastProgress = {
   id: number;
   update: (done: number, title?: string) => void;
-  done: (summary: { title: string; detail?: string; failed?: number; action?: ToastAction }) => void;
+  /** `tone`: "info" when nothing failed but nothing was done either (no success mark). */
+  done: (summary: { title: string; detail?: string; failed?: number; action?: ToastAction; tone?: "ok" | "info" }) => void;
 };
 
 // Titles are translated here: a toast is raised from stores and helpers as
@@ -195,8 +196,8 @@ export const toast = {
     return {
       id,
       update: (done, next) => { if (here()) store.update(id, { progress: { done, total }, ...(next ? { title: tr(next) } : {}) }); },
-      done: ({ title: end, detail, failed = 0, action }) => {
-        const result = { kind: failed > 0 ? "err" as const : "ok" as const, title: tr(end), detail, action, progress: undefined };
+      done: ({ title: end, detail, failed = 0, action, tone = "ok" }) => {
+        const result = { kind: failed > 0 ? "err" as const : tone, title: tr(end), detail, action, progress: undefined };
         const ms = failed > 0 ? LONG_MS : lasts(action);
         if (here()) store.update(id, result, ms);
         // Dismissed while it ran: a failure is still reported, as a new toast

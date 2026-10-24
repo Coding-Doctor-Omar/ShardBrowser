@@ -252,10 +252,12 @@ for (const theme of ["dark", "light"] as const satisfies readonly Theme[]) {
 
     test("Settings: card inset, tabs, Select, Switch, chips", async ({ page }) => {
       await openApp(page, { theme, section: "settings" });
-      // One 640 px column (F30): a setting row inside the card's 14 px sides.
-      // The card is a tile (borderless, owner 2026-10-01): the 2 px its 1 px
-      // border took are the row's now; the card itself is no wider.
-      await expectAtMost(page.locator("main [data-setting]").first(), { w: 612 }, "settings row");
+      // A setting row inside the card's 14 px sides at least. The column runs
+      // to the page's edge (owner, 2026-10-23; settings-rows.spec), so the
+      // row's width is the window's, not 612 px.
+      const setting = page.locator("main [data-setting]").first();
+      const [rowBox, cardBox] = [await box(setting), await box(setting.locator("xpath=.."))];
+      expect(cardBox.width - rowBox.width, "settings row inset").toBeGreaterThanOrEqual(28 - TOL);
       const tabs = page.getByRole("tablist", { name: "Settings sections" });
       // Vertical tabs 30 (30.5), px-2 like menu items.
       await expectSize(tabs.getByRole("tab").first(), { h: 30 }, "vertical tab");

@@ -1,7 +1,7 @@
 {
   "name": "shardx-launcher",
   "private": true,
-  "version": "2.1.0",
+  "version": "2.1.1",
   "type": "module",
   "scripts": {
     "dev": "vite",
@@ -17,9 +17,10 @@
     "e2e:built": "E2E_BUILT=1 playwright test --project=dev --project=compact --project=forced-colors",
     "preview:mock": "VITE_MOCK=1 vite build --outDir dist-mock && vite preview --outDir dist-mock --host 127.0.0.1 --port 4173 --strictPort",
     "lint": "eslint . && node scripts/check-allowlist.mjs",
-    "check": "tsc && npm run lint && npm run check:i18n && npm run check:errors && npm run check:classes && npm run check:kit && npm run test:scripts && npm run check:contrast && npm run check:colors",
+    "check": "tsc && npm run lint && npm run check:i18n && npm run check:errors && npm run check:classes && npm run check:kit && npm run test:scripts && npm run test:unit && npm run check:contrast && npm run check:colors",
     "check:classes": "node scripts/check-classes.mjs",
     "test:scripts": "node --test scripts/*.test.mjs ui-kit/scripts/*.test.mjs",
+    "test:unit": "node --test \"src/**/*.test.ts\"",
     "check:contrast": "node scripts/check-contrast.mjs",
     "check:colors": "node ui-kit/scripts/gen-colors.mjs --check",
     "kit:build": "npm --prefix ui-kit run build:lib && touch src/app/styles/index.css",

@@ -2,7 +2,7 @@ import { useMemo, useRef, useState, type CSSProperties, type ReactNode } from "r
 import { cn, Tooltip, type DataListColumn, type DataListLayout, type MenuItem } from "@proxyshard/shardx-ui-kit";
 import { useT } from "../../i18n";
 import {
-  clampWidth, defaultSet, fromStored, isDefaultSet, layoutColumns, sameWidths, toStored,
+  defaultSet, fromStored, isDefaultSet, keptWidth, layoutColumns, sameWidths, toStored,
   type ColumnDef, type ColumnFit, type ColumnFits, type ColumnSet, type ColumnWidths, type ColumnsApi,
   type ContentWidths, type FontRole,
 } from "../../lib/tableColumns";
@@ -115,7 +115,10 @@ export function useListLayout<Id extends string, Row>({ storageKey, defs, items,
 }): { columns: DataListColumn<Row>[]; layout: DataListLayout; items: readonly Row[] } {
   const t = useT();
   const [saved, setSaved] = useState(() => load(storageKey, defs));
-  const save = (next: Saved<Id>) => { persist(storageKey, next); setSaved(next); };
+  // The latest choices (every change goes through `save`), so two widths set
+  // in one gesture (a dragged edge) both stay.
+  const latest = useRef(saved);
+  const save = (next: Saved<Id>) => { latest.current = next; persist(storageKey, next); setSaved(next); };
   const [content, setContent] = useState<ContentWidths<Id>>({ fit: {}, full: {} });
   const [listWidth, setListWidth] = useState<number | null>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
@@ -162,10 +165,10 @@ export function useListLayout<Id extends string, Row>({ storageKey, defs, items,
     widths: saved.widths,
     setSet: (set) => save({ ...saved, set }),
     setWidth: (id, px) => {
-      const widths = { ...saved.widths };
+      const widths = { ...latest.current.widths };
       if (px === null) delete widths[id];
-      else widths[id] = clampWidth(byId.get(id)!, px);
-      save({ ...saved, widths });
+      else widths[id] = keptWidth(byId.get(id)!, px);
+      save({ ...latest.current, widths });
     },
     // Reset columns puts the order back too: a sort is a column menu's choice.
     reset: () => save({ set: defaultSet(defs), widths: {}, sort: null }),

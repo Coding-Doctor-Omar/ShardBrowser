@@ -1,6 +1,7 @@
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { isTauri } from "@tauri-apps/api/core";
 import { HOST_OS } from "./utils";
+import { pressMovesWindow } from "./windowPress";
 
 /** The macOS traffic lights sit over the window's top-left corner. Only in the
  *  real window: Tauri sets `window.isTauri`, a browser preview has none. */
@@ -14,14 +15,6 @@ export const hasTrafficLights = (): boolean => HOST_OS === "macOS" && isTauri();
  *  lights in it"). The strip is the ground: a press drags the window and a
  *  double press zooms it, as on the ground between the panels. */
 export const shellPadClass = (): string => (hasTrafficLights() ? "px-(--gap-panel) pb-(--gap-panel) pt-[38px]" : "p-(--gap-panel)");
-
-/** True when the press is one that may move the window: primary button, not on a control. */
-function pressMovesWindow(e: React.MouseEvent): boolean {
-  if (e.button !== 0) return false;
-  const target = e.target as HTMLElement | null;
-  // A disabled control is still a control: pressing it must not move the window (PC-011).
-  return !target?.closest("button, a, input, select, textarea, [role='button'], [aria-disabled='true'], [data-disabled]");
-}
 
 /** Drags the window unless the press landed on a control. Explicit, because
  *  `data-tauri-drag-region` is tested on the exact element hit, not ancestors. */

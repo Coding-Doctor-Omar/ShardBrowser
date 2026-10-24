@@ -242,14 +242,17 @@ export function PsResiGenerator({ open, type, onClose }: { open: boolean; type: 
             options={[{ value: "", label: t("psResiGenerator.cityAnyOption") }, ...cities.map((c) => ({ value: c.code, label: c.name }))]}
           />
           {
+            // The row's whole width: alone in a half, it left an empty cell beside it.
             type === "premium" && (
-              <SelectField
-                value={isp}
-                label={t("psResiGenerator.ispLabel")}
-                onChange={setIsp}
-                placeholder={city ? t("psResiGenerator.anyIspPlaceholder") : t("psResiGenerator.pickCityFirst")}
-                options={[{ value: "", label: t("psResiGenerator.ispAnyOption") }, ...isps.map((x) => ({ value: x.code, label: x.name }))]}
-              />
+              <div className="col-span-2">
+                <SelectField
+                  value={isp}
+                  label={t("psResiGenerator.ispLabel")}
+                  onChange={setIsp}
+                  placeholder={city ? t("psResiGenerator.anyIspPlaceholder") : t("psResiGenerator.pickCityFirst")}
+                  options={[{ value: "", label: t("psResiGenerator.ispAnyOption") }, ...isps.map((x) => ({ value: x.code, label: x.name }))]}
+                />
+              </div>
             )
           }
         </div>

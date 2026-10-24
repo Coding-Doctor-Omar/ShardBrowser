@@ -10,9 +10,11 @@ import { PropertyButton, PropertyRow, PropertyValue as Value } from "../../../sh
 import { ProtocolPill } from "../../../shared/ui/ProtocolPill";
 import { TagChip } from "../../../shared/ui/TagChip";
 import { useT } from "../../../shared/i18n";
-import { proxyMissing, useFolderLook, useProfile, type ProfileForm, type ProfileMeta } from "../../../entities/profile";
+import { openElsewhere, proxyHidden, proxyMissing, useFolderLook, useProfile, type ProfileForm, type ProfileMeta, type ProfileRight } from "../../../entities/profile";
+import { rightName } from "../../../entities/space";
 import { useExtensions } from "../../../entities/extension";
 import { useProfileTags } from "../../../entities/tag";
+import { useSync } from "../../../entities/sync";
 import { useScreenChoice } from "../../../features/manage-profiles/ui/fields";
 import { openProfileForm, type ProfileFormTab } from "../../../features/profile-form";
 
@@ -39,6 +41,9 @@ export function ProfileDetails({ profile }: { profile: ProfileMeta }) {
       <ProxyDetail profile={profile} />
       <ExtensionsDetail profile={profile} />
       <NotesDetail notes={profile.notes} />
+      {profile.sync && <SyncDetail profile={profile} />}
+      {profile.rights && <AccessDetail profile={profile} />}
+      {openElsewhere(profile) && <OpenOnDetail profile={profile} />}
     </div>
   );
 }
@@ -96,6 +101,7 @@ function ProxyDetail({ profile }: { profile: ProfileMeta }) {
   const proxies = useProfile((s) => s.proxies);
   const proxy = profile.proxy_id ? proxies.find((p) => p.id === profile.proxy_id) : undefined;
   const missing = proxyMissing(profile, proxies);
+  const hidden = proxyHidden(profile, proxies);
   return (
     <PropertyRow id="proxy" label={t("peek.proxy")}>
       {(labelId) => (
@@ -105,6 +111,8 @@ function ProxyDetail({ profile }: { profile: ProfileMeta }) {
               <AlertIcon className="size-3.5 shrink-0 text-warning-base" />
               <span className="truncate text-warning-text">{t("profileRow.proxyMissing")}</span>
             </>
+          ) : hidden ? (
+            <span data-proxy-hidden className="truncate">{t("profileRow.proxyHidden")}</span>
           ) : proxy ? (
             <>
               {proxy.country && <CountryFlag cc={proxy.country} height={14} />}
@@ -122,15 +130,22 @@ function ProxyDetail({ profile }: { profile: ProfileMeta }) {
 
 function ExtensionsDetail({ profile }: { profile: ProfileMeta }) {
   const t = useT();
-  const total = useExtensions((s) => s.items.length);
+  const items = useExtensions((s) => s.items);
+  const ready = useExtensions((s) => s.status === "ready");
   const init = useExtensions((s) => s.init);
   useEffect(() => { void init(); }, [init]);
   const n = profile.extensions.length;
+  // A team's the member's list does not show (rights on its folder only) still come at start;
+  // "N of M" would count them among the M they do see.
+  const unseen = profile.origin === "team" && (!ready || profile.extensions.some((id) => !items.some((e) => e.id === id)));
+  const words = n === 0 ? t("peek.noExtensions")
+    : unseen ? (n === 1 ? t("peek.teamExtensionsOne") : t("peek.teamExtensions", { n }))
+      : t("peek.extensionsCount", { n, total: items.length });
   return (
     <PropertyRow id="extensions" label={t("peek.extensions")}>
       {(labelId) => (
         <Link labelId={labelId} id={profile.id} tab="extensions" empty={n === 0}>
-          <span className="truncate">{n === 0 ? t("peek.noExtensions") : t("peek.extensionsCount", { n, total })}</span>
+          <span className="truncate">{words}</span>
         </Link>
       )}
     </PropertyRow>
@@ -145,6 +160,70 @@ function NotesDetail({ notes }: { notes: string }) {
         <Value empty={!notes} wrap>
           {/* Copyable (WIG-04); its line breaks stay. */}
           {notes ? <span data-selectable className="min-w-0 whitespace-pre-wrap break-words">{notes}</span> : <span className="truncate">{t("peek.noNotes")}</span>}
+        </Value>
+      )}
+    </PropertyRow>
+  );
+}
+
+/** Whether it syncs to the person's other computers, and where it is open; shown while sync is connected. */
+function SyncDetail({ profile }: { profile: ProfileMeta }) {
+  const t = useT();
+  const all = useSync((s) => s.state?.kinds.profiles === "all");
+  const sync = profile.sync;
+  const value = !sync?.on ? t("peek.syncOff")
+    : sync.open_on ? t("peek.syncOpenOn", { device: sync.open_on })
+    : sync.conflict ? t("peek.syncConflict")
+    : all ? t("peek.syncAll")
+    : t("peek.syncOn");
+  // A conflict copy says whose changes it holds and why not to run both, whole.
+  const conflict = !!sync?.on && !sync.open_on && !!sync.conflict;
+  return (
+    <PropertyRow id="sync" label={t("peek.sync")}>
+      {() => (
+        <Value empty={!sync?.on} wrap={conflict}>
+          <span className={conflict ? "min-w-0 break-words" : "truncate"}>{value}</span>
+        </Value>
+      )}
+    </PropertyRow>
+  );
+}
+
+const RIGHTS: readonly ProfileRight[] = ["see", "start", "edit", "delete", "cookies", "take_out"];
+
+/** A team profile: what this person may do with it, and what Start without Cookies means. */
+function AccessDetail({ profile }: { profile: ProfileMeta }) {
+  const t = useT();
+  const r = profile.rights!;
+  // The language's own list separator ("查看、启动" in Chinese).
+  const allowed = RIGHTS.filter((k) => r[k]).map((k) => rightName(k)).join(t("format.listSeparator"));
+  // Start without Cookies: it opens with the team's session, but nothing may drive it.
+  const noCookies = r.start && !r.cookies;
+  return (
+    <PropertyRow id="access" label={t("peek.access")}>
+      {() => (
+        <Value wrap={noCookies}>
+          <span className="flex min-w-0 flex-col">
+            <span data-access className="truncate">{allowed}</span>
+            {noCookies && <span data-start-no-cookies className="text-help text-text-sub-600">{t("peek.startNoCookies")}</span>}
+          </span>
+        </Value>
+      )}
+    </PropertyRow>
+  );
+}
+
+/** A team profile another device has open: who and where; it starts here once closed there. */
+function OpenOnDetail({ profile }: { profile: ProfileMeta }) {
+  const t = useT();
+  const on = openElsewhere(profile)!;
+  return (
+    <PropertyRow id="open-on" label={t("peek.openOn")}>
+      {() => (
+        <Value wrap>
+          <span data-open-on className="min-w-0 break-words">
+            {on.member_name ? t("peek.openOnWhere", { device: on.device_name || t("rights.anotherDevice"), member: on.member_name }) : on.device_name || t("rights.anotherDevice")}
+          </span>
         </Value>
       )}
     </PropertyRow>

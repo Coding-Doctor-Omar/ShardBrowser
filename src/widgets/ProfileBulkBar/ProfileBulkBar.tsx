@@ -2,7 +2,7 @@ import { useRef, useState } from "react";
 import { IconButton, useContextMenu, useLatched } from "@proxyshard/shardx-ui-kit";
 import { CloseIcon, MoreIcon } from "../../shared/icons";
 import { useT } from "../../shared/i18n";
-import { useProfile, useProfileUi } from "../../entities/profile";
+import { useProfile, useProfileUi, useSaving } from "../../entities/profile";
 import { TagPicker } from "../../features/manage-tags";
 import { FolderPicker } from "../../features/manage-profiles";
 import { CommandButton, barCommands, capOf, ariaOf, menuItemsFor } from "../../features/commands";
@@ -63,6 +63,8 @@ export function ProfileBulkBar() {
     for (const id of subject.ids) if (s.running[id] !== undefined) n++;
     return n === 0 ? "none" : n === subject.ids.length ? "all" : "some";
   });
+  // And when one's session starts or ends being saved: Start waits for it.
+  useSaving((s) => subject.ids.filter((id) => s.ids.has(id)).length);
   const clear = command("profile.clearSelection");
   // The count it showed stays through the exit, not "0 selected".
   const label = useLatched(count > 0 ? t("bulkActionsBar.selectedCount", { n: count }) : null) ?? "";

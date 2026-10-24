@@ -27,11 +27,10 @@ export type ProfileColumnWidths = ColumnWidths<ProfileColumnId>;
 /// it is as wide as its widest pill, and never gives way below it. In
 /// English that pill, "Proxy missing" (94 px), fits the 96 px minimum (Live
 /// layer, joined at merge point 3); Russian's words widen it. Every other
-/// column but Notes sizes itself to its content until a person resizes it
-/// (owner, 2026-09-30: widgets/ProfileTable/profileFits.ts). The spare room
-/// first lets a cut one show whole, then goes to Notes while no one has
-/// sized it, else stays empty at the row's end (`need` is a column's width
-/// until its content is measured). Name leads, never hides and stays pinned while the list
+/// column sizes itself to its content until a person resizes it (owner,
+/// 2026-09-30: widgets/ProfileTable/profileFits.ts). The spare room first
+/// lets a cut one show whole, then stretches every column (owner,
+/// 2026-10-23; `need` is a column's width until its content is measured). Name leads, never hides and stays pinned while the list
 /// scrolls sideways; Status never hides (it carries the row's state words:
 /// Running, Starting, Proxy missing); Proxy never hides either
 /// (owner, 2026-10-07, item 11).
@@ -42,18 +41,18 @@ export type ProfileColumnWidths = ColumnWidths<ProfileColumnId>;
 // default window changes.
 export const PROFILE_COLUMNS: readonly ColumnDef<ProfileColumnId>[] = [
   { id: "name", title: (t) => t("profileTable.colName"), need: 150, min: 116, max: 640, shown: true, hideable: false, movable: false },
-  { id: "status", title: (t) => t("profileTable.colStatus"), need: 96, min: 96, max: 240, shown: true, hideable: false, movable: true },
+  { id: "status", title: (t) => t("profileTable.colStatus"), need: 96, min: 96, max: 240, grow: 24, shown: true, hideable: false, movable: true },
   { id: "folder", title: (t) => t("profileTable.colFolder"), need: 110, min: 72, max: 320, shown: true, hideable: true, movable: true },
   { id: "tags", title: (t) => t("profileTable.colTags"), need: 96, min: 64, max: 480, shown: true, hideable: true, movable: true },
   { id: "proxy", title: (t) => t("profileTable.colProxy"), need: 110, min: 80, max: 480, shown: true, hideable: false, movable: true },
   // New with the owner feature (2026-09-26): hidden until chosen, placed
   // before Notes (Notes stays last: the row actions float over it). Run
   // time is wide enough for "1234 小时 59 分钟".
-  { id: "lastRun", title: (t) => t("profileTable.colLastRun"), need: 96, min: 72, max: 240, shown: false, hideable: true, movable: true },
-  { id: "created", title: (t) => t("profileTable.colCreated"), need: 96, min: 72, max: 240, shown: false, hideable: true, movable: true },
-  { id: "runTime", title: (t) => t("profileTable.colRunTime"), need: 112, min: 72, max: 240, shown: false, hideable: true, movable: true },
-  { id: "device", title: (t) => t("profileTable.colDevice"), need: 80, min: 64, max: 200, shown: false, hideable: true, movable: true },
-  { id: "extensions", title: (t) => t("profileTable.colExtensions"), need: 84, min: 64, max: 200, shown: false, hideable: true, movable: true },
+  { id: "lastRun", title: (t) => t("profileTable.colLastRun"), need: 96, min: 72, max: 240, grow: 24, shown: false, hideable: true, movable: true },
+  { id: "created", title: (t) => t("profileTable.colCreated"), need: 96, min: 72, max: 240, grow: 24, shown: false, hideable: true, movable: true },
+  { id: "runTime", title: (t) => t("profileTable.colRunTime"), need: 112, min: 72, max: 240, grow: 24, shown: false, hideable: true, movable: true },
+  { id: "device", title: (t) => t("profileTable.colDevice"), need: 80, min: 64, max: 200, grow: 24, shown: false, hideable: true, movable: true },
+  { id: "extensions", title: (t) => t("profileTable.colExtensions"), need: 84, min: 64, max: 200, grow: 24, shown: false, hideable: true, movable: true },
   { id: "notes", title: (t) => t("profileTable.colNotes"), need: 100, fill: true, min: 64, max: 640, shown: true, hideable: true, movable: true },
 ];
 

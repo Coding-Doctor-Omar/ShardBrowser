@@ -4,15 +4,48 @@
 // data_root() is movable to another disk from Settings; the config files stay
 // put, since that is where the new location is recorded.
 
-use anyhow::{Context, Result};
+#[cfg(not(test))]
+use anyhow::Context;
+use anyhow::Result;
 use std::path::PathBuf;
 use std::sync::{OnceLock, RwLock};
 
 pub fn config_root() -> Result<PathBuf> {
-    let base = dirs::config_dir().context("OS config dir unavailable")?;
-    let root = base.join("shardx-launcher");
+    #[cfg(test)]
+    let root = test_config_or_panic("config root");
+    #[cfg(not(test))]
+    let root = dirs::config_dir().context("OS config dir unavailable")?.join("shardx-launcher");
     std::fs::create_dir_all(&root)?;
     Ok(root)
+}
+
+/// What stays on this machine: on Windows the config dir roams with the
+/// account to other PCs. The same folder as `config_root` on macOS.
+pub fn local_root() -> Result<PathBuf> {
+    #[cfg(test)]
+    let root = test_config_or_panic("local root").join("local");
+    #[cfg(not(test))]
+    let root = dirs::data_local_dir().context("OS local data dir unavailable")?.join("shardx-launcher");
+    std::fs::create_dir_all(&root)?;
+    Ok(root)
+}
+
+/// A test never reaches the owner's real folders: without a root of its own
+/// it fails here, loudly, instead of writing into them.
+#[cfg(test)]
+pub(crate) fn test_config_or_panic(what: &str) -> PathBuf {
+    if let Some(p) = TEST_CONFIG.with(|c| c.borrow().clone()) {
+        return p;
+    }
+    let thread = std::thread::current();
+    let msg = format!(
+        "a test resolved the real {what} (thread {:?}): take crate::store::test_root(..) first",
+        thread.name().unwrap_or("?")
+    );
+    // Straight to stderr, past the harness's capture, so a helper thread's panic shows too.
+    use std::io::Write as _;
+    let _ = writeln!(std::io::stderr(), "[store] {msg}");
+    panic!("{msg}");
 }
 
 fn data_root_cell() -> &'static RwLock<Option<PathBuf>> {
@@ -89,6 +122,16 @@ pub fn bookmarks_path() -> Result<PathBuf> {
     Ok(config_root()?.join("bookmarks.json"))
 }
 
+/// Tags and which profiles carry them.
+pub fn tags_path() -> Result<PathBuf> {
+    Ok(config_root()?.join("tags.json"))
+}
+
+/// Folders kept while empty, and each folder's color and icon.
+pub fn folders_path() -> Result<PathBuf> {
+    Ok(config_root()?.join("folders.json"))
+}
+
 /// Automation projects: one JSON file holding every project's blocks.
 pub fn automation_path() -> Result<PathBuf> {
     Ok(config_root()?.join("automation.json"))
@@ -97,6 +140,79 @@ pub fn automation_path() -> Result<PathBuf> {
 /// ProxyShard billing-API config (Bearer key). Kept in its own file so the
 /// Settings page (which round-trips the whole Settings struct) can never
 /// clobber the saved key.
+/// What an OS leaves beside our files: macOS's "._name" twins on exFAT and FAT
+/// drives, Finder and Explorer metadata. Never data, so every scan skips it.
+pub fn is_os_litter(name: &std::ffi::OsStr) -> bool {
+    let n = name.to_string_lossy();
+    n.starts_with("._")
+        || matches!(
+            n.as_ref(),
+            ".DS_Store" | ".Spotlight-V100" | ".Trashes" | ".fseventsd" | ".TemporaryItems" | "Thumbs.db" | "desktop.ini"
+        )
+}
+
 pub fn psapi_path() -> Result<PathBuf> {
     Ok(config_root()?.join("psapi.json"))
+}
+
+/// A data root of a test's own, its config dir under it on this thread. Tests
+/// that move the root take turns through this; all is undone on drop.
+#[cfg(test)]
+pub struct TestRoot {
+    pub path: PathBuf,
+    _turn: std::sync::MutexGuard<'static, ()>,
+}
+
+#[cfg(test)]
+pub fn test_root(tag: &str) -> TestRoot {
+    static TURN: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let turn = TURN.lock().unwrap_or_else(|e| e.into_inner());
+    let path = std::env::temp_dir().join(format!("shardx-{tag}-{}", uuid::Uuid::new_v4().simple()));
+    std::fs::create_dir_all(&path).expect("make the test's data root");
+    set_data_root(Some(path.clone()));
+    TEST_CONFIG.with(|c| *c.borrow_mut() = Some(path.join("config")));
+    TestRoot { path, _turn: turn }
+}
+
+#[cfg(test)]
+thread_local! {
+    /// The config dir of the test running on this thread, when it took one.
+    static TEST_CONFIG: std::cell::RefCell<Option<PathBuf>> = const { std::cell::RefCell::new(None) };
+}
+
+/// Whether this thread's test keeps its settings under its own root.
+#[cfg(test)]
+pub fn test_config_set() -> bool {
+    TEST_CONFIG.with(|c| c.borrow().is_some())
+}
+
+/// This thread's test config dir, for a child process of the test to use.
+#[cfg(test)]
+pub fn test_config() -> Option<PathBuf> {
+    TEST_CONFIG.with(|c| c.borrow().clone())
+}
+
+/// A test's child process takes its parent's config dir, on this thread.
+#[cfg(test)]
+pub fn set_test_config(dir: Option<PathBuf>) {
+    TEST_CONFIG.with(|c| *c.borrow_mut() = dir);
+}
+
+#[cfg(test)]
+impl TestRoot {
+    /// Settings-side files under the test's root; test_root does this already,
+    /// so this only takes the config back after a test moved it elsewhere.
+    pub fn with_config(self) -> Self {
+        TEST_CONFIG.with(|c| *c.borrow_mut() = Some(self.path.join("config")));
+        self
+    }
+}
+
+#[cfg(test)]
+impl Drop for TestRoot {
+    fn drop(&mut self) {
+        TEST_CONFIG.with(|c| *c.borrow_mut() = None);
+        set_data_root(None);
+        let _ = std::fs::remove_dir_all(&self.path);
+    }
 }

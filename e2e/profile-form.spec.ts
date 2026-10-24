@@ -1,5 +1,5 @@
 import { expect, test, type Page } from "@playwright/test";
-import { appModule, openApp, row, seedATag, waitForIdle } from "./support/app";
+import { appModule, openApp, row, seedATag, storedTags, waitForIdle } from "./support/app";
 import { pickOption } from "./support/select";
 
 // One profile form for creating and editing a profile (manual save, Tasks 3
@@ -214,7 +214,7 @@ async function pickFolderAndTags(page: Page, d: ReturnType<typeof dialog>) {
   await expect(d.locator("[data-property='tags']")).toContainText("Fresh tag");
   await expect(d.locator("[data-property='folder']")).toContainText("Ads");
 }
-const tagStore = (page: Page) => page.evaluate(() => localStorage.getItem("shardx.tags"));
+const tagStore = async (page: Page) => JSON.stringify(await storedTags(page));
 
 test("Folder and tag picks change nothing until Save; Cancel and Discard leave them as they were", async ({ page }) => {
   await seedATag(page);
@@ -239,11 +239,11 @@ test("Folder and tag picks change nothing until Save; Cancel and Discard leave t
   await expect(d).toHaveCount(0);
   expect(await calls(page, "profile_set_folder")).toBe(moves + 1);
   expect((await stored(page, SANDBOX))._meta.folder).toBe("Ads");
-  const names = await page.evaluate((id) => {
-    const s = JSON.parse(localStorage.getItem("shardx.tags")!) as { tags: { id: string; name: string }[]; byProfile: Record<string, string[]> };
-    return s.byProfile[id].map((tid) => s.tags.find((x) => x.id === tid)?.name).sort();
-  }, SANDBOX);
-  expect(names).toEqual(["Fresh tag", "Warm-up"]);
+  const names = async () => {
+    const s = await storedTags(page);
+    return (s.by_profile[SANDBOX] ?? []).map((tid) => s.tags.find((x) => x.id === tid)?.name).sort();
+  };
+  await expect.poll(names).toEqual(["Fresh tag", "Warm-up"]);
 });
 
 // ---- Create (Task 4) -------------------------------------------------------
@@ -388,6 +388,23 @@ test("a new profile keeps the hardware the form shows, not what the backend roll
   const nav = (await stored(page, last)).navigator;
   expect(nav.hardware_concurrency).toBe(12);
   expect(nav.device_memory).toBe(32);
+});
+
+test("a picked screen resolution stays picked and is saved, width and height both", async ({ page }) => {
+  // 2.0.3 wrote width, height and the mark as updates of one stale draft: each
+  // put the others back, so no pick ever stuck.
+  await openApp(page);
+  const d = await openEdit(page, "FB Ads acc-01"); // a Windows fingerprint, 1920 × 1080
+  await d.getByRole("tab", { name: "Fingerprint", exact: true }).click();
+  const screen = d.getByRole("combobox", { name: "Screen resolution", exact: true });
+  await expect(screen).toContainText("1920 × 1080");
+  await pickOption(d, "Screen resolution", "1280 × 720");
+  await expect(screen).toHaveText("1280 × 720");
+  await saveButton(page, "FB Ads acc-01").click();
+  await expect(d).toHaveCount(0);
+  const saved = (await stored(page, "c31d92f0")) as unknown as { screen: { width: number; height: number }; _meta: { screen_custom?: boolean } };
+  expect([saved.screen.width, saved.screen.height]).toEqual([1280, 720]);
+  expect(saved._meta.screen_custom).toBe(true);
 });
 
 test("a latitude that is not a number disables Save with the error; a number brings it back", async ({ page }) => {

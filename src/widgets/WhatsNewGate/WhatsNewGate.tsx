@@ -17,6 +17,7 @@ export function WhatsNewGate() {
         version = await getVersion();
       } catch {
         // Plain-browser dev: no Tauri IPC, and nothing to announce.
+        useWhatsNew.getState().setDecided();
         return;
       }
       if (cancelled) return;
@@ -27,6 +28,7 @@ export function WhatsNewGate() {
       try {
         seen = localStorage.getItem(SEEN_KEY);
       } catch {
+        useWhatsNew.getState().setDecided();
         return;
       }
       useWhatsNew.getState().setInstallKind(!seen ? "first" : seen !== version ? "update" : null);
@@ -36,6 +38,7 @@ export function WhatsNewGate() {
       if (seen && seen !== version) {
         setOpen(true);
       }
+      useWhatsNew.getState().setDecided();
     })();
     return () => { cancelled = true; };
   }, [setOpen]);

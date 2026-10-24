@@ -1,6 +1,7 @@
 import { expect, type Locator, type Page } from "@playwright/test";
 
-/** Every page of the new UI. Same values as SECTIONS in src/shared/types. */
+/** Every page of the new UI. Same values as SECTIONS in src/shared/types,
+ *  less the Team page: it opens from the space menu, inside a team only (team-admin.spec.ts). */
 export const SECTIONS = [
   "profiles", "proxies", "proxyshard", "automation",
   "fingerprints", "extensions", "bookmarks",
@@ -213,6 +214,17 @@ export const titles = (page: Page) => page.locator("[role='row'][aria-rowindex='
 /** Seeds `key` only when nothing is stored there yet, so a reload keeps what
  *  the app itself wrote. `value` may already be a string (a broken value, or
  *  one of a different shape) or a plain object to stringify. */
+/** The tags as the backend keeps them (tags.rs, in the mock): tag ids by
+ *  profile id are `by_profile` there, `byProfile` in what older builds kept. */
+export type StoredTags = { tags: { id: string; name: string; color: string }[]; by_profile: Record<string, string[]> };
+export const storedTags = (page: Page): Promise<StoredTags> => page.evaluate(() =>
+  (window as unknown as { __shardxMock: { state: { tags?: StoredTags } } }).__shardxMock.state.tags ?? { tags: [], by_profile: {} });
+
+/** The folders kept while empty and their looks, as the backend keeps them (folders.rs, in the mock). */
+export type StoredFolders = { registry: string[]; meta: Record<string, { color: string | null; icon: string }> };
+export const storedFolders = (page: Page): Promise<StoredFolders> => page.evaluate(() =>
+  (window as unknown as { __shardxMock: { state: { folders?: StoredFolders } } }).__shardxMock.state.folders ?? { registry: [], meta: {} });
+
 /** One tag exists, so the Tags column shows (it stays out until a tag exists, CRAFT-14). */
 export const seedATag = (page: Page) => page.addInitScript(() => {
   if (localStorage.getItem("shardx.tags") === null) {

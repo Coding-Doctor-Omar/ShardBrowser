@@ -1,4 +1,5 @@
 import { useEffect, useId, useRef, useState } from 'react'
+import { pointerMoveStill } from '@/lib/overlay/modality'
 
 export type ListNavigationOptions<T> = {
   items: readonly T[]
@@ -24,7 +25,7 @@ export type OptionProps = {
   role: 'option'
   'aria-disabled'?: true
   'data-highlighted'?: ''
-  onPointerMove: () => void
+  onPointerMove: (e: React.PointerEvent) => void
   onMouseDown: (e: React.MouseEvent) => void
   onClick: (e: React.MouseEvent) => void
 }
@@ -176,8 +177,9 @@ export function useListNavigation<T>({
       'aria-disabled': disabled || undefined,
       'data-highlighted': i === activeIndex ? '' : undefined,
       // The pointer moves the one highlight the keys move (EMIL-04, EMIL-06).
-      onPointerMove: () => {
-        if (disabled || i === activeIndex) return
+      // A list the keys scrolled under a still pointer keeps the keys' highlight.
+      onPointerMove: (e) => {
+        if (disabled || i === activeIndex || pointerMoveStill(e)) return
         scrollNext.current = false
         setChosenId(id)
       },

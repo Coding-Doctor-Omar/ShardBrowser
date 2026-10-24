@@ -1,0 +1,7 @@
+# Only the team server's image is built from here: everything else stays out.
+*
+!crates/team-model/Cargo.toml
+!crates/team-model/src
+!team-server/Cargo.toml
+!team-server/Cargo.lock
+!team-server/src

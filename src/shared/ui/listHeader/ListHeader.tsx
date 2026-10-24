@@ -8,7 +8,6 @@ import {
 } from "../../lib/tableColumns";
 import { useColumnDrag } from "./useColumnDrag";
 import { useColumnResize } from "./useColumnResize";
-import { useMeasuredWidths } from "./useMeasuredWidths";
 import { LIST_HEADER_HEIGHT } from "../listMetrics";
 
 /** The header row's height, px (`height` below, by default): a list's rows
@@ -114,16 +113,12 @@ export function ListHeader<Id extends string>({ api, layout, listRef, wrapRef, l
       cancelAnimationFrame(frame);
     };
   }, [listRef]);
-  const measured = useMeasuredWidths<Id>(rowRef, layout.template);
-  const startResize = useColumnResize({ api, listRef, wrapRef });
+  const startResize = useColumnResize({ api, layout, listRef, wrapRef });
   const drag = useColumnDrag({ api, rowRef, onMoved: announceMove });
-  // Within the column's own bounds: an empty column is drawn under its min,
-  // and a value below `aria-valuemin` (or a first arrow press from it) is
-  // not a width the edge can have.
-  const widthOf = (id: Id) => {
-    const { min, max, need } = byId.get(id)!;
-    return Math.min(max, Math.max(min, Math.round(api.widths[id] ?? measured[id] ?? need)));
-  };
+  // The width on screen: what the keys step and the edge reports.
+  const widthOf = (id: Id) => Math.round(layout.drawn[id] ?? byId.get(id)!.need);
+  // A stretched row's last edge is the row's end: only the keys move it (from its left).
+  const fixedEnd = (id: Id) => layout.stretched && id === layout.shown[layout.shown.length - 1];
   // Hiding the column a menu belongs to removes its anchor with it (its
   // edge unmounts): close the menu and land focus on the column that now
   // stands where it was — the next one on screen, else the previous, else
@@ -164,16 +159,18 @@ export function ListHeader<Id extends string>({ api, layout, listRef, wrapRef, l
       return;
     }
     const step = e.shiftKey ? 40 : 8;
-    const now = widthOf(id);
-    const next = e.key === "ArrowLeft" ? now - step
+    const now = layout.drawn[id] ?? def.need;
+    const to = e.key === "ArrowLeft" ? now - step
       : e.key === "ArrowRight" ? now + step
       : e.key === "Home" ? def.min
-      : e.key === "End" ? def.max
+      : e.key === "End" ? Infinity
       : null;
-    if (next === null) return;
+    if (to === null) return;
     e.preventDefault();
     e.stopPropagation();
-    api.setWidth(id, next);
+    // The drag's own rule: the next column gives the px.
+    const { widths } = layout.resize(id, to);
+    for (const c of layout.shown) if (widths[c] !== api.widths[c]) api.setWidth(c, widths[c] ?? null);
   };
 
   // Built on every render, so an open checklist shows each toggle at once.
@@ -305,16 +302,19 @@ export function ListHeader<Id extends string>({ api, layout, listRef, wrapRef, l
                 aria-label={t("tableColumns.resize", { column: titleOf(id) })}
                 aria-valuenow={widthOf(id)}
                 aria-valuemin={byId.get(id)!.min}
-                aria-valuemax={byId.get(id)!.max}
+                aria-valuemax={Math.max(byId.get(id)!.max, widthOf(id))}
                 tabIndex={0}
                 data-col-edge={id}
                 onPointerDown={(e) => startResize(e, id)}
                 onDoubleClick={() => api.setWidth(id, null)}
                 onKeyDown={(e) => onEdgeKey(e, id)}
-                className="group/edge absolute inset-y-0 -right-[5px] z-[1] flex w-[10px] cursor-col-resize justify-center focus-ring-inset"
+                className={cn(
+                  "group/edge absolute inset-y-0 -right-[5px] z-[1] flex w-[10px] justify-center focus-ring-inset",
+                  fixedEnd(id) ? "pointer-events-none" : "cursor-col-resize",
+                )}
               >
-                {/* A neutral hairline on hover or focus: the edge, not a stripe. */}
-                <span aria-hidden="true" className="my-1.5 w-px bg-stroke-sub-300 opacity-0 group-hover/edge:opacity-100 group-focus-visible/edge:opacity-100" />
+                {/* A neutral hairline on hover or focus: the edge, not a stripe. CanvasText in contrast themes. */}
+                <span aria-hidden="true" className="my-1.5 w-px bg-stroke-sub-300 opacity-0 group-hover/edge:opacity-100 group-focus-visible/edge:opacity-100 forced-colors:bg-[CanvasText]" />
               </div>
             </div>
           );

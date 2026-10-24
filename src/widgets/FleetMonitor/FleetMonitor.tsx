@@ -58,9 +58,10 @@ export function FleetMonitor() {
                   {r.running ? "running" : "finished"}
                 </span>
               </div>
-              {r.workers.map((w) => (
+              {/* Workers are the run's thread slots, in order; profile_id is empty until a slot takes one. */}
+              {r.workers.map((w, i) => (
                 <div
-                  key={w.profile_id}
+                  key={i}
                   className="grid grid-cols-[1fr_64px_76px] items-center gap-2 px-2.5 py-1.5"
                 >
                   <div className="min-w-0">

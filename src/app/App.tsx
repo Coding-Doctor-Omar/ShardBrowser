@@ -5,6 +5,7 @@ import { cn } from "@proxyshard/shardx-ui-kit";
 import { useAppKeys } from "../features/commands";
 import { Sidebar } from "../widgets/Sidebar/Sidebar";
 import { FirstRunGate } from "../widgets/FirstRunGate/FirstRunGate";
+import { EngineUpdateBanner } from "../widgets/FirstRunGate/EngineUpdateBanner";
 import { ToastHost } from "../widgets/ToastHost/ToastHost";
 import { LiveAnnouncer } from "../widgets/LiveAnnouncer/LiveAnnouncer";
 import { ConfirmHost } from "../widgets/ConfirmHost/ConfirmHost";
@@ -12,6 +13,7 @@ import { UnsavedGuard } from "../widgets/UnsavedGuard/UnsavedGuard";
 import { StarModal } from "../widgets/StarModal/StarModal";
 import { HelperWatcher } from "../widgets/HelperWatcher";
 import { WhatsNewGate } from "../widgets/WhatsNewGate";
+import { PsTrialModal } from "../features/proxyshard";
 import { ProfilesPage } from "../pages/profiles";
 import { ShellWindowControls } from "../widgets/WindowControls/WindowControls";
 import { AssignProxiesHost, FolderDialog } from "../features/manage-profiles";
@@ -25,8 +27,14 @@ import { useWhatsNew } from "../shared/model/whatsNew";
 import { useT } from "../shared/i18n";
 import type { Section } from "../shared/types";
 import { useThemeBridge } from "../shared/model/theme";
-import { useProfile } from "../entities/profile";
+import { reloadFolders, useProfile } from "../entities/profile";
 import { useTags } from "../entities/tag";
+import { useInTeam, wireAccess } from "../entities/space";
+import { useSync } from "../entities/sync";
+import { useExtensionUpdates, watchExtensionUpdates } from "../entities/extension";
+import { watchConflictCopies } from "../features/profile-sync";
+import { confirmOpenSessions, watchSaving, watchTeamSessions } from "../features/team-sessions";
+import { useTeamTrash, useTeamTrashShown, wireTeamTrash } from "../features/team-trash";
 import { trashList } from "../entities/trash";
 import { useStoreChanged } from "../shared/hooks/useStoreChanged";
 import { useQuitGuard } from "../shared/hooks/useQuitGuard";
@@ -36,6 +44,7 @@ import { focusIsLost, focusPageStart, landOnPage } from "../shared/lib/focus";
 import { shellPadClass, titleBarOnMouseDown } from "../shared/lib/dragWindow";
 import { storeBus } from "../shared/lib/storeBus";
 import { PageBody, PageHeader } from "../widgets/PageHeader";
+import { TeamStatusBanner } from "../widgets/TeamStatusBanner";
 import { LoadingCards, LoadingRows } from "../shared/ui/ListStates";
 import { whenIdle } from "../shared/lib/idle";
 import "./wireStores";
@@ -60,6 +69,7 @@ const loadTrash = () => import("../pages/trash");
 const loadSettings = () => import("../pages/settings");
 const loadWhatsNew = () => import("../widgets/WhatsNewDialog");
 const loadAutomation = () => import("../pages/automation");
+const loadTeam = () => import("../pages/team");
 const ProxiesPage = lazy(() => loadProxies().then((m) => ({ default: m.ProxiesPage })));
 const ProxyShardPage = lazy(() => loadProxyShard().then((m) => ({ default: m.ProxyShardPage })));
 const FingerprintsPage = lazy(() => loadFingerprints().then((m) => ({ default: m.FingerprintsPage })));
@@ -69,6 +79,7 @@ const TrashPage = lazy(() => loadTrash().then((m) => ({ default: m.TrashPage }))
 const SettingsPage = lazy(() => loadSettings().then((m) => ({ default: m.SettingsPage })));
 const WhatsNewDialog = lazy(() => loadWhatsNew().then((m) => ({ default: m.WhatsNewDialog })));
 const AutomationPage = lazy(() => loadAutomation().then((m) => ({ default: m.AutomationPage })));
+const TeamPage = lazy(() => loadTeam().then((m) => ({ default: m.TeamPage })));
 const WARM: Partial<Record<string, () => Promise<unknown>>> = {
   proxies: loadProxies,
   proxyshard: loadProxyShard,
@@ -79,6 +90,8 @@ const WARM: Partial<Record<string, () => Promise<unknown>>> = {
   settings: loadSettings,
   "whats-new": loadWhatsNew,
   automation: loadAutomation,
+  // The space switcher's menu opens the Team page.
+  space: loadTeam,
 };
 /** The order the idle preload fetches them in: the pages most sessions open first. */
 const PRELOAD = [loadProxies, loadFingerprints, loadExtensions, loadBookmarks, loadProxyShard, loadTrash, loadSettings, loadAutomation];
@@ -86,15 +99,16 @@ const PRELOAD = [loadProxies, loadFingerprints, loadExtensions, loadBookmarks, l
 /** What each lazy page shows while its code loads: its own header (so its
  *  title and heading are there from the first frame) over its own loading
  *  look, cards or rows, at its own width. */
-const LOADING: Partial<Record<Section, { title: (t: ReturnType<typeof useT>) => string; look: "rows" | "cards" | "form"; width?: "wide" | "form" }>> = {
+const LOADING: Partial<Record<Section, { title: (t: ReturnType<typeof useT>) => string; look: "rows" | "cards" | "form"; width?: "form" }>> = {
   proxies: { title: (t) => t("proxies.title"), look: "rows" },
-  proxyshard: { title: () => "ProxyShard", look: "rows", width: "wide" },
+  proxyshard: { title: () => "ProxyShard", look: "rows" },
   fingerprints: { title: (t) => t("fingerprints.title"), look: "cards" },
   extensions: { title: (t) => t("extensions.title"), look: "cards" },
   bookmarks: { title: (t) => t("bookmarks.heading"), look: "rows" },
   trash: { title: (t) => t("trash.title"), look: "rows" },
   settings: { title: (t) => t("settings.title"), look: "form" },
   automation: { title: (t) => t("automation.title"), look: "cards" },
+  team: { title: (t) => t("team.pageTitle"), look: "rows" },
 };
 
 function SectionLoading({ section }: { section: Section }) {
@@ -246,6 +260,14 @@ function Shell() {
   const startProcessPolling = useProfile((s) => s.startProcessPolling);
   // Real child-process status: anchors the uptime clock, refreshes totals.
   useEffect(() => startProcessPolling(), [startProcessPolling]);
+  // Personal sync, for the profile menus and the palette; it follows "sync-changed".
+  useEffect(() => { void useSync.getState().load().catch(() => {}); }, []);
+  // A sync's conflict copy says so once, with a way to it.
+  useEffect(() => watchConflictCopies(), []);
+  // What became of a team profile's session as it closed: saved, kept, or not kept.
+  useEffect(() => watchTeamSessions(), []);
+  // A closed one whose session is still being sent says Saving…, and Start waits.
+  useEffect(() => watchSaving(), []);
   // Profiles created or moved through the automation API or MCP show up live.
   // Only profile and proxy changes reload this list (PERF-22): the other
   // topics (extensions, bookmarks, trash, automation) have nothing it shows.
@@ -253,9 +275,37 @@ function Shell() {
   // A profile trashed or restored there changes the Trash too: the palette
   // reads it again as it next opens (Pair 45 review, I2).
   useStoreChanged(() => storeBus.emit("trash", "ui"), ["trash", "profiles"]);
+  // Tags and folders changed elsewhere (a team's member, the Local API) are read again.
+  useStoreChanged(() => void useTags.getState().reload(), ["tags"]);
+  useStoreChanged(() => void reloadFolders(), ["folders"]);
+  // Web Store updates of extensions: the sidebar's count, Peek and the page read them.
+  useEffect(() => watchExtensionUpdates(), []);
+  useStoreChanged(() => void useExtensionUpdates.getState().load(), ["extension-updates", "extensions"]);
+  // A profile that closes shortens what an update waits on; the backend says
+  // nothing then. Read again once its browser has had time to exit.
+  useEffect(() => {
+    const timers: ReturnType<typeof setTimeout>[] = [];
+    const off = useProfile.subscribe((s, was) => {
+      const closed = Object.keys(was.running).some((id) => !s.running[id]);
+      const waits = Object.values(useExtensionUpdates.getState().byId).some((u) => u.state === "waiting");
+      if (closed && waits) for (const ms of [1500, 5000]) timers.push(setTimeout(() => void useExtensionUpdates.getState().load(), ms));
+    });
+    return () => { off(); timers.forEach(clearTimeout); };
+  }, []);
+  // What this person may do in the team in use, read as the space and its permission move.
+  useEffect(() => wireAccess(), []);
+  // A team's Trash is its server's: read as the space moves and as the team tells of a change.
+  useEffect(() => wireTeamTrash(), []);
+  // Entering a team whose Trash this person sees nothing of leaves its page.
+  const team = useInTeam();
+  const teamTrash = useTeamTrashShown();
+  const trashRead = useTeamTrash((s) => s.status !== "idle" && s.status !== "loading");
+  useEffect(() => {
+    if (team && section === "trash" && !teamTrash && trashRead) void useNav.getState().setSection("profiles");
+  }, [team, section, teamTrash, trashRead]);
   useAppKeys();
-  // Quit (tray, Cmd+Q) asks about unsaved changes before the app exits.
-  useQuitGuard();
+  // Quit (tray, Cmd+Q) asks about unsaved changes, then names the team and synced profiles it closes.
+  useQuitGuard(confirmOpenSessions);
   useThemeBridge();
   useWarmPages();
   usePreloadPages();
@@ -278,6 +328,8 @@ function Shell() {
     >
       <Sidebar />
       <main data-section={section} className="page-ground flex min-w-0 flex-col overflow-hidden rounded-panel bg-bg-page">
+        <TeamStatusBanner />
+        <EngineUpdateBanner />
         {section === "profiles" && <ProfilesPage />}
         {section === "proxies" && <LazyPage section="proxies"><ProxiesPage /></LazyPage>}
         {section === "proxyshard" && <LazyPage section="proxyshard"><ProxyShardPage /></LazyPage>}
@@ -287,6 +339,7 @@ function Shell() {
         {section === "automation" && <LazyPage section="automation"><AutomationPage /></LazyPage>}
         {section === "trash" && <LazyPage section="trash"><TrashPage /></LazyPage>}
         {section === "settings" && <LazyPage section="settings"><SettingsPage /></LazyPage>}
+        {section === "team" && <LazyPage section="team"><TeamPage /></LazyPage>}
       </main>
       <ToastHost />
       <ConfirmHost />
@@ -300,6 +353,7 @@ function Shell() {
       <CommandPalette />
       <ShortcutSheet />
       <WelcomeDialog />
+      <PsTrialModal />
       <TourLayer />
       <TourEndCard />
       <ShellWindowControls />

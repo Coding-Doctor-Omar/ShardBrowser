@@ -10,6 +10,7 @@ import { focusProxyRow } from "../../shared/lib/focusRow";
 import { useT } from "../../shared/i18n";
 import { proxyHistory, proxyStatus, useProxy, type ProxyEntry, type ProxyTestSnapshot } from "../../entities/proxy";
 import { useProfileUi } from "../../entities/profile";
+import { onProxy, teamRefusal, useRightsChange } from "../../entities/space";
 import { capOf, command, menuItemsFor } from "../../features/commands";
 import { EditProxyDialog } from "../../features/manage-proxies";
 import { Details } from "./Details";
@@ -84,6 +85,9 @@ function ProxyPeekHeader({ name, proxy, onEdit, onClose }: {
   // The registry's Peek menu (E3, R9): Copy address and Delete…, as the
   // row menu has them. Test is the header's own Test now.
   const menuItems = menuItemsFor("peekMenu", "proxies", { ids: [proxy.id] });
+  // A team's proxy without Edit for this person: Edit says why and does nothing.
+  useRightsChange();
+  const noEdit = teamRefusal("edit", onProxy(proxy.id));
   return (
     <PeekHeader
       subject={proxy.id}
@@ -96,9 +100,15 @@ function ProxyPeekHeader({ name, proxy, onEdit, onClose }: {
           : <ProxyTestPill data-peek-test-status state={testStatus} busy={busy} />
       }
       extra={
-        <Button variant="neutral" mode="stroke" size="3xsmall" data-peek-edit leftIcon={<EditIcon className="size-3.5" />} onClick={onEdit}>
-          {t("peek.edit")}
-        </Button>
+        <Tooltip content={noEdit ?? undefined}>
+          <Button
+            variant="neutral" mode="stroke" size="3xsmall" data-peek-edit leftIcon={<EditIcon className="size-3.5" />}
+            disabled={!!noEdit} aria-description={noEdit ?? undefined}
+            onClick={onEdit}
+          >
+            {t("peek.edit")}
+          </Button>
+        </Tooltip>
       }
       primary={
         // The test runs on the proxy as it is saved.

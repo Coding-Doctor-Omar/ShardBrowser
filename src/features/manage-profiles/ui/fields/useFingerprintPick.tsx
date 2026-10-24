@@ -78,7 +78,7 @@ export function useFingerprintPick(
     setOsFilter(osIdFor(fp.platform));
   };
 
-  // Waits for this machine's verdicts; the rows say "Checking this
+  // Waits up to a second for this machine's verdicts; the rows say "Checking this
   // computer…" only while they are really on their way (no one-frame flash).
   const checked = async () => {
     const waiting = !useGpuCompat.getState().loaded;
@@ -87,8 +87,8 @@ export function useFingerprintPick(
     if (waiting) setChecking(false);
   };
 
-  // Decided on the verdicts, never before they are in: a pick made while they
-  // load must still ask.
+  // Decided on the verdicts when they come within that second; a check that
+  // hangs lets the pick through, and the badge says it once the check ends.
   const chooseGpu = (id: string) => {
     void (async () => {
       await checked();

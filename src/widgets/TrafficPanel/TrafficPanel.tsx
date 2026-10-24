@@ -46,6 +46,8 @@ export function TrafficPanel({
   const [openKey, setOpenKey] = useState<string | null>(null);
 
   useEffect(() => {
+    // Pauses belong to the profile they came from; another profile has none of them.
+    setPaused([]);
     let un: (() => void) | null = null;
     let alive = true;
     listen<{ profile_id: string; params: { requestId: string; request: string } }>(
@@ -55,7 +57,10 @@ export function TrafficPanel({
         let request: TrafficPaused["request"];
         try { request = JSON.parse(e.payload.params.request); }
         catch { request = { url: "?", method: "?", resource: "?", headers: {} }; }
-        setPaused((prev) => [{ requestId: e.payload.params.requestId, request }, ...prev].slice(0, 50));
+        // A restarted browser numbers its pauses from await-1 again: an older
+        // entry with the same id is a request that browser no longer holds.
+        const requestId = e.payload.params.requestId;
+        setPaused((prev) => [{ requestId, request }, ...prev.filter((x) => x.requestId !== requestId)].slice(0, 50));
       },
     ).then((u) => { un = u; });
     return () => { alive = false; un?.(); };

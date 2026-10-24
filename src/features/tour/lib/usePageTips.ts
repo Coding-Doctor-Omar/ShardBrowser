@@ -1,5 +1,6 @@
 import { useEffect } from "react";
 import { useNav } from "../../../shared/model/navigation";
+import { useWhatsNew } from "../../../shared/model/whatsNew";
 import { overlayHasKeyboard } from "../../../shared/lib/keyboard";
 import { shouldWelcome, useOnboarding, useShouldWelcome } from "../../onboarding/model/onboarding";
 import { useTour } from "../model/useTour";
@@ -44,10 +45,14 @@ export function usePageTips() {
   const seen = useOnboarding((s) => s.pagesSeen.includes(section));
   const welcome = useShouldWelcome();
   const running = useTour((s) => s.run !== null);
+  // What's new may open at the start: a tip waits until that is decided and
+  // the dialog is closed. Its code loads late, so the DOM alone says "nothing open" too soon.
+  const newsDecided = useWhatsNew((s) => s.decided);
+  const newsOpen = useWhatsNew((s) => s.open);
   const steps = pageTips[section];
 
   useEffect(() => {
-    if (!steps || !storageOk || tipsOff || seen || welcome || running) return;
+    if (!steps || !storageOk || tipsOff || seen || welcome || running || !newsDecided || newsOpen) return;
     let cancelled = false;
     const stop: { current: (() => void) | null } = { current: null };
     const lookup = new AbortController();
@@ -57,7 +62,7 @@ export function usePageTips() {
     const stillWanted = () => {
       const o = useOnboarding.getState();
       return !cancelled && o.storageOk && !o.tipsOff && !o.pagesSeen.includes(section) && !shouldWelcome()
-        && useNav.getState().section === section && useTour.getState().run === null;
+        && useNav.getState().section === section && useTour.getState().run === null && !useWhatsNew.getState().open;
     };
     void (async () => {
       // The page's element first: a lazy page is still loading, and its first
@@ -69,7 +74,7 @@ export function usePageTips() {
       useTour.getState().start(steps, "page", section);
     })();
     return () => { cancelled = true; lookup.abort(); stop.current?.(); };
-  }, [section, steps, storageOk, tipsOff, seen, welcome, running]);
+  }, [section, steps, storageOk, tipsOff, seen, welcome, running, newsDecided, newsOpen]);
 
   // Every end of a page's run (Finish, Skip, Esc, Don't show tips), a tip or
   // a "Show me around", marks the page seen, so the tip does not come back.

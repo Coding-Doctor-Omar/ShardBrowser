@@ -13,9 +13,14 @@ export const useWhatsNew = create<{
   setOpen: (open: boolean) => void;
   installKind: InstallKind;
   setInstallKind: (kind: InstallKind) => void;
+  /** The gate has decided whether this start opens What's new. */
+  decided: boolean;
+  setDecided: () => void;
 }>((set) => ({
   open: false,
   setOpen: (open) => set({ open }),
   installKind: null,
   setInstallKind: (installKind) => set({ installKind }),
+  decided: false,
+  setDecided: () => set({ decided: true }),
 }));

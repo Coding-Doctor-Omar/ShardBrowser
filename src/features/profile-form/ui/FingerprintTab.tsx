@@ -3,7 +3,7 @@ import { useT } from "../../../shared/i18n";
 import { useProfile, type ProfileForm } from "../../../entities/profile";
 import {
   useFingerprintPick, OsField, TemplateField,
-  HardwareFields, ScreenField, LocaleFields, NoiseFields, PrivacyFields, MediaFields,
+  HardwareFields, ScreenField, WindowFields, LocaleFields, NoiseFields, PrivacyFields, MediaFields,
 } from "../../manage-profiles/ui/fields";
 import { patchForm, setFieldInvalid, useProfileForm, type ProfileFormDraft } from "../model/useProfileForm";
 
@@ -42,6 +42,7 @@ export function FingerprintTab({ draft }: { draft: ProfileFormDraft }) {
         </div>
         <HardwareFields f={f} u={u} os={pick.osFilter} />
         <ScreenField f={f} u={u} os={pick.osFilter} />
+        <WindowFields f={f} u={u} />
       </Group>
       <Group title={t("profileForm.groupLocale")}>
         <div data-tour="form-locale"><LocaleFields f={f} u={u} /></div>

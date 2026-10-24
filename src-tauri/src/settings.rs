@@ -40,6 +40,10 @@ pub struct Settings {
     /// config dir. Changed through `data_root_migrate`, never by hand.
     #[serde(default)]
     pub data_root: Option<String>,
+    /// Every 5 h ask the Web Store about the library's linked extensions,
+    /// straight from this computer's IP, not through a profile's proxy.
+    #[serde(default = "default_true")]
+    pub ext_update_check: bool,
 
     // ---- Local automation HTTP API (axum + JWT bearer) ----
     /// Whether the local API server listens on 127.0.0.1:`api_port`.
@@ -91,6 +95,7 @@ fn defaults() -> Settings {
         minimize_to_tray: default_minimize_to_tray(),
         extra_args: String::new(),
         data_root: None,
+        ext_update_check: default_true(),
         api_enabled: default_api_enabled(),
         api_port: default_api_port(),
         api_secret: String::new(),

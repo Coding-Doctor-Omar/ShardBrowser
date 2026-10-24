@@ -36,7 +36,7 @@ export function runSummary(t: T, run: RunSettings): string {
 
 /// Threads, Loops and Hours behind one button in the editor's header: the
 /// button says what the run does, the popover holds the three fields.
-export function RunSettingsButton({ run, onChange }: { run: RunSettings; onChange: (next: Partial<RunSettings>) => void }) {
+export function RunSettingsButton({ run, onChange, readOnly = false }: { run: RunSettings; onChange: (next: Partial<RunSettings>) => void; readOnly?: boolean }) {
   const t = useT();
   const anchor = useRef<HTMLButtonElement>(null);
   const [open, setOpen] = useState(false);
@@ -61,7 +61,8 @@ export function RunSettingsButton({ run, onChange }: { run: RunSettings; onChang
         aria-label={t("projectEditor.runSettings")}
         className="w-[240px] p-3"
       >
-        <div className="flex flex-col gap-3">
+        {/* `readOnly`: shown, not changed (a team's project without Edit). */}
+        <fieldset disabled={readOnly} className="m-0 flex min-w-0 flex-col gap-3 border-0 p-0">
           <div className="grid grid-cols-2 gap-2">
             <NumField label={t("projectEditor.threads")} value={run.threads} min={1} max={64} onChange={(v) => onChange({ threads: v })} />
             <NumField label={t("projectEditor.loops")} value={run.loops} min={0} onChange={(v) => onChange({ loops: v })} />
@@ -70,7 +71,7 @@ export function RunSettingsButton({ run, onChange }: { run: RunSettings; onChang
             <NumField label={t("projectEditor.hours")} value={run.hours} min={0} decimals={2} onChange={(v) => onChange({ hours: v })} />
           )}
           <p className="m-0 text-help text-text-soft-400">{t("projectEditor.loopsHelp")}</p>
-        </div>
+        </fieldset>
       </Popover>
     </>
   );

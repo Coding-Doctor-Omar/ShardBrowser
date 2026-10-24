@@ -40,6 +40,20 @@ _Avoid_: Filter, smart folder, preset
 The side panel that shows and edits one Profile while the Profile list stays visible.
 _Avoid_: Drawer, inline editor, details page
 
+## Sync
+
+**Sync**:
+A person's own Profiles, proxies and the rest kept the same on every computer they use, through a team server: their own or a joined team's. A synced Profile is open on one computer at a time.
+_Avoid_: Cloud, backup, synchronize; "Start in sync" is another thing (windows driven together). In Russian and Chinese it says "between computers" (между компьютерами, 在电脑间) where both could meet.
+
+**Open on (a computer)**:
+A synced Profile another of the person's computers holds: Start is refused here until it closes there, or until "Open here instead" takes it.
+_Avoid_: Locked, busy, in use
+
+**Conflict copy**:
+The Profile a sync makes when one was changed on two computers: this computer's changes, beside the original. Both share one fingerprint and cookies, so they are not run together.
+_Avoid_: Duplicate, clone
+
 ## Words in the interface
 
 How the glossary reaches the screen. The lines marked *checked* have a rule in `scripts/lib/copy-rules.mjs`, run by `npm run check:i18n`.
@@ -52,7 +66,7 @@ How the glossary reaches the screen. The lines marked *checked* have a rule in `
 - **Help.** One line of help per control; the rest goes to docs behind "Learn more about {topic}", never a bare "Learn more". *Checked.*
 - **Spelling and punctuation.** US English. Curly quotes and apostrophes. An ellipsis only on a command that asks for more before it acts. No arrows or check marks in labels. No middle dot anywhere, in English, Chinese, Russian or the What's new notes. Full plural templates. *Checked.*
 - **Chinese.** 配置 Profile, 代理 proxy, 回收站 Trash, 文件夹 Folder, 标签 Tag, 视图 View, 指纹 fingerprint, 预览 Peek, 置顶 Pin, 订单 order, 国家/地区 country; 你, never 您. The What's new notes are English; the Chinese dialog says so in one line (`whatsNew.englishOnly`). *Checked.*
-- **Russian.** профиль Profile, прокси proxy (it never changes form), Корзина Trash (a capital К mid-sentence too), папка Folder, тег Tag, представление View, отпечаток fingerprint (never шаблон), быстрый просмотр Peek, закрепить and открепить Pin and Unpin, заказ order, движок браузера browser engine (never ядро), резидентские прокси residential proxies (never резидентные). Verbs: Запустить and Остановить for Start and Stop, Назначить for Assign, Убрать for Remove, Удалить for Delete. «вы», lowercase, never «ты»; quotes are «ёлочки». A count's word takes three forms, written where the word goes as `{n|профиль|профиля|профилей}` (one, few, many); the number in `n` picks one, so the English `…One` and plural keys still work for 21 and 22. *Checked.*
+- **Russian.** профиль Profile, прокси proxy (it never changes form), Корзина Trash (a capital К mid-sentence too), папка Folder, тег Tag, сохранённый фильтр View (the sidebar group and the Settings tab are Сохранённые фильтры; never представление), отпечаток fingerprint (never шаблон), быстрый просмотр Peek, закрепить and открепить Pin and Unpin, заказ order, движок браузера browser engine (never ядро), резидентские прокси residential proxies (never резидентные). Verbs: Запустить and Остановить for Start and Stop, Назначить for Assign, Убрать for Remove, Удалить for Delete. «вы», lowercase, never «ты»; quotes are «ёлочки». A count's word takes three forms, written where the word goes as `{n|профиль|профиля|профилей}` (one, few, many); the number in `n` picks one, so the English `…One` and plural keys still work for 21 and 22. *Checked.*
 
 ### UI verbs
 
@@ -67,6 +81,7 @@ One verb per action, the same in the menu, the button, the dialog, the toast and
 | **Delete for good** | a profile in Trash | Deleted “Sandbox” for good | Purge |
 | **Delete** | things with no Trash: proxies, bookmarks, tags, views, folders, projects | Deleted proxy “DC Tokyo”, with Undo | Remove (for these) |
 | **Remove** | an item from a library or a set it still exists outside of: an extension, a library fingerprint, a tag on a profile | Removed “uBlock Origin Lite” | Delete (for these) |
+| **Update** | an extension to a newer version from the Web Store | Updated “MetaMask” to 13.53.0 | Upgrade, Refresh |
 | **Move to folder** | profiles into a Folder | Moved 3 profiles to “Ads” | Put, Assign |
 | **Pin**, **Unpin** | a Profile in the sidebar | Pinned “Sandbox” | Favorite, Star |
 | **Copy as JSON** | profiles or proxies to the clipboard | Copied 3 profiles as JSON | Export (for the clipboard) |

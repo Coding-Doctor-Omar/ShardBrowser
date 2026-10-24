@@ -8,8 +8,9 @@ import { ProxyTestPill } from "../../shared/ui/StatusPill";
 import { fmtTs, HOST_OS } from "../../shared/lib/utils";
 import { slideDelayOf } from "../../shared/lib/arrival";
 import { useT } from "../../shared/i18n";
+import { useRightsChange } from "../../entities/space";
 import { proxyStatus, useProxy, type ProxyColumnId, type ProxyEntry } from "../../entities/proxy";
-import { ariaOf, capOf, command, commandsFor, iconOf, menuItemsFor, proxyRowSubject, runCommand } from "../../features/commands";
+import { ariaOf, capOf, command, commandsFor, iconOf, menuItemsFor, proxyRowSubject, reasonOf, runCommand } from "../../features/commands";
 import { pointerMoved } from "../../shared/lib/pointer";
 import { rowFill } from "../../shared/ui/rowFill";
 
@@ -34,6 +35,8 @@ export const ProxyListRow = memo(function ProxyListRow({ proxy, profileCount, to
   onMenu: ContextMenuApi["open"];
 }) {
   const t = useT();
+  // Its buttons say what a team's rights let this person do now.
+  useRightsChange();
   const p = proxy;
   const snap = useProxy((s) => s.snapshots[p.id]);
   const busy = useProxy((s) => !!s.proxyTesting[p.id]);
@@ -300,28 +303,33 @@ export const ProxyListRow = memo(function ProxyListRow({ proxy, profileCount, to
             </>
           }
         >
-          {commandsFor("hover", "proxies", { ids: [p.id] }).map((c) => (
-            <IconButton
-              key={c.id}
-              data-command={c.id}
-              variant="neutral"
-              mode="ghost"
-              size="3xsmall"
-              tabIndex={active ? 0 : -1}
-              // Delete is neutral at rest: no permanent red slab for the most
-              // destructive action on the row (Task 5b's error tint, only on
-              // hover/focus).
-              className={cn("pointer-events-auto", c.danger ? rowButtonDangerHoverClass : rowButtonHoverClass)}
-              icon={iconOf(c)}
-              label={c.label(1)}
-              shortcut={capOf(c)}
-              aria-keyshortcuts={ariaOf(c)}
-              // A double click must not also run the second click's action on
-              // whatever this button became (or the row that slid under the
-              // pointer): the click that matters already ran.
-              onClick={(e) => { e.stopPropagation(); if (e.detail > 1) return; void runCommand(c, { ids: [p.id] }, { from: "hover" }); }}
-            />
-          ))}
+          {commandsFor("hover", "proxies", { ids: [p.id] }).map((c) => {
+            // One that cannot run here says why in its own name (a team's rights), as the menu does.
+            const why = reasonOf(c, { ids: [p.id] });
+            return (
+              <IconButton
+                key={c.id}
+                data-command={c.id}
+                variant="neutral"
+                mode="ghost"
+                size="3xsmall"
+                tabIndex={active ? 0 : -1}
+                // Delete is neutral at rest: no permanent red slab for the most
+                // destructive action on the row (Task 5b's error tint, only on
+                // hover/focus).
+                className={cn("pointer-events-auto", c.danger ? rowButtonDangerHoverClass : rowButtonHoverClass)}
+                icon={iconOf(c)}
+                label={why ? t("rights.labelWhy", { label: c.label(1), why }) : c.label(1)}
+                disabled={!!why}
+                shortcut={why ? undefined : capOf(c)}
+                aria-keyshortcuts={ariaOf(c)}
+                // A double click must not also run the second click's action on
+                // whatever this button became (or the row that slid under the
+                // pointer): the click that matters already ran.
+                onClick={(e) => { e.stopPropagation(); if (e.detail > 1) return; void runCommand(c, { ids: [p.id] }, { from: "hover" }); }}
+              />
+            );
+          })}
         </RowHoverActions>
       </div>
     </div>

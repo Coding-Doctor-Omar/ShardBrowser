@@ -72,11 +72,18 @@ pub fn list_all() -> Result<Vec<LibraryEntry>> {
     let mut out = Vec::new();
     for entry in fs::read_dir(&dir)? {
         let entry = entry?;
-        if entry.path().extension().and_then(|s| s.to_str()) != Some("json") {
+        if store::is_os_litter(&entry.file_name()) || entry.path().extension().and_then(|s| s.to_str()) != Some("json") {
             continue;
         }
-        let body = fs::read_to_string(entry.path())?;
-        if let Ok(e) = serde_json::from_str::<LibraryEntry>(&body) {
+        // One unreadable file must not take the whole library with it.
+        let Ok(body) = fs::read_to_string(entry.path()) else { continue };
+        // The file name is the entry's id: get and delete find it by that
+        // name, and a copy made by hand keeps the id written inside it.
+        let stem = entry.path().file_stem().and_then(|s| s.to_str()).map(String::from);
+        if let Ok(mut e) = serde_json::from_str::<LibraryEntry>(&body) {
+            if let Some(stem) = stem {
+                e.id = stem;
+            }
             out.push(e);
         } else if let Ok(payload) = serde_json::from_str::<Value>(&body) {
             // Bare FingerprintConfig (no LibraryEntry wrapper) — wrap on

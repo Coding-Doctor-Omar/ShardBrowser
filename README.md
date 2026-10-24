@@ -14,6 +14,10 @@
 </p>
 
 <p align="center">
+  Website: <a href="https://shardbrowser.com/?utm_source=github&amp;utm_medium=readme&amp;utm_campaign=shardbrowser"><strong>shardbrowser.com</strong></a>
+</p>
+
+<p align="center">
   <a href="LICENSE"><img alt="License" src="https://img.shields.io/badge/license-MIT-blue?style=flat-square"></a>
   <a href="https://github.com/ProxyShard/ShardBrowser/releases/latest"><img alt="Latest release" src="https://img.shields.io/github/v/release/ProxyShard/ShardBrowser?style=flat-square&logo=github&label=release&color=blueviolet"></a>
   <a href="https://github.com/ProxyShard/ShardBrowser/stargazers"><img alt="GitHub stars" src="https://img.shields.io/github/stars/ProxyShard/ShardBrowser?style=flat-square&logo=github&label=stars&color=lightgrey"></a>

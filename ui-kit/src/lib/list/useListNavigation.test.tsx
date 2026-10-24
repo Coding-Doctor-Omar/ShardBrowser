@@ -172,6 +172,20 @@ describe('useListNavigation', () => {
     expect(scrollToIndex).toHaveBeenLastCalledWith(3)
   })
 
+  it('a move event where the pointer already was keeps the keys\' highlight (WebKit, after a scroll)', () => {
+    render(<List />)
+    fireEvent.pointerMove(screen.getByRole('option', { name: 'Charlie' }), { clientX: 30, clientY: 40 })
+    expect(active()).toBe('Charlie')
+    press('End')
+    expect(active()).toBe('Echo')
+    // The list scrolled under the still pointer: Delta is under it now.
+    fireEvent.pointerMove(screen.getByRole('option', { name: 'Delta' }), { clientX: 30, clientY: 40 })
+    expect(active()).toBe('Echo')
+    // A real move does move it.
+    fireEvent.pointerMove(screen.getByRole('option', { name: 'Delta' }), { clientX: 31, clientY: 44 })
+    expect(active()).toBe('Delta')
+  })
+
   it('scrolls what the keys reach into view, not what the pointer reaches', () => {
     const scrollToIndex = vi.fn()
     render(<List scrollToIndex={scrollToIndex} />)

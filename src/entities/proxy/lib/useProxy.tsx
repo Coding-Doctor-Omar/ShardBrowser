@@ -1,11 +1,13 @@
 import { create } from 'zustand'
 import { ProxyEntry, ProxyTestSnapshot } from '../model/types'
 import { proxyFullTest, proxyLastTest, proxyList, proxyDelete, proxySave, proxyBulkImport } from '../model/api';
+import { onProxy, teamRefusal } from '../../space';
 import { toast } from '../../../shared/model/toast';
 import { clip, copySecret } from '../../../shared/lib/clipboard';
 import { deferDelete } from '../../../shared/lib/deferDelete';
 import { clipboardTooBig } from '../../../shared/lib/pickFile';
 import { storeBus } from '../../../shared/lib/storeBus';
+import { onSpaceMoved } from '../../../shared/api/invoke';
 import { markArrived } from '../../../shared/lib/arrival';
 import { eachReporting } from '../../../shared/lib/eachReporting';
 import { t } from '../../../shared/i18n';
@@ -33,7 +35,17 @@ const comingBack = new Set<string>();
 /// really went (A Task 14). A failure names what failed and puts it back.
 /// The deleted rows leave the selection, and Undo puts them back in it, as
 /// a failed delete does (owner rule; LQ-02).
-function deleteProxies(get: () => ProxyStore, set: (p: Partial<ProxyStore>) => void, targets: ProxyEntry[]) {
+function deleteProxies(get: () => ProxyStore, set: (p: Partial<ProxyStore>) => void, asked: ProxyEntry[]) {
+    // A team's rules first: one it may not delete never leaves the list, so it never comes back either.
+    const refused = asked.filter((p) => teamRefusal('delete', onProxy(p.id)));
+    if (refused.length > 0) {
+        const name = refused[0].name || `${refused[0].host}:${refused[0].port}`;
+        toast.fail({
+            title: refused.length === 1 ? t("useProxy.deleteFailedOne", { name }) : t("useProxy.deleteFailedMany", { n: refused.length }),
+            detail: teamRefusal('delete', onProxy(refused[0].id)),
+        });
+    }
+    const targets = asked.filter((p) => !refused.includes(p));
     if (targets.length === 0) return;
     const ids = new Set(targets.map((p) => p.id));
     const users = get().profiles.filter((p) => p.proxy_id !== null && ids.has(p.proxy_id)).map((p) => p.id);
@@ -315,6 +327,8 @@ async function loadSnapshots(set: (p: Partial<ProxyStore>) => void, get: () => P
 const LAST_TEST_LIMIT = 4;
 /** Proxies whose last test was read (or is being read), so none is read twice. */
 const lastTestRead = new Set<string>();
+/** The bus listener goes on with the first list, once. */
+let listening = false;
 
 export const useProxy = create<ProxyStore>((set, get) => ({
     status: 'idle',
@@ -396,7 +410,11 @@ export const useProxy = create<ProxyStore>((set, get) => ({
             const proxies = (await proxyList()).filter((p) => !pendingProxyIds.has(p.id));
             set({ proxies, status: 'ready' });
             // A proxy saved here is already in this list: only another store's change reloads it.
-            storeBus.on('proxies', (from) => { if (from !== 'proxies') void get().reloadProxies(); });
+            // Once: a new space starts the list over.
+            if (!listening) {
+                listening = true;
+                storeBus.on('proxies', (from) => { if (from !== 'proxies') void get().reloadProxies(); });
+            }
             await loadSnapshots(set, get);
         } catch (e) {
             set({ status: 'error', error: String(e) });
@@ -419,6 +437,10 @@ export const useProxy = create<ProxyStore>((set, get) => ({
         } catch (e) { toast.fail({ title: t("useProxy.refreshFailed"), detail: e }); }
     },
     saveProxy: async (entry) => {
+        // A team's rules first: a new one needs Create in the team, a change Edit on it.
+        const known = !!entry.id && get().proxies.some((p) => p.id === entry.id);
+        const refused = known ? teamRefusal('edit', onProxy(entry.id)) : teamRefusal('create');
+        if (refused) { toast.fail({ title: t("useProxy.saveFailed", { name: entry.name }), detail: refused, subject: entry.name }); return false; }
         try {
             const saved = await proxySave(entry);
             set({ proxies: get().proxies.map((p) => (p.id === saved.id ? saved : p)) });
@@ -497,6 +519,8 @@ export const useProxy = create<ProxyStore>((set, get) => ({
         if (!entry) return;
         const newName = name.trim();
         if (newName === entry.name) return;
+        const refused = teamRefusal('edit', onProxy(id));
+        if (refused) { toast.fail({ title: t("useProxy.renameFailed", { name: entry.name }), detail: refused, subject: entry.name }); return; }
         try {
             await proxySave({ ...entry, name: newName });
             get().reload();
@@ -570,6 +594,8 @@ export const useProxy = create<ProxyStore>((set, get) => ({
     },
     // Import from clipboard (one per line, bulkExport format).
     bulkImportClipboard: async () => {
+        const refused = teamRefusal('create');
+        if (refused) { toast.fail({ title: t("useProxy.importFailed"), detail: refused }); return; }
         try {
             const text = await clip.read();
             if (!text.trim()) { toast.err(t("useProxy.clipboardEmpty")); return; }
@@ -582,3 +608,13 @@ export const useProxy = create<ProxyStore>((set, get) => ({
         } catch (e) { toast.fail({ title: t("useProxy.importFailed"), detail: e }); }
     },
 }))
+
+// Another space: its proxies are read afresh; nothing picked or open in the old one stays.
+onSpaceMoved(() => {
+    const was = useProxy.getState().status;
+    useProxy.setState({
+        status: 'idle', error: null, proxies: [], proxySel: new Set<string>(), anchorId: null, activeId: null,
+        activeByPointer: false, peekId: null, arrived: {}, bulkOpen: false, proxyTesting: {},
+    });
+    if (was !== 'idle') void useProxy.getState().init();
+});

@@ -57,8 +57,9 @@ test("Usage cards: no empty band inside a card, and sparklines run edge to edge 
       expect(g.widest, `${g.id} at ${width}`).toBeLessThanOrEqual(24);
       expect(g.foot, `${g.id} foot at ${width}`).toBeLessThanOrEqual(24);
     }
-    // A sparkline fills its card's inner box: sides and bottom, to the pixel.
-    const edges = await page.locator("[data-usage-rows] [data-usage-card]").evaluateAll((cards) => cards.flatMap((c) => {
+    // A sparkline fills its card's inner box: sides and bottom, to the pixel,
+    // once it has measured the new width (it follows a ResizeObserver).
+    const edges = () => page.locator("[data-usage-rows] [data-usage-card]").evaluateAll((cards) => cards.flatMap((c) => {
       const svg = c.querySelector("[data-sparkline] svg");
       if (!svg) return [];
       const cs = getComputedStyle(c);
@@ -66,8 +67,8 @@ test("Usage cards: no empty band inside a card, and sparklines run edge to edge 
       const r = svg.getBoundingClientRect();
       return [{ l: r.left - (b.left + parseFloat(cs.borderLeftWidth)), r: (b.right - parseFloat(cs.borderRightWidth)) - r.right, b: (b.bottom - parseFloat(cs.borderBottomWidth)) - r.bottom }];
     }));
-    expect(edges.length).toBeGreaterThan(0);
-    for (const e of edges) { expect(Math.abs(e.l)).toBeLessThanOrEqual(1); expect(Math.abs(e.r)).toBeLessThanOrEqual(1); expect(Math.abs(e.b)).toBeLessThanOrEqual(1); }
+    expect((await edges()).length).toBeGreaterThan(0);
+    await expect.poll(async () => Math.max(...(await edges()).flatMap((e) => [Math.abs(e.l), Math.abs(e.r), Math.abs(e.b)])), `sparkline edges at ${width}`).toBeLessThanOrEqual(1);
   }
 });
 

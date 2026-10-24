@@ -3,6 +3,7 @@ import { DeleteIcon, RestoreIcon } from "../../shared/icons";
 import { useNav } from "../../shared/model/navigation";
 import { defineCommands, type Command, type Subject } from "../../shared/commands";
 import { useTrash, type TrashEntry } from "../../entities/trash";
+import { inTeam } from "../../entities/space";
 
 const store = () => useTrash.getState();
 const entriesOf = (s: Subject): TrashEntry[] => {
@@ -18,6 +19,8 @@ export const TRASH_COMMANDS: readonly Command[] = [
   {
     ...LIST, id: "trash.restore", scope: "selection", group: "organize", icon: RestoreIcon,
     label: (n) => (n > 1 ? t("trash.restoreCount", { n }) : t("trash.restore")),
+    // The personal Trash's; the team's acts on its own rows (pages/trash/team.tsx).
+    when: () => !inTeam(),
     surfaces: ["rowMenu", "bulkBar", "palette"],
     run: (s) => store().restoreMany(entriesOf(s)),
   },
@@ -27,6 +30,7 @@ export const TRASH_COMMANDS: readonly Command[] = [
     ...LIST, id: "trash.deleteForGood", scope: "selection", group: "danger", icon: DeleteIcon, danger: true,
     focusAfter: true,
     label: () => t("trash.deleteForGood"), keys: ["Delete", "Backspace"], keysJoin: "or", keyOwner: "self",
+    when: () => !inTeam(),
     surfaces: ["rowMenu", "bulkMore", "palette", "sheet"],
     run: (s) => store().purgeMany(entriesOf(s)),
   },
@@ -34,6 +38,8 @@ export const TRASH_COMMANDS: readonly Command[] = [
     ...LIST, id: "trash.empty", scope: "page", group: "danger", icon: DeleteIcon, danger: true,
     focusAfter: true,
     label: () => t("commands.emptyTrash"),
+    // The team's Trash has no Empty: its server keeps it.
+    when: () => !inTeam(),
     surfaces: ["pageMenu", "palette"],
     // Nothing to empty: it says so instead of doing nothing (Pair 44 review,
     // I2). Before the Trash has loaded it can run: the Trash opens, loads and

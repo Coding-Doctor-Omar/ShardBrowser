@@ -37,7 +37,7 @@ export default function ProgressBar({
     <div className={cn('flex items-center gap-[12px]', className)}>
       {/* The sunken track on a panel, one step up on a tile (borderless, owner 2026-10-01). */}
       <div
-        className="h-1.5 w-full overflow-hidden rounded-full bg-[var(--control-fill,var(--bg-sunken))]"
+        className="h-1.5 w-full overflow-hidden rounded-full bg-[var(--control-fill,var(--bg-sunken))] forced-colors:outline forced-colors:outline-1 forced-colors:outline-[CanvasText]"
         role="progressbar"
         aria-label={ariaLabel}
         aria-labelledby={ariaLabelledby}
@@ -46,7 +46,8 @@ export default function ProgressBar({
         aria-valuemax={100}
       >
         <div
-          className={cn('h-full w-full rounded-full transition-[translate] duration-(--motion-slow) ease-out reduced:transition-none', fillColor[color])}
+          // Forced colors paint both Canvas: the fill keeps the system's Highlight.
+          className={cn('h-full w-full rounded-full transition-[translate] duration-(--motion-slow) ease-out reduced:transition-none forced-colors:forced-color-adjust-none forced-colors:bg-[Highlight]', fillColor[color])}
           style={{ translate: `${pct - 100}% 0` }}
         />
       </div>

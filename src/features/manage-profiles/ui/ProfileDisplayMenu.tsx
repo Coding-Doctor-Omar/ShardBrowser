@@ -1,5 +1,5 @@
 import { useId, useRef, useState } from "react";
-import { Button, Checkbox, Popover } from "@proxyshard/shardx-ui-kit";
+import { Button, Checkbox, Popover, Tooltip } from "@proxyshard/shardx-ui-kit";
 import { DisplayIcon } from "../../../shared/icons";
 import { SelectField } from "../../../shared/ui/SelectField";
 import { PROFILE_COLUMNS, useProfileLayout, useProfileUi, type ProfileSort } from "../../../entities/profile";
@@ -25,19 +25,22 @@ export function ProfileDisplayMenu() {
 
   return (
     <>
-      <Button
-        ref={trigger}
-        variant="neutral"
-        mode="stroke"
-        size="xsmall"
-        leftIcon={<DisplayIcon className="size-3.5" />}
-        // Says, and shows, that its panel is open (UI-28, A11Y-06).
-        aria-haspopup="dialog"
-        aria-expanded={open}
-        onClick={() => setOpen((v) => !v)}
-      >
-        {t("profileDisplay.title")}
-      </Button>
+      {/* Its word in a tooltip only while a narrow header shows its icon alone. */}
+      <Tooltip content={t("profileDisplay.title")} whenTruncated>
+        <Button
+          ref={trigger}
+          variant="neutral"
+          mode="stroke"
+          size="xsmall"
+          leftIcon={<DisplayIcon className="size-3.5" />}
+          // Says, and shows, that its panel is open (UI-28, A11Y-06).
+          aria-haspopup="dialog"
+          aria-expanded={open}
+          onClick={() => setOpen((v) => !v)}
+        >
+          {t("profileDisplay.title")}
+        </Button>
+      </Tooltip>
 
       <Popover
         open={open}
@@ -65,16 +68,17 @@ export function ProfileDisplayMenu() {
         <fieldset className="m-0 flex flex-col gap-2 border-0 p-0">
           <legend className="mb-2 p-0 text-section-title text-text-strong-950">{t("profileDisplay.columns")}</legend>
           {choices.map((c) => (
-            <div key={c.id} className="flex items-center justify-between gap-2">
+            // A note that does not fit beside the label drops under it, flush right: never over the label.
+            <div key={c.id} className="flex flex-wrap items-center gap-x-2 gap-y-0.5">
               <Checkbox
-                wrapperClassName="min-w-0 flex-1"
+                wrapperClassName="min-w-0 grow"
                 label={c.title}
                 checked={c.checked}
                 disabled={c.disabled}
                 aria-describedby={c.note ? `${noteId}-${c.id}` : undefined}
                 onChange={(e) => setColumns(setShown(PROFILE_COLUMNS, columns, c.id, e.target.checked))}
               />
-              {c.note && <span id={`${noteId}-${c.id}`} className="shrink-0 text-secondary text-text-soft-400">{c.note}</span>}
+              {c.note && <span id={`${noteId}-${c.id}`} data-column-note className="ms-auto min-w-0 text-end text-secondary text-text-soft-400">{c.note}</span>}
             </div>
           ))}
         </fieldset>

@@ -1,6 +1,7 @@
 import { useMemo } from "react";
 import { type ComboboxOption } from "@proxyshard/shardx-ui-kit";
 import { duplicateLabels, proxyAddressHint, proxyLabel, type ProxyEntry } from "../../../entities/proxy";
+import { bindRefusal, useAccess, useInTeam } from "../../../entities/space";
 import { useT } from "../../../shared/i18n";
 import { ProxyFlag } from "../../../shared/ui/ProxyFlag";
 
@@ -15,24 +16,30 @@ import { ProxyFlag } from "../../../shared/ui/ProxyFlag";
 /// names no proxy) reads as missing, never as No proxy (IFACE-01).
 export function useProxyOptions(proxies: ProxyEntry[], value?: string | null): ComboboxOption[] {
   const t = useT();
+  // A team binds only a proxy this member may use; one they cannot see comes with its profile.
+  const team = useInTeam();
+  const read = useAccess((s) => s.read);
   return useMemo(() => {
     const shared = duplicateLabels(proxies);
     return [
       { value: "", label: t("proxySelect.directConnection") },
       ...(value && !proxies.some((p) => p.id === value)
-        ? [{ value, label: t("profileRow.proxyMissing"), disabled: true }]
+        ? [{ value, label: team ? t("profileRow.proxyHidden") : t("profileRow.proxyMissing"), disabled: true }]
         : []),
       ...proxies.map((p) => {
         const label = proxyLabel(p);
         const isShared = shared.has(label);
+        const refused = team && p.id !== value ? bindRefusal(p.id) : null;
         return {
           value: p.id,
           label,
-          hint: isShared || label !== `${p.host}:${p.port}` ? proxyAddressHint(p, isShared) : undefined,
+          hint: refused ?? (isShared || label !== `${p.host}:${p.port}` ? proxyAddressHint(p, isShared) : undefined),
           keywords: [p.host, p.country ?? "", p.kind],
           icon: <ProxyFlag cc={p.country} height={14} />,
+          ...(refused ? { disabled: true } : {}),
         };
       }),
     ];
-  }, [proxies, value, t]);
+    // `read`: the access the refusals are judged by.
+  }, [proxies, value, t, team, read]);
 }

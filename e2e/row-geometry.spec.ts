@@ -111,14 +111,15 @@ for (const theme of ["light", "dark"] as Theme[]) {
     };
     const seen: Record<string, { name: string; status: string; actions: string }> = {};
     seen.rest = await sample();
-    await r.locator("[data-cell='notes']").hover();
+    // Folder, not Notes: the stretched Notes at 1280 lies under the hover strip.
+    await r.locator("[data-cell='folder']").hover();
     await expect(r).toHaveAttribute("data-active", "true");
     seen.hover = await sample();
     await r.locator("[data-cell='checkbox'] input").check({ force: true });
     await page.mouse.move(1, 1);
     await expect(r).toHaveAttribute("aria-selected", "true");
     seen.selected = await sample();
-    await r.locator("[data-cell='notes']").hover();
+    await r.locator("[data-cell='folder']").hover();
     seen.selectedHover = await sample();
     console.log(`pinned vs row (${theme}): ${JSON.stringify(seen)}`);
     for (const [state, px] of Object.entries(seen)) {

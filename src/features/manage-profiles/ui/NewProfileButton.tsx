@@ -2,7 +2,9 @@ import { Button, Tooltip, type ButtonSize } from "@proxyshard/shardx-ui-kit";
 import { AddIcon } from "../../../shared/icons";
 import { keyWorksOn } from "../../../shared/commands";
 import { useNav } from "../../../shared/model/navigation";
-import { capOf, command, labelOf } from "../../commands";
+import { capOf, command, labelOf, reasonOf } from "../../commands";
+import { useRightsChange } from "../../../entities/space";
+import { useProfile } from "../../../entities/profile";
 import { openProfileForm } from "../../profile-form/model/useProfileForm";
 
 /// Opens the profile form on a new profile (a library fingerprint for this
@@ -20,13 +22,19 @@ export function NewProfileButton({ proxyId = null, size = "xsmall", mode = "fill
   const section = useNav((s) => s.section);
   const label = labelOf("profile.new");
   const cmd = command("profile.new");
+  // A team without Create anywhere for this person: the button says why and does nothing.
+  useRightsChange();
+  useProfile((s) => s.folderRegistry);
+  const why = reasonOf(cmd, { ids: [] });
   return (
-    <Tooltip content={label} shortcut={keyWorksOn(cmd, section) ? capOf(cmd) : undefined}>
+    <Tooltip content={why ?? label} shortcut={!why && keyWorksOn(cmd, section) ? capOf(cmd) : undefined}>
       <Button
         variant={mode === "filled" ? "primary" : "neutral"} mode={mode} size={size} data-mode={mode}
         data-tour="new-profile"
         leftIcon={<AddIcon className="size-3.5" />}
-        onClick={() => openProfileForm({ mode: "create", proxyId })}
+        disabled={!!why}
+        aria-description={why ?? undefined}
+        onClick={() => { if (!why) openProfileForm({ mode: "create", proxyId }); }}
       >
         {label}
       </Button>

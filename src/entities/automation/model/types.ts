@@ -65,6 +65,8 @@ export type Project = {
   rules?: TrafficRule[];
   created_at: number;
   updated_at: number;
+  /** A team's revision of it, as read; a save from an older one is refused as stale. None in the personal space. */
+  revision?: number;
 };
 
 // ---- Request interception (Traffic domain) ----

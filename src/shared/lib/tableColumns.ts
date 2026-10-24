@@ -20,6 +20,10 @@ export type ColumnDef<Id extends string> = {
   /** The narrowest and widest a person can make it, px. */
   min: number;
   max: number;
+  /** Content of one size (a pill, a count, a date): the most px a wide row
+   *  stretches it past that content while Notes shows, so the room goes to
+   *  Notes. A row without Notes spreads the room evenly and ignores it. */
+  grow?: number;
   /** Shown on a fresh install. */
   shown: boolean;
   hideable: boolean;
@@ -85,13 +89,17 @@ export function clampWidth<Id extends string>(def: ColumnDef<Id>, px: number): n
   return Math.round(Math.min(def.max, Math.max(def.min, px)));
 }
 
-/** Saved widths, each clamped to its column's range; anything else dropped. */
+/** A stored width: a wide row can draw a column past its max, and a person keep it there. */
+export const keptWidth = <Id extends string>(def: ColumnDef<Id>, px: number): number =>
+  Math.round(Math.min(def.max * 4, Math.max(def.min, px)));
+
+/** Saved widths, each clamped (`keptWidth`); anything else dropped. */
 export function normalizeWidths<Id extends string>(defs: readonly ColumnDef<Id>[], raw: unknown): ColumnWidths<Id> {
   const out: ColumnWidths<Id> = {};
   if (!raw || typeof raw !== "object") return out;
   for (const d of defs) {
     const v = (raw as Record<string, unknown>)[d.id];
-    if (typeof v === "number" && Number.isFinite(v)) out[d.id] = clampWidth(d, v);
+    if (typeof v === "number" && Number.isFinite(v)) out[d.id] = keptWidth(d, v);
   }
   return out;
 }
@@ -217,6 +225,15 @@ export type TableLayout<Id extends string> = {
   /** The same at its right: the row actions and the side padding. What a
    *  list draws beside them (a hover strip) is the list's own to add. */
   pinEnd: number;
+  /** Each column's drawn width, px (the list's width measured). */
+  drawn: ColumnWidths<Id>;
+  /** Each column's grid track, as `template` holds it: what a live resize sets. */
+  tracks: Partial<Record<Id, string>>;
+  /** The row is wider than the columns and they stretch to fill it. */
+  stretched: boolean;
+  /** `id`'s edge moved so the column is `px` wide, as a drag or the arrow
+   *  keys move it: the person's widths to keep, and the layout they give. */
+  resize: (id: Id, px: number) => { widths: ColumnWidths<Id>; layout: TableLayout<Id> };
 };
 
 /** The least room the scrolling columns keep beside the pinned parts, px:
@@ -241,28 +258,56 @@ function shrink(cols: readonly { top: number; need: number; floor: number }[], o
   return cols.map((c) => at(c, level));
 }
 
-/// `shrink` in rounds (controller rulings, Pair 31 and merge point 4): the
+/// `shrink` in rounds (controller rulings, Pair 31 and merge point 4): a
+/// person's width past the column's max (only a stretched row draws one)
+/// first, down to its content (`spare`): that px is empty room. Then the
 /// `fill` column (Notes: free text, whole in its tooltip) goes down to its
-/// floor first, before any column of content; then every other column but
+/// floor, before any column of content; then every other column but
 /// the `last` ones (Name, which leads the list and names the row), each to
 /// its floor; only then does Name give way, and only when that ends the
 /// sideways scroll. When the list must scroll anyway, Name keeps its width:
 /// it stays pinned while the rest scrolls, so cutting it would buy nothing,
 /// and a name beside an open Peek stays whole at the default window.
-function giveWay(cols: readonly { top: number; need: number; floor: number; last: boolean; fill: boolean }[], over: number): number[] {
+function giveWay(cols: readonly { top: number; need: number; floor: number; last: boolean; fill: boolean; spare?: number }[], over: number): number[] {
   type Col = (typeof cols)[number];
-  // One round: the columns `moves` picks go down toward their floors, the rest hold.
-  const round = (from: readonly number[], moves: (c: Col) => boolean, px: number) =>
-    shrink(cols.map((c, i) => ({ top: from[i], need: c.need, floor: moves(c) ? Math.min(from[i], c.floor) : from[i] })), px);
+  // One round: the columns `to` gives a floor go down toward it, the rest hold.
+  const round = (from: readonly number[], to: (c: Col) => number | undefined, px: number) =>
+    shrink(cols.map((c, i) => {
+      const f = to(c);
+      return { top: from[i], need: c.need, floor: f === undefined ? from[i] : Math.min(from[i], f) };
+    }), px);
   const cut = (at: readonly number[]) => cols.reduce((s, c, i) => s + c.top - at[i], 0);
-  const notes = round(cols.map((c) => c.top), (c) => c.fill, over);
+  const spare = round(cols.map((c) => c.top), (c) => c.spare, over);
+  if (cut(spare) >= over) return spare;
+  const notes = round(spare, (c) => (c.fill ? c.floor : undefined), over - cut(spare));
   if (cut(notes) >= over) return notes;
-  const rest = round(notes, (c) => !c.last && !c.fill, over - cut(notes));
+  const rest = round(notes, (c) => (!c.last && !c.fill ? c.floor : undefined), over - cut(notes));
   const left = over - cut(rest);
-  const room = cols.reduce((s, c, i) => s + (c.last ? rest[i] - c.floor : 0), 0);
+  const room = cols.reduce((s, c, i) => s + (c.last ? Math.max(0, rest[i] - c.floor) : 0), 0);
   if (left <= 0 || room < left) return rest;
-  return round(rest, (c) => c.last, left);
+  return round(rest, (c) => (c.last ? c.floor : undefined), left);
 }
+
+/// `extra` px shared out (owner, 2026-10-23): the same px to each column up
+/// to its cap, so the columns start at even steps; past every cap, the same
+/// px to each again.
+function level(cols: readonly { base: number; cap: number }[], extra: number): number[] {
+  if (cols.length === 0) return [];
+  const heads = cols.map((c) => c.cap - c.base).sort((a, b) => a - b);
+  let left = extra;
+  let open = cols.length;
+  let at = 0;
+  for (const h of heads) {
+    if ((h - at) * open >= left) return cols.map((c) => c.base + Math.min(c.cap - c.base, at + left / open));
+    left -= (h - at) * open;
+    at = h;
+    open--;
+  }
+  return cols.map((c) => c.cap + left / cols.length);
+}
+
+/** Px as a flex factor, or a track's px: two decimals are plenty. */
+const r2 = (px: number) => Math.round(px * 100) / 100;
 
 /// The columns a list draws and their grid (owner decision 2026-09-26):
 /// every chosen column but `exclude`, in order; none drops out for want of
@@ -277,14 +322,8 @@ function giveWay(cols: readonly { top: number; need: number; floor: number; last
 /// sideways inside it and the page never does; the header row stays on top, the select box
 /// and Name stay pinned at the card's left and the row actions at its right
 /// (`list-pin-*` in app.css). Short of room, a column's part that gives way
-/// first moves into its tooltip before any column is cut (`o.short`). The
-/// room left over (controller ruling, 2026-09-30) goes first to the columns
-/// cut at their content's width that it can make whole, the nearest first,
-/// each up to the width all its rows fit in (`o.full`, inside its maximum),
-/// then to the fill column (Notes) while no one has sized it, else it stays
-/// empty at the row's end, in the row actions' track, which keeps them at
-/// the card's right edge. A column a person sized never grows, the last one
-/// included.
+/// first moves into its tooltip before any column is cut (`o.short`).
+/// Room left over stretches the row to the list's width (owner, 2026-10-23: `stretchRow`).
 export function layoutColumns<Id extends string>(
   defs: readonly ColumnDef<Id>[],
   set: ColumnSet<Id>,
@@ -300,8 +339,12 @@ export function layoutColumns<Id extends string>(
   const leads = o.lead > 0;
   const leadRoom = leads ? o.lead + o.gap : 0;
   const frame = leadRoom + o.tail + shown.length * o.gap + o.padding;
-  let px = shown.map((id, i) => Math.max(widths[id] ?? o.auto?.[id] ?? byId.get(id)!.need, lastFloor(i)));
+  // Each column's width from its content, as if no one sized it; Notes keeps `need`.
+  const own = shown.map((id, i) => Math.max((byId.get(id)!.fill ? undefined : o.auto?.[id]) ?? byId.get(id)!.need, lastFloor(i)));
+  let px = shown.map((id, i) => (widths[id] !== undefined ? Math.max(widths[id]!, lastFloor(i)) : own[i]));
   let over = o.available === null ? 0 : frame + px.reduce((s, n) => s + n, 0) - o.available;
+  // Short of room as they are: nothing stretches.
+  const tight = over > 0;
   // Short of room, a column's part that gives way first (the Test result's
   // IP) moves into its tooltip, whole, before any column is cut; a column a
   // person made too narrow for it shows it there too (controller ruling,
@@ -317,34 +360,58 @@ export function layoutColumns<Id extends string>(
     return true;
   });
   const fill = shown.find((id) => byId.get(id)!.fill && widths[id] === undefined);
+  // A person's width never gives way; else down to the min or the folded content (merge point 4).
+  const floorOf = (i: number, top: number, sized: boolean) => {
+    const d = byId.get(shown[i])!;
+    return sized ? top : Math.min(top, Math.max(d.min, lastFloor(i), o.floor?.[d.id] ?? 0));
+  };
   if (over > 0) {
     px = giveWay(shown.map((id, i) => {
       const d = byId.get(id)!;
-      // A column a person sized never gives way: its floor is its width.
-      // Else its minimum, or the width its folded content needs (one tag
-      // chip and "+N"), never a letter of a chip (controller ruling, merge point 4).
-      const floor = widths[id] !== undefined ? px[i] : Math.min(px[i], Math.max(d.min, lastFloor(i), o.floor?.[id] ?? 0));
-      return { top: px[i], need: d.need, floor, last: !d.movable, fill: id === fill };
+      const sized = widths[id] !== undefined;
+      // Past its max, a person's width is a wide row's stretch: it goes first, down to the content,
+      // and on from there as if no one had sized it, so it never leaves the row tighter.
+      const stretch = sized && px[i] > d.max;
+      const spare = stretch ? Math.min(px[i], own[i]) : undefined;
+      return { top: px[i], need: d.need, floor: floorOf(i, px[i], sized && !stretch), last: !d.movable, fill: id === fill, spare };
     }), over);
   }
   const minWidth = frame + px.reduce((s, n) => s + n, 0);
-  // The room left over lets a cut column show whole, the nearest to whole
-  // first, and only a column it can make whole: a long name that stays cut
-  // anyway keeps its fitted width, and the room goes on to the next one,
-  // then to Notes or the row's end (controller rulings, 2026-09-30 and
-  // merge point 3). Not measured yet: each may grow toward whole.
-  let spare = o.available === null ? Infinity : o.available - minWidth;
-  const grows = new Set<Id>();
-  shown
-    .map((id, i) => ({ id, gap: id === fill || widths[id] !== undefined || shortened.includes(id) ? 0 : (o.full?.[id] ?? 0) - px[i] }))
-    .filter((c) => c.gap > 0)
-    .sort((a, b) => a.gap - b.gap)
-    .forEach((c) => { if (c.gap <= spare) { spare -= c.gap; grows.add(c.id); } });
-  const track = (id: Id, i: number) => {
-    if (id === fill) return `minmax(${px[i]}px,1fr)`;
-    return grows.has(id) ? `minmax(${px[i]}px,${o.full![id]}px)` : `${px[i]}px`;
-  };
-  const tracks = shown.map((id, i) => `var(${columnVar(id)},${track(id, i)})`);
+  const stretched = o.available !== null && o.available > minWidth && !tight;
+  let drawn: number[];
+  let tracks: string[];
+  let tail: string;
+  if (stretched) {
+    ({ drawn, tracks, tail } = stretchRow(shown.map((id, i) => ({
+      def: byId.get(id)!,
+      own: own[i],
+      px: px[i],
+      sized: widths[id] !== undefined,
+      full: o.full?.[id],
+      floor: floorOf(i, own[i], false),
+    })), o.available! - frame, o.tail));
+  } else {
+    // The room left over lets a cut column show whole, the nearest to whole
+    // first, and only a column it can make whole: a long name that stays cut
+    // anyway keeps its fitted width, and the room goes on to the next one,
+    // then to Notes (controller rulings, 2026-09-30 and merge point 3).
+    // Not measured yet: each may grow toward whole.
+    let spare = o.available === null ? Infinity : o.available - minWidth;
+    const grows = new Set<Id>();
+    shown
+      .map((id, i) => ({ id, gap: id === fill || widths[id] !== undefined || shortened.includes(id) ? 0 : (o.full?.[id] ?? 0) - px[i] }))
+      .filter((c) => c.gap > 0)
+      .sort((a, b) => a.gap - b.gap)
+      .forEach((c) => { if (c.gap <= spare) { spare -= c.gap; grows.add(c.id); } });
+    tracks = shown.map((id, i) => {
+      if (id === fill) return `minmax(${px[i]}px,1fr)`;
+      return grows.has(id) ? `minmax(${px[i]}px,${o.full![id]}px)` : `${px[i]}px`;
+    });
+    tail = fill ? `${o.tail}px` : `minmax(${o.tail}px,1fr)`;
+    // What the grid draws: a grown column whole, Notes what is left.
+    drawn = shown.map((id, i) => (o.available !== null && grows.has(id) ? o.full![id]! : px[i]));
+    if (fill && o.available !== null && spare > 0) drawn[shown.indexOf(fill)] += spare;
+  }
   // The pinned parts while it scrolls: the side padding, the select box,
   // Name and the gaps beside them at the left; the row actions and the side
   // padding at the right. (Scrolling, every track sits at its minimum.)
@@ -352,16 +419,143 @@ export function layoutColumns<Id extends string>(
   const name = (px[0] ?? 0) + o.gap;
   const end = o.tail + o.padding / 2;
   const pinFirst = o.available === null || minWidth <= o.available || o.available - (start + name + end) >= PIN_ROOM;
-  return {
+  const byShown = <T,>(v: readonly T[]) => Object.fromEntries(shown.map((id, i) => [id, v[i]])) as Partial<Record<Id, T>>;
+  const layout: TableLayout<Id> = {
     shown,
     excluded,
     shortened,
-    template: [...(leads ? [o.leadTrack ?? `${o.lead}px`] : []), ...tracks, fill ? `${o.tail}px` : `minmax(${o.tail}px,1fr)`].join(" "),
+    template: [...(leads ? [o.leadTrack ?? `${o.lead}px`] : []), ...shown.map((id, i) => `var(${columnVar(id)},${tracks[i]})`), tail].join(" "),
     minWidth,
     pinFirst,
     pinStart: start + (pinFirst ? name : 0),
     pinEnd: end,
+    drawn: byShown(drawn),
+    tracks: byShown(tracks),
+    stretched,
+    resize: (id, to) => resizeEdge(defs, set, widths, o, layout, id, to),
   };
+  return layout;
+}
+
+type StretchCol<Id extends string> = {
+  def: ColumnDef<Id>;
+  /** Width from its content, as if no one sized it; `px` is the person's, else this. */
+  own: number;
+  px: number;
+  sized: boolean;
+  /** The width every row fits in, uncut. */
+  full?: number;
+  floor: number;
+};
+
+/// Slots first: cut columns toward whole, Notes toward whole, then even px up to each cap; empty ones stay.
+/// Without Notes the rest goes as the same px to every column but the last, which keeps its slot so
+/// the row's data ends at its actions (owner, 2026-10-23: a max let Name take the rest, far from the data).
+/// A person's width then trades px with the next stretching column after it, so columns before it hold.
+function stretchRow<Id extends string>(cols: readonly StretchCol<Id>[], room: number, tailPx: number) {
+  const sum = (v: readonly number[]) => v.reduce((s, n) => s + n, 0);
+  const empty = cols.map((c) => c.own < c.def.min || (c.full ?? c.def.min) < c.def.min);
+  const notes = cols.findIndex((c, i) => c.def.fill && !empty[i]);
+  let slot = cols.map((c) => c.own);
+  let extra = room - sum(slot);
+  if (extra < 0) {
+    // Only a person's narrow column makes the room: the slots as if short of it.
+    slot = giveWay(cols.map((c) => ({ top: c.own, need: c.def.need, floor: c.floor, last: !c.def.movable, fill: !!c.def.fill })), -extra);
+    extra = Math.max(0, room - sum(slot));
+  }
+  // The nearest to whole first. A column grows from half its gap of room to whole at its gap, so it
+  // never jumps whole at one px; one the room is far from making whole takes the even share instead.
+  cols
+    .map((c, i) => ({ i, gap: c.def.fill || empty[i] ? 0 : (c.full ?? 0) - slot[i] }))
+    .filter((c) => c.gap > 0)
+    .sort((a, b) => a.gap - b.gap)
+    .forEach((c) => {
+      const g = Math.min(c.gap, Math.max(0, 2 * extra - c.gap));
+      slot[c.i] += g;
+      extra -= g;
+    });
+  if (notes >= 0) {
+    const g = Math.max(0, Math.min(extra, (cols[notes].full ?? 0) - slot[notes]));
+    slot[notes] += g;
+    extra -= g;
+  }
+  let open = cols.map((_, i) => i).filter((i) => !empty[i]);
+  if (notes < 0 && open.length > 1) open = open.slice(0, -1);
+  const capOf = (i: number) => {
+    const c = cols[i];
+    if (i === notes) return Infinity;
+    if (notes < 0) return slot[i];
+    const whole = Math.max(slot[i], c.full ?? 0);
+    return c.def.grow !== undefined ? whole + c.def.grow : Math.max(c.def.max, whole);
+  };
+  level(open.map((i) => ({ base: slot[i], cap: capOf(i) })), extra).forEach((v, k) => { slot[open[k]] = v; });
+  const gives = (i: number) => !cols[i].sized && !empty[i];
+  const least = (i: number) => Math.min(cols[i].px, slot[i]);
+  const out = [...slot];
+  let carry = 0;
+  const take = (i: number) => {
+    if (!gives(i) || Math.abs(carry) < 0.005) return;
+    const t = carry > 0 ? Math.min(carry, out[i] - least(i)) : carry;
+    out[i] -= t;
+    carry -= t;
+  };
+  cols.forEach((c, i) => {
+    if (!c.sized) take(i);
+    else { out[i] = c.px; carry += c.px - slot[i]; }
+  });
+  for (let i = cols.length - 1; i >= 0; i--) take(i);
+  // fr keeps the shares while the window moves ahead of the next measure.
+  const flex = cols.some((_, i) => gives(i));
+  return {
+    drawn: out.map(r2),
+    tracks: cols.map((_, i) => (gives(i) ? `minmax(${r2(least(i))}px,${r2(out[i])}fr)` : `${r2(out[i])}px`)),
+    // Nothing stretches (all sized or empty): the actions' track takes the rest.
+    tail: flex ? `${tailPx}px` : `minmax(${tailPx}px,1fr)`,
+  };
+}
+
+/// Not stretched: the column takes `to`, as before. Stretched: the next column gives the px (the last
+/// column's, the one before it), and the move stops where the columns before the edge would give.
+function resizeEdge<Id extends string>(
+  defs: readonly ColumnDef<Id>[], set: ColumnSet<Id>, widths: ColumnWidths<Id>, o: LayoutOptions<Id>,
+  l: TableLayout<Id>, id: Id, to: number,
+): { widths: ColumnWidths<Id>; layout: TableLayout<Id> } {
+  const byId = byIdOf(defs);
+  const d = byId.get(id);
+  const at = l.shown.indexOf(id);
+  const keep = (next: ColumnWidths<Id>) => ({ widths: next, layout: layoutColumns(defs, set, next, o) });
+  if (!d || at < 0) return { widths, layout: l };
+  if (!l.stretched) return keep({ ...widths, [id]: clampWidth(d, to) });
+  const from = l.drawn[id]!;
+  // A wide row draws columns past their max: an edge moves on to what can be kept, as far as a column gives.
+  const want = keptWidth(d, to);
+  const last = at === l.shown.length - 1;
+  const partner = l.shown[last ? at - 1 : at + 1];
+  const hold = l.shown.slice(0, last ? Math.max(0, at - 1) : at);
+  const make = (w: number) => {
+    const next: ColumnWidths<Id> = { ...widths, [id]: w };
+    if (partner !== undefined && widths[partner] !== undefined) {
+      const p = l.drawn[partner]!;
+      next[partner] = keptWidth(byId.get(partner)!, p - (w - from));
+    }
+    return keep(next);
+  };
+  const holds = (r: { layout: TableLayout<Id> }) =>
+    r.layout.stretched && hold.every((h) => Math.abs(r.layout.drawn[h]! - l.drawn[h]!) < 0.5);
+  // A move that draws nothing new keeps nothing either.
+  const moved = (r: { widths: ColumnWidths<Id>; layout: TableLayout<Id> }) =>
+    (Math.abs(r.layout.drawn[id]! - from) < 0.5 ? { widths, layout: l } : r);
+  const got = make(want);
+  if (holds(got)) return moved(got);
+  let ok = keptWidth(d, from);
+  if (!holds(make(ok))) return { widths, layout: l };
+  let bad = want;
+  while (Math.abs(bad - ok) > 1) {
+    const mid = Math.round((ok + bad) / 2);
+    if (holds(make(mid))) ok = mid;
+    else bad = mid;
+  }
+  return moved(make(ok));
 }
 
 // ---- Widths from content (owner, 2026-09-30) --------------------------------
@@ -392,7 +586,7 @@ export type ColumnContent = { cells: readonly number[]; header: number };
 export type ContentWidths<Id extends string> = {
   /** The width nine rows in ten fit in (`fitWidth`): the column's own. */
   fit: ColumnWidths<Id>;
-  /** The width every row fits in, inside the column's range: a column cut at
+  /** The width every row fits in, past the column's max too: a column cut at
    *  `fit` grows toward it with the room left over (`layoutColumns`). */
   full: ColumnWidths<Id>;
   /** The width every row fits in once the part that gives way first has
@@ -443,9 +637,9 @@ export function fitRoom(values: readonly number[]): number {
  *  the column's range. A column every row leaves empty (`wide` 0) is its
  *  header label's width, under its minimum too: an empty Folder column was
  *  a hole wider than any other gap (owner, 2026-10-07, item 9). */
-const widthFor = <Id extends string>(def: ColumnDef<Id>, wide: number, header: number) => {
+const widthFor = <Id extends string>(def: ColumnDef<Id>, wide: number, header: number, max = def.max) => {
   const px = Math.ceil(Math.max(wide, header) + TEXT_SLACK);
-  return wide > 0 ? clampWidth(def, px) : Math.min(def.max, px);
+  return wide > 0 ? Math.min(max, Math.max(def.min, px)) : Math.min(def.max, px);
 };
 
 /// A column's width from its content (a column with nothing to measure, a
@@ -496,7 +690,8 @@ export function measureColumns<Id extends string, Row>(
     const at = fitRoom(cells);
     const most = cells.reduce((a, b) => Math.max(a, b), 0);
     out.fit[d.id] = widthFor(d, at, h);
-    out.full[d.id] = widthFor(d, most, h);
+    // Whole, past the max: a wide row can show a long URL whole.
+    out.full[d.id] = widthFor(d, most, h, Infinity);
     // Nothing to lay out when every cell is empty.
     if (!exact || most === 0) continue;
     close.push({ d, fit, near: around(cells, at), wide: most > at ? around(cells, most) : [], header: h });
@@ -517,7 +712,7 @@ export function measureColumns<Id extends string, Row>(
   for (const c of close) {
     const fitPx = widthFor(c.d, widest(c, c.near), c.header);
     out.fit[c.d.id] = fitPx;
-    out.full[c.d.id] = c.wide.length > 0 ? Math.max(fitPx, widthFor(c.d, widest(c, c.wide), c.header)) : fitPx;
+    out.full[c.d.id] = c.wide.length > 0 ? Math.max(fitPx, widthFor(c.d, widest(c, c.wide), c.header, Infinity)) : fitPx;
   }
   return out;
 }

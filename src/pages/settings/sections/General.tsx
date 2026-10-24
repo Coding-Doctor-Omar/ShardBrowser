@@ -42,6 +42,15 @@ export function GeneralSection({ s, setS, p, setP }: SettingsProps) {
           <Switch aria-labelledby={labelId} aria-describedby={helpId} checked={s.minimize_to_tray ?? true} onChange={(on) => setS({ ...s, minimize_to_tray: on })} />
         )}
       />
+      {/* Its help says plainly where the request goes from (owner, §3.8). */}
+      <SettingRow
+        id="ext-update-check"
+        title={t("settings.extUpdateCheckLabel")}
+        help={t("settings.extUpdateCheckHelp")}
+        control={({ labelId, helpId }) => (
+          <Switch aria-labelledby={labelId} aria-describedby={helpId} checked={s.ext_update_check ?? true} onChange={(on) => setS({ ...s, ext_update_check: on })} />
+        )}
+      />
     </SettingsGroup>
   );
 }

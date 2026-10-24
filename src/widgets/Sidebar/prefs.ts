@@ -1,4 +1,5 @@
 import { create } from "zustand";
+import { onSpaceChange, spaceKey } from "../../entities/space";
 
 export type GroupId = "pinned" | "folders" | "views";
 /** Folders shown before "Show N more" (6.2). */
@@ -9,7 +10,7 @@ const KEY = "shardx.sidebar";
 
 function load(): Saved {
   try {
-    const raw = JSON.parse(localStorage.getItem(KEY) ?? "null") as Partial<Saved> | null;
+    const raw = JSON.parse(localStorage.getItem(spaceKey(KEY)) ?? "null") as Partial<Saved> | null;
     if (raw?.v === 1) return { v: 1, collapsed: raw.collapsed ?? {}, foldersOpen: raw.foldersOpen === true, rail: raw.rail === true };
   } catch { /* broken value: defaults */ }
   return { v: 1, collapsed: {}, foldersOpen: false, rail: false };
@@ -17,8 +18,8 @@ function load(): Saved {
 
 /// How this viewer likes the sidebar: which groups are folded, whether every
 /// Folder shows, and the icon rail (Task 8). A per-viewer convenience, so it
-/// lives in this window's storage. `overPeek` is not saved: the user opened
-/// the rail that Peek folded below 1280 px, and it holds until Peek closes.
+/// lives in this window's storage, one per space. `overPeek` is not saved: the
+/// user opened the rail that Peek folded below 1280 px, and it holds until Peek closes.
 export const useSidebarPrefs = create<Saved & {
   overPeek: boolean;
   toggleGroup: (id: GroupId) => void;
@@ -28,7 +29,7 @@ export const useSidebarPrefs = create<Saved & {
 }>((set, get) => {
   const save = () => {
     const { v, collapsed, foldersOpen, rail } = get();
-    try { localStorage.setItem(KEY, JSON.stringify({ v, collapsed, foldersOpen, rail })); } catch { /* private mode */ }
+    try { localStorage.setItem(spaceKey(KEY), JSON.stringify({ v, collapsed, foldersOpen, rail })); } catch { /* private mode */ }
   };
   return {
     ...load(),
@@ -39,3 +40,6 @@ export const useSidebarPrefs = create<Saved & {
     setOverPeek: (overPeek) => set({ overPeek }),
   };
 });
+
+// Another space has its own sidebar.
+onSpaceChange(() => useSidebarPrefs.setState(load()));

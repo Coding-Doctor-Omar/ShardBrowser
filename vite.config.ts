@@ -17,14 +17,14 @@ const MOCK_PLUGIN = here("./src/dev/vite-mock-plugin.mjs");
 // The e2e build (E2E_BUILT=1, see playwright.config.ts) lists every source
 // module on `window.__e2eModules`, so a spec's `appModule()` can reach the
 // same instance the app uses, as it does on the dev server by path. Never set
-// for a release or perf build.
+// for a release or perf build. Unit tests (node --test) are not app modules.
 // @ts-expect-error process is a nodejs global
 const e2eModules = process.env.VITE_E2E_MODULES === "1";
 const E2E_ID = "virtual:e2e-modules";
 const e2eModulesPlugin = {
   name: "e2e-modules",
   resolveId: (id: string) => (id === E2E_ID ? "\0" + E2E_ID : undefined),
-  load: (id: string) => (id === "\0" + E2E_ID ? 'window.__e2eModules = import.meta.glob("/src/**/*.{ts,tsx}");' : undefined),
+  load: (id: string) => (id === "\0" + E2E_ID ? 'window.__e2eModules = import.meta.glob(["/src/**/*.{ts,tsx}", "!/src/**/*.test.ts"]);' : undefined),
   transformIndexHtml: {
     order: "pre" as const,
     handler: () => [{ tag: "script", attrs: { type: "module" }, children: `import "${E2E_ID}";`, injectTo: "head-prepend" as const }],
@@ -76,8 +76,10 @@ export default defineConfig(async () => {
           }
         : undefined,
       watch: {
-        // 3. tell Vite to ignore watching `src-tauri`
-        ignored: ["**/src-tauri/**"],
+        // 3. tell Vite to ignore watching `src-tauri`, and the other Rust and
+        // SDK trees: a cargo build writing into team-server/target reloaded
+        // the page once per file.
+        ignored: ["**/src-tauri/**", "**/team-server/**", "**/sdks/**"],
       },
     },
   };

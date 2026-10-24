@@ -1,5 +1,5 @@
 import { expect, test, type Page } from "@playwright/test";
-import { openApp, openEditForm } from "./support/app";
+import { openApp, openEditForm, reloadApp, storedFolders } from "./support/app";
 import { parseColor } from "./support/color";
 
 const folder = (page: Page, name: string) => page.locator(`aside [data-folder='${name}']`);
@@ -19,6 +19,51 @@ test("a new Folder gets the chosen color and icon, and keeps them after a reload
   await expect(folder(page, "Clients").locator("[data-folder-icon]")).toHaveAttribute("data-folder-icon", "briefcase");
 });
 
+test("folders and looks an older build kept move to the backend once: the keys go, and a second hand-over changes nothing", async ({ page }) => {
+  await page.addInitScript(() => {
+    if (localStorage.getItem("shardx-folders") === null) localStorage.setItem("shardx-folders", JSON.stringify(["Empty1"]));
+    // The first build's hex color still maps onto the palette.
+    if (localStorage.getItem("shardx.folderMeta") === null) localStorage.setItem("shardx.folderMeta", JSON.stringify({ Shops: { color: "#12b76a", icon: "cart" } }));
+  });
+  const legacy = () => page.evaluate(() => [localStorage.getItem("shardx-folders"), localStorage.getItem("shardx.folderMeta")]);
+  await openApp(page);
+  await expect(folder(page, "Empty1")).toBeVisible();
+  await expect(folder(page, "Shops").locator("[data-folder-icon]")).toHaveAttribute("data-folder-icon", "cart");
+  const moved = await storedFolders(page);
+  expect(moved).toEqual({ registry: ["Empty1"], meta: { Shops: { color: "green", icon: "cart" } } });
+  expect(await legacy()).toEqual([null, null]);
+  // The keys back with other values (an older build run since): handed over, ignored, gone.
+  await page.evaluate(() => {
+    localStorage.setItem("shardx-folders", JSON.stringify(["Old"]));
+    localStorage.setItem("shardx.folderMeta", JSON.stringify({ Shops: { color: "red", icon: "folder" } }));
+  });
+  await reloadApp(page);
+  await expect(folder(page, "Shops").locator("[data-folder-icon]")).toHaveAttribute("data-folder-icon", "cart");
+  await expect(folder(page, "Old")).toHaveCount(0);
+  expect(await storedFolders(page)).toEqual(moved);
+  expect(await legacy()).toEqual([null, null]);
+});
+
+test("a renamed Folder's kept entry and look move with it in the backend; a deleted one's go", async ({ page }) => {
+  await page.addInitScript(() => { if (localStorage.getItem("shardx-folders") === null) localStorage.setItem("shardx-folders", JSON.stringify(["Empty1"])); });
+  await openApp(page);
+  await folder(page, "Empty1").click({ button: "right" });
+  await page.getByRole("menuitem", { name: "Edit folder" }).click();
+  const dialog = page.getByRole("dialog", { name: /Edit folder/ });
+  await dialog.getByRole("radio", { name: "Violet" }).click();
+  await dialog.getByRole("textbox", { name: "Name" }).fill("Empty2");
+  await dialog.getByRole("button", { name: "Save" }).click();
+  await expect(folder(page, "Empty2")).toBeVisible();
+  await expect.poll(() => storedFolders(page)).toEqual({ registry: ["Empty2"], meta: { Empty2: { color: "violet", icon: "folder" } } });
+  await folder(page, "Empty2").click({ button: "right" });
+  await page.getByRole("menuitem", { name: "Delete folder" }).click();
+  await page.getByRole("alertdialog").getByRole("button", { name: "Delete folder" }).click();
+  await expect(folder(page, "Empty2")).toHaveCount(0);
+  await expect.poll(() => storedFolders(page)).toEqual({ registry: [], meta: {} });
+  await reloadApp(page);
+  await expect(folder(page, "Empty2")).toHaveCount(0);
+});
+
 test("editing a Folder renames it and keeps its profiles and look", async ({ page }) => {
   await openApp(page);
   await folder(page, "Ads").click({ button: "right" });
@@ -30,6 +75,8 @@ test("editing a Folder renames it and keeps its profiles and look", async ({ pag
   await expect(folder(page, "Ads")).toHaveCount(0);
   await expect(folder(page, "Ads EU").locator("[data-count]")).toHaveText("3");
   await expect(folder(page, "Ads EU").locator("[data-folder-icon]")).toHaveCSS("color", "rgb(251, 124, 30)");
+  // Renamed here, it is kept even once its profiles leave.
+  await expect.poll(() => storedFolders(page)).toEqual({ registry: ["Ads EU"], meta: { "Ads EU": { color: "orange", icon: "folder" } } });
 });
 
 // Owner (WCAG 2.5.8, Task 14 fix round): the close button draws at 21 px, its

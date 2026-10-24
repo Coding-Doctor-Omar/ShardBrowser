@@ -2,12 +2,15 @@ import { create } from "zustand";
 import { t } from "../../../shared/i18n";
 import { toast } from "../../../shared/model/toast";
 import { storeBus } from "../../../shared/lib/storeBus";
+import { onSpaceMoved } from "../../../shared/api/invoke";
 import { explainError } from "../../../shared/lib/errors";
 import { HOST_OS } from "../../../shared/lib/utils";
+import { hostScreen, type HostScreen } from "../../../shared/lib/hostScreen";
 import { AUTO_LANG, AUTO_TZ, matchesOs } from "../../../shared/constants";
 import { useGpuCompat, verdictsLoaded } from "../../../shared/model/gpuCompat";
+import { inFolder, teamRefusal } from "../../../entities/space";
 import {
-  cookiesImport, editsSettled, enrichPicksForPreset, fromStored, resolveId, selectVisible, useProfile, useProfileUi,
+  cookiesImport, editsSettled, profileRefusal, enrichPicksForPreset, fromStored, resolveId, selectVisible, useProfile, useProfileUi,
   type ProfileForm,
 } from "../../../entities/profile";
 import type { FingerprintEntry } from "../../../entities/fingerprint";
@@ -60,11 +63,15 @@ type ProfileFormState = {
    *  field): the draft keeps their last good value, which is not what they
    *  show, so Save waits until none is left. */
   badFields: string[];
+  /** This computer's screen, asked as a new profile's form opens; null when unknown. */
+  host: HostScreen | null;
+  /** The Screen field was set by hand in this form, "As in the fingerprint" too. */
+  screenPicked: boolean;
 };
 
 export const useProfileForm = create<ProfileFormState>(() => ({
   open: false, mode: "edit", id: null, tab: "basics", draft: null, saved: null,
-  status: "idle", error: null, errorDetail: null, session: 0, theirs: null, tried: false, badFields: [],
+  status: "idle", error: null, errorDetail: null, session: 0, theirs: null, tried: false, badFields: [], host: null, screenPicked: false,
 }));
 
 const get = () => useProfileForm.getState();
@@ -129,6 +136,24 @@ function pickFingerprint(fingerprints: FingerprintEntry[]): FingerprintEntry | u
   return pool[Math.floor(Math.random() * pool.length)];
 }
 
+const desktopOs = (platform: string) => matchesOs(platform, "Windows") || matchesOs(platform, "Linux");
+
+/** As launch.rs `claim_host_screen` decides: a desktop, and not a phone whose platform reads "Linux". */
+function takesHostScreen(fp: FingerprintEntry): boolean {
+  const p = fp.payload ?? {};
+  const phone = p.client_hints?.mobile === true || /^android/i.test(p.client_hints?.platform ?? "")
+    || /android/i.test(p.navigator?.user_agent ?? "");
+  return desktopOs(fp.platform) && !phone;
+}
+
+/** A new profile's screen (owner 2026-10-23): Windows/Linux claim this
+ *  computer's, macOS and phones (or an unknown host) the template's own. */
+function screenFor(fp: FingerprintEntry, host: HostScreen | null): Partial<ProfileForm> {
+  return takesHostScreen(fp) && host
+    ? { screen_w: host[0], screen_h: host[1], screen_custom: false, screen_host: true, screen_dpr: host[2] ?? 0 }
+    : { screen_w: 0, screen_h: 0, screen_custom: false, screen_host: false, screen_dpr: 0 };
+}
+
 const draftOf = (form: ProfileForm): ProfileFormDraft => ({
   form,
   folder: useProfile.getState().profiles.find((p) => p.id === form.id)?.folder ?? "",
@@ -160,11 +185,14 @@ async function loadEdit(session: number, id: string) {
 async function loadCreate(session: number, proxyId: string | null, preset?: Partial<ProfileForm>) {
   const { fingerprints } = useProfile.getState();
   if (fingerprints.length === 0) { set({ status: "error", error: t("useProfile.noFingerprints") }); return; }
-  // The pick waits for this machine's GPU verdicts, as a pick in the form does.
-  await verdictsLoaded();
-  if (get().session !== session) return;
   // A fingerprint the caller chose (the library's "New profile"), else one at random.
   const chosen = preset?.gpu_preset_id ? useProfile.getState().fingerprints.find((f) => f.id === preset.gpu_preset_id) : undefined;
+  if (!chosen) {
+    // The random pick waits up to a second for this machine's GPU verdicts, then
+    // goes on without them: the check can hang, the form must not (badges come later).
+    await verdictsLoaded();
+    if (get().session !== session) return;
+  }
   const fp = chosen ?? pickFingerprint(useProfile.getState().fingerprints);
   if (!fp) { set({ status: "error", error: t("useProfile.noFingerprints") }); return; }
   // Every field as the template has it, as the backend's create from a
@@ -176,7 +204,9 @@ async function loadCreate(session: number, proxyId: string | null, preset?: Part
   // from it the same pair, and on Windows/Linux one this computer may not have.
   let picks: { hardware_concurrency?: number; device_memory?: number; platform_version?: string } = {};
   try { picks = await enrichPicksForPreset(fp.id); } catch { /* the template's own values */ }
+  const host = await hostScreen();
   if (get().session !== session) return;
+  set({ host });
   const templated = fromStored({ ...structuredClone(fp.payload ?? {}), _meta: { gpu_preset_id: fp.id } });
   const base = {
     ...templated,
@@ -184,8 +214,8 @@ async function loadCreate(session: number, proxyId: string | null, preset?: Part
     device_memory: picks.device_memory ?? templated.device_memory,
     platform_version: picks.platform_version ?? templated.platform_version,
     timezone: AUTO_TZ, language: AUTO_LANG, geo_mode: "auto" as const,
-    // The template's own screen, which the backend fits to this display.
-    screen_w: 0, screen_h: 0,
+    // This computer's screen or the template's own, which the backend fits to this display.
+    ...screenFor(fp, host),
   };
   const folder = useProfileUi.getState().folder;
   show({
@@ -208,7 +238,7 @@ export function openProfileForm(opts: { mode: "edit"; id: string; tab?: ProfileF
   const session = get().session + 1;
   set({
     open: true, mode: opts.mode, id: opts.mode === "edit" ? opts.id : null, tab: opts.tab ?? "basics",
-    draft: null, saved: null, status: "idle", error: null, errorDetail: null, session, theirs: null, tried: false, badFields: [],
+    draft: null, saved: null, status: "idle", error: null, errorDetail: null, session, theirs: null, tried: false, badFields: [], screenPicked: false,
   });
   if (opts.mode === "edit") void loadEdit(session, opts.id);
   else void loadCreate(session, opts.proxyId ?? null, opts.preset);
@@ -219,15 +249,30 @@ export function closeProfileForm(): void {
   set({ open: false, session: get().session + 1, status: "idle" });
 }
 
+// Another space: a profile of the old one is not edited, or made, in it.
+onSpaceMoved(() => { if (get().open) closeProfileForm(); });
+
 export function setProfileFormTab(tab: ProfileFormTab): void {
   set({ tab });
 }
 
 /** Changes some of the profile's fields; several calls in a row all land. */
 export function patchForm(changes: Partial<ProfileForm>): void {
-  const d = get().draft;
-  if (!d || get().status === "saving") return;
-  set({ draft: { ...d, form: { ...d.form, ...changes } } });
+  const s = get();
+  const d = s.draft;
+  if (!d || s.status === "saving") return;
+  const form = { ...d.form, ...changes };
+  // A new profile's screen follows another template's OS; a size picked by
+  // hand stays only on Windows/Linux (macOS and phones keep their own).
+  const fp = s.mode === "create" && changes.gpu_preset_id && changes.gpu_preset_id !== d.form.gpu_preset_id
+    ? useProfile.getState().fingerprints.find((x) => x.id === changes.gpu_preset_id) : undefined;
+  // A pick by hand ("As in the fingerprint" too) stays on another Windows/Linux one.
+  let screenPicked = s.screenPicked || "screen_host" in changes;
+  if (fp && !((screenPicked || form.screen_custom) && takesHostScreen(fp))) {
+    Object.assign(form, screenFor(fp, s.host));
+    screenPicked = false;
+  }
+  set({ draft: { ...d, form }, screenPicked });
 }
 
 /** A number field says its text is (or is no longer) not a number. */
@@ -262,9 +307,30 @@ export function reloadProfileForm(): void {
   if (theirs) show(draftOf(theirs));
 }
 
+/** A team's profile this person may only read: the form opens to read. */
+export function readOnlyWhy(s: Pick<ProfileFormState, "mode" | "id"> = get()): string | null {
+  if (s.mode !== "edit") return null;
+  const row = useProfile.getState().profiles.find((p) => p.id === s.id);
+  return row ? profileRefusal(row, "edit") : null;
+}
+
+/** Why a team does not take the form as it is: Create where the profile goes, or for a new tag. */
+export function rightsProblem(s: Pick<ProfileFormState, "mode" | "id" | "draft" | "saved"> = get()): string | null {
+  const d = s.draft;
+  if (!d) return null;
+  const readOnly = readOnlyWhy(s);
+  if (readOnly) return readOnly;
+  if (s.mode === "create" || d.folder !== s.saved?.folder) {
+    const where = teamRefusal("create", inFolder(d.folder));
+    if (where) return where;
+  }
+  return d.newTags.length > 0 ? teamRefusal("create") : null;
+}
+
 /** True when Save or Create profile can run now. */
 export function canSave(s: ProfileFormState = get()): boolean {
   if (!s.open || !s.draft || s.status === "saving" || problemsOf(s.draft).name || s.badFields.length > 0) return false;
+  if (rightsProblem(s)) return false;
   return s.mode === "create" || isDirty(s);
 }
 
@@ -293,6 +359,8 @@ export async function saveProfileForm(): Promise<boolean> {
   // A number field shows text that is not a number: it is on screen, so nothing is saved behind it.
   if (s.badFields.length > 0) return false;
   if (s.mode === "edit" && !isDirty(s)) return true;
+  // A team's rights refuse it: the form says why, and nothing is sent.
+  if (rightsProblem(s)) return false;
   const session = s.session;
   const here = () => get().session === session;
   set({ status: "saving", error: null, tried: true });

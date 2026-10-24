@@ -11,7 +11,7 @@ import {
   type Frame,
   type Picked,
 } from "../../entities/automation";
-import { confirmDirect, processKill, profileList, proxyMissing, useProfile, useProfileUi, type ProfileMeta } from "../../entities/profile";
+import { confirmDirect, processKill, profileList, profileRefusal, proxyMissing, startRefusal, useProfile, useProfileUi, type ProfileMeta } from "../../entities/profile";
 import { proxyList } from "../../entities/proxy";
 import { describeTarget, liveActions, type MenuAction } from "./liveActions";
 import { useT } from "../../shared/i18n";
@@ -69,6 +69,9 @@ export function useLiveBrowser(profileId: string | null) {
     }
     const p = fresh.find((x) => x.id === profileId);
     if (!p) return;
+    // A team's: driving it needs Start and Cookies, and no other device holding it.
+    const refused = startRefusal(p) ?? profileRefusal(p, "cookies");
+    if (refused) { toast.fail({ title: t("liveView.openFailed"), detail: refused }); return; }
     if (proxyMissing(p, proxies)) {
       toast.err(t("useProfile.proxyMissingStart", { name: p.name }), {
         action: { label: t("useProfile.assignProxy"), run: () => useProfileUi.getState().openAssign([p.id]) },

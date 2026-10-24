@@ -9,6 +9,7 @@ import { HugeiconsIcon } from "@hugeicons/react";
 import { ICON_STROKE } from "@proxyshard/shardx-ui-kit";
 import {
   ArrowLeft01Icon,
+  UserIcon,
   BookmarkAdd01Icon,
   BrowserIcon,
   Route01Icon,
@@ -93,6 +94,10 @@ import {
   ArrowDownRight02Icon,
   ArrowRight02Icon,
   Tick02Icon,
+  UnfoldMoreIcon as HugeUnfoldMoreIcon,
+  CloudSyncIcon,
+  CloudOffIcon,
+  CloudAlertIcon,
 } from "@hugeicons/core-free-icons";
 import type { ComponentProps } from "react";
 
@@ -134,6 +139,11 @@ export const NavExtensionsIcon = make(PuzzleIcon);
 export const NavBookmarksIcon = make(Bookmark02Icon);
 export const NavTrashIcon = make(Delete03Icon);
 export const NavAutomationIcon = make(WorkflowSquare03Icon);
+/** The person's own space and a team's, in the sidebar's space switcher. */
+export const SpacePersonalIcon = make(UserIcon);
+export const SpaceTeamIcon = make(UserGroupIcon);
+/** A switch that opens a choice of places (the space row). */
+export const UnfoldMoreIcon = make(HugeUnfoldMoreIcon, "unfold-more");
 /** Folds the sidebar to its icon rail and back (Mod+\). */
 export const SidebarIcon = make(SidebarLeftIcon);
 
@@ -184,6 +194,11 @@ export const PlayIcon = make(HugePlayIcon);
 export const StopIcon = make(HugeStopIcon);
 export const MoreIcon = make(MoreVerticalIcon);
 export const SyncIcon = make(Link04Icon);
+/** Personal sync across the person's devices (not the window synchronizer's SyncIcon). */
+export const SyncedIcon = make(CloudSyncIcon, "synced");
+export const SyncOffIcon = make(CloudOffIcon, "sync-off");
+/** A conflict copy a sync made: both versions were kept. */
+export const SyncConflictIcon = make(CloudAlertIcon, "sync-conflict");
 /** Opens a page outside the app (the ProxyShard shop). */
 export const ExternalLinkIcon = make(ArrowUpRight01Icon);
 export const RestoreIcon = make(ArchiveRestoreIcon);

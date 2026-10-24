@@ -2,6 +2,7 @@ import { create } from "zustand";
 import { toast } from "../../../shared/model/toast";
 import { reportLoadError } from "../../../shared/model/loadError";
 import { storeBus } from "../../../shared/lib/storeBus";
+import { onSpaceMoved } from "../../../shared/api/invoke";
 import { confirmModal } from "../../../shared/lib/confirm";
 import { eachReporting } from "../../../shared/lib/eachReporting";
 import { t } from "../../../shared/i18n";
@@ -213,3 +214,10 @@ export const useTrash = create<TrashStore>((set, get) => ({
 // Profiles moved in or out from elsewhere (Move to Trash, its Undo, another
 // window): the next palette opening reads the Trash again.
 storeBus.on("trash", (from) => { if (from !== "trash") useTrash.setState({ stale: true }); });
+
+// Another space has a trash of its own (a team's shows none here): read afresh.
+onSpaceMoved(() => {
+  const was = useTrash.getState().status;
+  useTrash.setState({ status: "idle", error: null, items: [], selected: new Set<string>(), readAt: 0, stale: true });
+  if (was !== "idle") void useTrash.getState().init({ quiet: true });
+});

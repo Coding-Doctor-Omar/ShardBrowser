@@ -120,9 +120,11 @@ export function ModulesList({ modules, loaded, busy, onRemove, onAdd }: {
       })),
     ];
     if (items.length === 0) return null;
+    // A manifest may ask for one project or module twice: one switch each.
+    const unique = items.filter((it, i) => items.findIndex((x) => x.kind === it.kind && x.id === it.id) === i);
     return (
       <span data-module-grants className="flex min-w-0 flex-wrap items-center gap-1 overflow-hidden">
-        {items.map((it) => (
+        {unique.map((it) => (
           <Tooltip key={`${it.kind}:${it.id}`} content={it.on ? t("modulesCard.revokeItem", { what: it.what }) : t("modulesCard.grantItem", { what: it.what })}>
             <Button
               variant={it.on ? "primary" : "neutral"}

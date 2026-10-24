@@ -1,5 +1,5 @@
 import { useMemo, useRef, useState, type ReactNode } from "react";
-import { Button, Combobox, IconButton, Popover, useLatched } from "@proxyshard/shardx-ui-kit";
+import { Button, Combobox, IconButton, Popover, Tooltip, useLatched } from "@proxyshard/shardx-ui-kit";
 import { BackIcon, FilterIcon } from "../../icons";
 import { useT } from "../../i18n";
 import type { FilterField } from "./types";
@@ -39,22 +39,26 @@ export function FilterMenu({ open, onOpenChange, fields, activeCount, label, foo
     onOpenChange(next);
   };
   const back = () => { setFieldId(null); setQuery(""); };
+  const words = activeCount > 0 ? t("profileFilterBar.filtersCount", { n: activeCount }) : t("profileFilterBar.filters");
 
   return (
     <>
-      <Button
-        ref={trigger}
-        data-filter-trigger
-        variant={activeCount > 0 ? "primary" : "neutral"}
-        mode="stroke"
-        size="xsmall"
-        leftIcon={<FilterIcon className="size-3.5" />}
-        aria-haspopup="dialog"
-        aria-expanded={open}
-        onClick={() => setOpen(!open)}
-      >
-        {activeCount > 0 ? t("profileFilterBar.filtersCount", { n: activeCount }) : t("profileFilterBar.filters")}
-      </Button>
+      {/* Its words in a tooltip only while a narrow header shows its icon alone. */}
+      <Tooltip content={words} whenTruncated>
+        <Button
+          ref={trigger}
+          data-filter-trigger
+          variant={activeCount > 0 ? "primary" : "neutral"}
+          mode="stroke"
+          size="xsmall"
+          leftIcon={<FilterIcon className="size-3.5" />}
+          aria-haspopup="dialog"
+          aria-expanded={open}
+          onClick={() => setOpen(!open)}
+        >
+          {words}
+        </Button>
+      </Tooltip>
       {/* No padding: the search row runs edge to edge over the list, as in
           every searchable Select. 260 px, the width the form had. */}
       <Popover open={open} onOpenChange={setOpen} anchorRef={trigger} align="end" aria-label={label} className="w-[260px]">

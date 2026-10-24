@@ -12,8 +12,9 @@ import { showMeAround } from "../../features/tour";
 
 type View = "panels" | "setup";
 
-/// One wide column: the stat tiles, Usage and Orders. Buy proxies sits in
-/// the header's actions, before Open dashboard (owner, 2026-10-02). Without a
+/// The stat tiles, Usage and Orders, across the window's width (owner,
+/// 2026-10-23: no 1120 px cap). Buy proxies sits in the header's actions,
+/// before Open dashboard (owner, 2026-10-02). Without a
 /// working key the key card is the page; with one, the key moves to the `…`
 /// menu (craft target state, rank 2).
 export function ProxyShardPage() {
@@ -40,7 +41,6 @@ export function ProxyShardPage() {
       <PageHeader
         title="ProxyShard"
         help={{ title: t("pageHelp.proxyshard.title"), body: t("pageHelp.proxyshard.body"), onTour: () => showMeAround("proxyshard") }}
-        width="wide"
         after={<PsHeaderFacts />}
         actions={
           <>
@@ -59,7 +59,7 @@ export function ProxyShardPage() {
           </>
         }
       />
-      <PageBody width="wide">
+      <PageBody>
         {view === "panels" ? <PsManagementPanels /> : view === "setup" ? <PsKeySetup /> : null}
       </PageBody>
       {buyLife.mounted && <PsBuyDialog key={buyLife.session} open={buying} onClose={() => setBuying(false)} />}

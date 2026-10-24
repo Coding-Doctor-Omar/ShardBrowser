@@ -66,6 +66,24 @@ test("Start refuses a profile whose proxy was deleted and offers to assign one",
   await expect(page.getByRole("dialog", { name: "Assign a proxy" })).toBeVisible();
 });
 
+// The list still holds the proxy (deleted behind its back, no reload), so the
+// app's own check lets the start through; the backend refuses it, and the
+// failure says why in words rather than the backend's.
+test("a start the backend refuses because the proxy is gone says why", async ({ page }) => {
+  await openApp(page);
+  await page.evaluate(
+    (id) => (window as unknown as { __TAURI_INTERNALS__: { invoke: (c: string, a: unknown) => Promise<unknown> } }).__TAURI_INTERNALS__.invoke("proxy_delete", { id }),
+    "px-jp-1",
+  );
+  await row(page, "FB Ads acc-02").hover();
+  await row(page, "FB Ads acc-02").getByRole("button", { name: "Start" }).click();
+  const failure = page.locator("[data-toast]").filter({ hasText: "Couldn’t start “FB Ads acc-02”" });
+  await expect(failure).toContainText("Its proxy was deleted. Assign another proxy first.");
+  await expect(failure).not.toContainText("no longer exists");
+  expect(await launched(page)).not.toContain("c31d92f1");
+  expect(await isRunning(page, "c31d92f1")).toBe(false);
+});
+
 test("bulk Start leaves out a profile whose proxy was deleted and starts the rest", async ({ page }) => {
   await openApp(page);
   await dropProxy(page, "px-jp-1");

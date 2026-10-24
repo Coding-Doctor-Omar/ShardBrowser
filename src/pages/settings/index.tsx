@@ -19,10 +19,12 @@ import { ViewsSection } from "./sections/Views";
 import { ApiSection } from "./sections/Api";
 import { HelperSection } from "./sections/Helper";
 import { StorageSection } from "./sections/Storage";
+import { SyncSection } from "./sections/Sync";
 import { OtherSection } from "./sections/Other";
 import { AboutSection } from "./sections/About";
 import type { SettingsProps } from "./SettingRow";
 import { showMeAround } from "../../features/tour";
+import { useSync } from "../../entities/sync";
 
 type SectionProps = SettingsProps & {
   /** What is on disk, for what speaks of saved settings (the restart note). */
@@ -43,6 +45,7 @@ const SECTIONS: Record<SettingsTab, ComponentType<SectionProps>> = {
   api: ApiSection,
   helper: HelperSection,
   storage: StorageSection,
+  sync: SyncSection,
   other: OtherSection,
   about: AboutSection,
 };
@@ -58,13 +61,15 @@ const TAB_LABEL: Record<SettingsTab, string> = {
   api: "settings.tabApi",
   helper: "settings.tabHelper",
   storage: "settings.tabStorage",
+  sync: "settings.tabSync",
   other: "settings.tabOther",
   about: "settings.tabAbout",
 };
 
 export function SettingsPage() {
   const t = useT();
-  const tab = useNav((st) => st.settingsTab);
+  const syncMissing = useSync((st) => st.missing);
+  const tab = useNav((st) => (syncMissing && st.settingsTab === "sync" ? "general" : st.settingsTab));
   const openSettings = useNav((st) => st.openSettings);
   // The page's draft: nothing is written until Save; nothing shows until the
   // settings are read (LAYOUT-21).
@@ -134,8 +139,8 @@ export function SettingsPage() {
           </Card>
         )}
 
-        {/* One content column of 640 px beside the tabs (6.2, ruling 15). */}
-        <div className="grid grid-cols-[180px_minmax(0,640px)] items-start gap-6">
+        {/* One content column beside the tabs, to the window's edge (owner, 2026-10-23); its help keeps a readable line. */}
+        <div className="grid grid-cols-[180px_minmax(0,1fr)] items-start gap-6">
           <Tabs
             idBase="settings"
             aria-label={t("settings.sectionsLabel")}
@@ -152,12 +157,14 @@ export function SettingsPage() {
               { value: "api", label: t("settings.tabApi") },
               { value: "helper", label: t("settings.tabHelper") },
               { value: "storage", label: t("settings.tabStorage") },
+              // A backend without sync commands (a build before them) has no Sync tab.
+              ...(syncMissing ? [] : [{ value: "sync", label: t("settings.tabSync") }]),
               { value: "other", label: t("settings.tabOther") },
               { value: "about", label: t("settings.tabAbout") },
             ]}
           />
           {/* The open section, named by its tab (A11Y-08; F8 keeps it). */}
-          <TabPanel tabsId="settings" value={tab} className="flex max-w-[640px] flex-col gap-3.5">
+          <TabPanel tabsId="settings" value={tab} className="flex flex-col gap-3.5">
             <h2 className="m-0 text-panel-title text-text-strong-950">{t(TAB_LABEL[tab])}</h2>
             {draft.s && draft.saved
               // Keyed by the discards, so a field that holds text of its own starts over.

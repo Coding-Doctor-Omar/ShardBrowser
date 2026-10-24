@@ -128,12 +128,14 @@ test("the Status word starts at the same x whether or not the row has a colored 
 });
 
 /** The Status column holds its widest pill whole: the pill inside the
- *  cell, its word not cut (Status never truncates, and has no minmax
- *  fallback to grow into). */
+ *  cell, its word not cut (Status never truncates). Its own width is 96 px;
+ *  with room to spare it stretches with the row (owner, 2026-10-23). */
 async function fitsWhole(page: Page, name: string, lang = "en") {
   const cell = statusCell(page, name);
   const cellWidth = await cell.evaluate((el) => el.clientWidth);
-  expect(cellWidth, `column width for ${name} (${lang})`).toBe(96);
+  const template = await page.locator("[role='row'][aria-rowindex='1']").evaluate((el) => (el as HTMLElement).style.gridTemplateColumns);
+  expect(/--col-status,\s*(?:minmax\()?(\d+)px/.exec(template)?.[1], `column width for ${name} (${lang})`).toBe("96");
+  expect(cellWidth, `column width for ${name} (${lang})`).toBeGreaterThanOrEqual(96);
   const pillWidth = (await cell.locator("[data-pill='status']").boundingBox())!.width;
   expect(pillWidth, `the pill of ${name} (${lang})`).toBeLessThanOrEqual(cellWidth);
   const [scroll, client] = await statusLabel(page, name).evaluate((el) => [el.scrollWidth, el.clientWidth]);

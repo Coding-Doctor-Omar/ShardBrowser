@@ -5,7 +5,8 @@ import { rowTint, type RowTone } from "./rowFill";
 
 /// An editable list cell's edit button (owner feature 2026-09-26: "when I
 /// hover over editable columns in rows there need to appear button edit").
-/// At the cell's end, shown while the pointer is on the cell or the button
+/// Right after the cell's content (inside a `relative` wrapper round it, the
+/// cell an `@container`), never past the cell's end; shown while the pointer is on the cell or the button
 /// itself has keyboard focus; on the active row it is a Tab stop. `lead` is
 /// the one the row actions carry for the column they float over: it shows
 /// with them, so it has no rule of its own. The click stays with the button
@@ -67,7 +68,8 @@ export function CellEditButton({ label, onEdit, tabIndex, lead = false, tone = "
   return (
     <span
       className={cn(
-        "pointer-events-none absolute inset-y-0 right-0 flex w-0 shrink-0 items-center overflow-hidden",
+        // Where the content ends, or 38 px before the cell's end when it fills the cell.
+        "pointer-events-none absolute inset-y-0 left-[min(100%,calc(100cqw_-_38px))] flex w-0 shrink-0 items-center overflow-hidden",
         // Shown, it is the 14 px fade and the 24 px button: 38 px (`w-[38px]`).
         "group-hover/cell:w-[38px] group-hover/cell:overflow-visible group-hover/cell:pointer-events-auto",
         "focus-within:w-[38px] focus-within:overflow-visible focus-within:pointer-events-auto",

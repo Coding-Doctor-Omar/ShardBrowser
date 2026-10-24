@@ -29,6 +29,9 @@
 //
 // The result is cached against the engine version, because a Chromium bump can
 // change ANGLE and with it the list.
+//
+// One probe at a time, under one deadline; a failed one is not repeated in the
+// same run, and nothing in the UI waits on it for more than a second.
 
 use crate::{runtime, store};
 use anyhow::{anyhow, Context, Result};
@@ -36,7 +39,15 @@ use futures_util::{SinkExt, StreamExt};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::BTreeSet;
+use std::future::Future;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::OnceLock;
 use std::time::Duration;
+
+/// Start, port and answer together; past it the engine is killed. Nothing
+/// waits on it, so a cold start on a slow disk still fits.
+const PROBE_DEADLINE: Duration = Duration::from_secs(30);
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct HostGlCaps {
@@ -80,28 +91,31 @@ fn cache_path() -> Result<std::path::PathBuf> {
         .join("host-gl-caps.json"))
 }
 
-pub fn cached() -> Option<HostGlCaps> {
-    let text = std::fs::read_to_string(cache_path().ok()?).ok()?;
-    let caps: HostGlCaps = serde_json::from_str(&text).ok()?;
-    if caps.webgl1.is_empty() {
-        return None;
-    }
-    // Written before the WebGPU probe existed: re-ask rather than treat the
-    // silence as an answer.  An EMPTY list counts as silence too — a machine
-    // with a working GPU does not report zero adapter features, so that is a
-    // probe that could not ask, and caching it hid every preset behind a GPU
-    // mismatch until the engine version happened to change.
-    match caps.webgpu.as_ref() {
-        None => return None,
-        Some(v) if v.is_empty() => return None,
-        Some(_) => {}
-    }
-    // A bump can move ANGLE under us; a stale list would start rejecting
-    // profiles that became fine, or accepting ones that stopped being.
-    if caps.engine_version != runtime::engine_version().unwrap_or_default() {
-        return None;
-    }
-    Some(caps)
+/// The cache file. Format 2 is the first written by a probe that tells "no
+/// WebGPU" (kept) from "could not ask" (null); older records are asked again.
+#[derive(Serialize, Deserialize)]
+struct Disk {
+    #[serde(default)]
+    format: u32,
+    #[serde(flatten)]
+    caps: HostGlCaps,
+}
+
+const DISK_FORMAT: u32 = 2;
+
+/// Whether an answer is kept for later runs. A machine without WebGPU is an
+/// answer; no WebGL, an unasked WebGPU or another engine build is not.
+fn worth_keeping(caps: &HostGlCaps, engine: &str) -> bool {
+    !caps.webgl1.is_empty() && caps.webgpu.is_some() && caps.engine_version == engine
+}
+
+fn read_disk(text: &str, engine: &str) -> Option<HostGlCaps> {
+    let disk: Disk = serde_json::from_str(text).ok()?;
+    (disk.format == DISK_FORMAT && worth_keeping(&disk.caps, engine)).then_some(disk.caps)
+}
+
+fn cached_for(engine: &str) -> Option<HostGlCaps> {
+    read_disk(&std::fs::read_to_string(cache_path().ok()?).ok()?, engine)
 }
 
 /// The JS the probe runs. Kept here rather than in a file so there is nothing
@@ -119,14 +133,16 @@ const PROBE_JS: &str = r#"(async () => {
     const d = g.getExtension('WEBGL_debug_renderer_info');
     return d ? String(g.getParameter(d.UNMASKED_VENDOR_WEBGL)) : '';
   };
-  // WebGPU asks asynchronously and may not be there at all; an absent adapter
-  // is an empty list, which reads as "warn about nothing" rather than as
-  // "warn about everything".
+  // No API or no adapter is an empty list: a real answer. A request that
+  // throws or hangs is null: not asked, so not recorded as "no WebGPU".
   let webgpu = [];
   try {
-    const a = navigator.gpu ? await navigator.gpu.requestAdapter() : null;
-    if (a) webgpu = [...a.features].sort();
-  } catch (e) {}
+    if (navigator.gpu) {
+      const late = new Promise((_, no) => setTimeout(() => no(new Error('late')), 5000));
+      const a = await Promise.race([navigator.gpu.requestAdapter(), late]);
+      if (a) webgpu = [...a.features].sort();
+    }
+  } catch (e) { webgpu = null; }
   return JSON.stringify({
     renderer: name(c2) || name(c1),
     vendor: vend(c2) || vend(c1),
@@ -136,36 +152,28 @@ const PROBE_JS: &str = r#"(async () => {
   });
 })()"#;
 
+/// The page's DevTools socket, once the engine has opened its port.
+async fn page_socket(http: &reqwest::Client, port: u16) -> Option<String> {
+    let url = format!("http://127.0.0.1:{port}/json/list");
+    let list: Value = http.get(url).send().await.ok()?.json().await.ok()?;
+    let page = list.as_array()?.iter().find(|t| t["type"] == "page")?;
+    page["webSocketDebuggerUrl"].as_str().map(str::to_string)
+}
+
+/// Runs PROBE_JS in the engine on `port`. Unbounded on its own: the caller's
+/// deadline covers the port, the socket and the answer together.
 async fn evaluate_in_core(port: u16) -> Result<String> {
     let http = reqwest::Client::builder()
         .no_proxy()
-        .timeout(Duration::from_secs(10))
+        .timeout(Duration::from_secs(2))
         .build()?;
-    // The browser needs a moment to open its port; poll rather than sleep a
-    // fixed amount, so a slow machine is not a failure and a fast one is not a
-    // wait.
-    let mut ws_url = None;
-    for _ in 0..120 {
-        if let Ok(resp) = http
-            .get(format!("http://127.0.0.1:{port}/json/list"))
-            .send()
-            .await
-        {
-            if let Ok(list) = resp.json::<Value>().await {
-                if let Some(t) = list
-                    .as_array()
-                    .and_then(|a| a.iter().find(|t| t["type"] == "page"))
-                {
-                    if let Some(u) = t["webSocketDebuggerUrl"].as_str() {
-                        ws_url = Some(u.to_string());
-                        break;
-                    }
-                }
-            }
+    // Poll rather than sleep a fixed amount: a fast machine is not a wait.
+    let ws_url = loop {
+        if let Some(u) = page_socket(&http, port).await {
+            break u;
         }
         tokio::time::sleep(Duration::from_millis(250)).await;
-    }
-    let ws_url = ws_url.ok_or_else(|| anyhow!("core did not open a debugging port"))?;
+    };
 
     let (mut socket, _) = tokio_tungstenite::connect_async(&ws_url)
         .await
@@ -183,10 +191,9 @@ async fn evaluate_in_core(port: u16) -> Result<String> {
     socket
         .send(tokio_tungstenite::tungstenite::Message::Text(msg.to_string()))
         .await?;
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
-    while tokio::time::Instant::now() < deadline {
-        let next = tokio::time::timeout_at(deadline, socket.next()).await;
-        let Ok(Some(Ok(tokio_tungstenite::tungstenite::Message::Text(text)))) = next else {
+    // A closed socket ends the wait; the old loop spun on it until its deadline.
+    while let Some(msg) = socket.next().await {
+        let tokio_tungstenite::tungstenite::Message::Text(text) = msg? else {
             continue;
         };
         let v: Value = serde_json::from_str(&text)?;
@@ -197,21 +204,141 @@ async fn evaluate_in_core(port: u16) -> Result<String> {
                 .ok_or_else(|| anyhow!("probe returned no value"));
         }
     }
-    Err(anyhow!("probe timed out"))
+    Err(anyhow!("the engine closed the debugging connection"))
 }
 
-/// Ask the engine what this machine supports. Caches; pass force to re-ask.
+/// This run's answer, for the engine build it was asked of.
+#[derive(Default)]
+struct Memo {
+    engine: String,
+    answer: Option<Result<HostGlCaps, String>>,
+}
+
+/// One probe at a time: the lock is held through it.
+#[derive(Default)]
+struct Flight(tokio::sync::Mutex<Memo>);
+
+impl Flight {
+    async fn answer<A, Fut>(
+        &self,
+        force: bool,
+        engine: &str,
+        disk: impl FnOnce() -> Option<HostGlCaps>,
+        ask: A,
+    ) -> Result<HostGlCaps>
+    where
+        A: FnOnce() -> Fut,
+        Fut: Future<Output = Result<HostGlCaps>>,
+    {
+        // A second caller waits here and reads the first one's answer.
+        let mut memo = self.0.lock().await;
+        let ours = memo.engine == engine;
+        if !force && ours {
+            match &memo.answer {
+                Some(Ok(caps)) => return Ok(caps.clone()),
+                Some(Err(why)) => return Err(anyhow!("the GPU check failed earlier in this run: {why}")),
+                None => {}
+            }
+        }
+        if !force {
+            if let Some(hit) = disk() {
+                *memo = Memo { engine: engine.to_string(), answer: Some(Ok(hit.clone())) };
+                return Ok(hit);
+            }
+        }
+        let got = ask().await;
+        let had_good = ours && matches!(memo.answer, Some(Ok(_)));
+        match &got {
+            Ok(caps) => *memo = Memo { engine: engine.to_string(), answer: Some(Ok(caps.clone())) },
+            // A failed re-check keeps the good answer it was meant to refresh.
+            Err(_) if had_good => {}
+            Err(e) => *memo = Memo { engine: engine.to_string(), answer: Some(Err(format!("{e:#}"))) },
+        }
+        got
+    }
+}
+
+fn flight() -> &'static Flight {
+    static F: OnceLock<Flight> = OnceLock::new();
+    F.get_or_init(Flight::default)
+}
+
+/// Ask the engine what this machine supports. Cached; a failure is remembered
+/// for the run (an Err at once, so the UI stops waiting); `force` re-asks.
 pub async fn probe(force: bool) -> Result<HostGlCaps> {
-    if !force {
-        if let Some(hit) = cached() {
-            return Ok(hit);
+    let engine = runtime::engine_version().unwrap_or_default();
+    let Some(binary) = runtime::binary_path().ok().filter(|b| b.exists()) else {
+        // Not remembered: the engine may finish installing later in this run.
+        return cached_for(&engine)
+            .filter(|_| !force)
+            .ok_or_else(|| anyhow!("engine is not installed yet"));
+    };
+    // None starts while an install replaces the engine (not remembered either);
+    // an install waits for one under way, held through the answer.
+    let Some(_engine_use) = runtime::engine_use() else {
+        return cached_for(&engine).filter(|_| !force).ok_or_else(|| anyhow!("{}", runtime::UPDATING));
+    };
+    flight()
+        .answer(force, &engine, || cached_for(&engine), || ask_engine(&binary, &engine))
+        .await
+}
+
+async fn ask_engine(binary: &Path, engine: &str) -> Result<HostGlCaps> {
+    let raw = run_probe(binary, PROBE_DEADLINE).await?;
+    let caps = parse_answer(&raw, engine)?;
+    // A cache that cannot be written costs a probe next run, not this answer.
+    if let (true, Ok(path)) = (worth_keeping(&caps, engine), cache_path()) {
+        let disk = Disk { format: DISK_FORMAT, caps: caps.clone() };
+        if let Ok(text) = serde_json::to_string_pretty(&disk) {
+            let _ = std::fs::write(path, text);
         }
     }
-    let binary = runtime::binary_path().context("engine is not installed yet")?;
-    let scratch = std::env::temp_dir().join(format!("shardx-glcaps-{}", std::process::id()));
+    Ok(caps)
+}
+
+/// The probe's JSON as caps. No WebGL at all is a failure, not an answer.
+fn parse_answer(raw: &str, engine: &str) -> Result<HostGlCaps> {
+    let parsed: Value = serde_json::from_str(raw)?;
+    let list = |v: &Value| -> Vec<String> {
+        v.as_array()
+            .map(|a| a.iter().filter_map(|x| x.as_str().map(str::to_string)).collect())
+            .unwrap_or_default()
+    };
+    let caps = HostGlCaps {
+        renderer: parsed["renderer"].as_str().unwrap_or_default().to_string(),
+        vendor: parsed["vendor"].as_str().unwrap_or_default().to_string(),
+        webgl1: list(&parsed["webgl1"]),
+        webgl2: list(&parsed["webgl2"]),
+        // null: the adapter request threw or hung, which says nothing of the machine.
+        webgpu: parsed["webgpu"].is_array().then(|| list(&parsed["webgpu"])),
+        engine_version: engine.to_string(),
+    };
+    if caps.webgl1.is_empty() {
+        anyhow::bail!("the engine reported no WebGL at all");
+    }
+    Ok(caps)
+}
+
+/// A user data dir no other probe shares: two engines on one dir hand off to
+/// each other, and one probe's cleanup pulled the dir from under the other.
+fn scratch_dir() -> PathBuf {
+    static N: AtomicU64 = AtomicU64::new(0);
+    let n = N.fetch_add(1, Ordering::Relaxed);
+    std::env::temp_dir().join(format!("shardx-glcaps-{}-{n}", std::process::id()))
+}
+
+/// One engine start, bounded by `deadline`. On return the engine and all it
+/// started are gone, and so is its scratch dir.
+async fn run_probe(binary: &Path, deadline: Duration) -> Result<String> {
+    let scratch = scratch_dir();
     let _ = std::fs::remove_dir_all(&scratch);
     std::fs::create_dir_all(&scratch)?;
+    let out = run_engine(binary, &scratch, deadline).await;
+    remove_scratch(&scratch).await;
+    out
+}
 
+async fn run_engine(binary: &Path, scratch: &Path, deadline: Duration) -> Result<String> {
     // A free port from the OS rather than a fixed one: the user may well have
     // profiles running, and a collision here would read their browser instead
     // of ours.
@@ -239,43 +366,66 @@ pub async fn probe(force: bool) -> Result<HostGlCaps> {
         // not the one the user's profiles will run against.
         .arg("--window-position=-32000,-32000")
         .arg("--window-size=200,200")
-        .arg(format!("file://{}", probe_page.display()));
+        .arg(format!("file://{}", probe_page.display()))
+        .kill_on_drop(true);
+    #[cfg(unix)]
+    cmd.process_group(0); // its own group, so the kill below takes its helpers too
     #[cfg(target_os = "windows")]
     {
         use std::os::windows::process::CommandExt;
         cmd.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
     }
     let mut child = cmd.spawn().context("start the engine for a GPU probe")?;
+    let pid = child.id();
 
-    let raw = evaluate_in_core(port).await;
-    let _ = child.kill().await;
-    let _ = std::fs::remove_dir_all(&scratch);
-    let raw = raw?;
+    let answer = tokio::time::timeout(deadline, async {
+        tokio::select! {
+            r = evaluate_in_core(port) => r,
+            // No display, a crash, a refused sandbox: not worth the deadline.
+            st = child.wait() => Err(match st {
+                Ok(st) => anyhow!("the engine quit before it answered ({st})"),
+                Err(e) => anyhow!("the engine quit before it answered ({e})"),
+            }),
+        }
+    })
+    .await
+    .unwrap_or_else(|_| Err(anyhow!("the engine did not answer within {deadline:?}")));
+    kill_tree(&mut child, pid).await;
+    answer
+}
 
-    let parsed: Value = serde_json::from_str(&raw)?;
-    let list = |k: &str| -> Vec<String> {
-        parsed[k]
-            .as_array()
-            .map(|a| {
-                a.iter()
-                    .filter_map(|x| x.as_str().map(str::to_string))
-                    .collect()
-            })
-            .unwrap_or_default()
-    };
-    let caps = HostGlCaps {
-        renderer: parsed["renderer"].as_str().unwrap_or_default().to_string(),
-        vendor: parsed["vendor"].as_str().unwrap_or_default().to_string(),
-        webgl1: list("webgl1"),
-        webgl2: list("webgl2"),
-        webgpu: Some(list("webgpu")),
-        engine_version: runtime::engine_version().unwrap_or_default(),
-    };
-    if caps.webgl1.is_empty() {
-        anyhow::bail!("the engine reported no WebGL at all");
+/// The engine and its helpers, not just the process we started.
+async fn kill_tree(child: &mut tokio::process::Child, pid: Option<u32>) {
+    #[cfg(unix)]
+    if let Some(pid) = pid {
+        // SAFETY: a signal to the group the engine leads (process_group(0)).
+        unsafe { libc::killpg(pid as libc::pid_t, libc::SIGKILL) };
     }
-    let _ = std::fs::write(cache_path()?, serde_json::to_string_pretty(&caps)?);
-    Ok(caps)
+    #[cfg(windows)]
+    if let (Some(pid), Some(_)) = (pid, child.id()) {
+        // /T walks the tree from the live browser, so before the kill below.
+        let _ = tokio::task::spawn_blocking(move || {
+            use std::os::windows::process::CommandExt;
+            std::process::Command::new("taskkill")
+                .args(["/F", "/T", "/PID", &pid.to_string()])
+                .creation_flags(0x0800_0000)
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status()
+        })
+        .await;
+    }
+    let _ = child.kill().await;
+}
+
+/// Windows keeps the files locked a moment after the processes end.
+async fn remove_scratch(dir: &Path) {
+    for _ in 0..20 {
+        if std::fs::remove_dir_all(dir).is_ok() || !dir.exists() {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
 }
 
 /// Which of a fingerprint's declared extensions this machine cannot back.
@@ -427,5 +577,190 @@ mod tests {
         let json = serde_json::to_string(&c).unwrap();
         let back: HostGlCaps = serde_json::from_str(&json).unwrap();
         assert!(back.webgpu.is_none(), "the field must survive the round trip");
+    }
+
+    fn on_disk(c: &HostGlCaps, format: u32) -> String {
+        serde_json::to_string(&Disk { format, caps: c.clone() }).unwrap()
+    }
+
+    /// WebGL without WebGPU (Linux, old GPUs, VMs) is an answer: kept, not
+    /// re-asked on every run.
+    #[test]
+    fn a_machine_without_webgpu_is_kept() {
+        let mut c = caps();
+        c.webgpu = Some(Vec::new());
+        assert_eq!(read_disk(&on_disk(&c, DISK_FORMAT), "").unwrap().webgpu, Some(vec![]));
+    }
+
+    #[test]
+    fn what_is_not_an_answer_is_not_kept() {
+        let mut no_gl = caps();
+        no_gl.webgl1.clear();
+        assert!(read_disk(&on_disk(&no_gl, DISK_FORMAT), "").is_none());
+        let mut unasked = caps();
+        unasked.webgpu = None;
+        assert!(read_disk(&on_disk(&unasked, DISK_FORMAT), "").is_none());
+        assert!(read_disk(&on_disk(&caps(), DISK_FORMAT), "156.0.1.2").is_none(), "another build");
+        // A record from before the format: its empty WebGPU may be about:blank's.
+        assert!(read_disk(&serde_json::to_string(&caps()).unwrap(), "").is_none());
+        assert!(read_disk(&on_disk(&caps(), DISK_FORMAT), "").is_some());
+    }
+
+    #[test]
+    fn the_probe_tells_no_webgpu_from_unasked_and_no_webgl_is_a_failure() {
+        let gl = r#""renderer":"r","vendor":"v","webgl1":["A"],"webgl2":[]"#;
+        let none = parse_answer(&format!("{{{gl},\"webgpu\":[]}}"), "e").unwrap();
+        assert_eq!(none.webgpu, Some(vec![]));
+        assert!(worth_keeping(&none, "e"));
+        let unasked = parse_answer(&format!("{{{gl},\"webgpu\":null}}"), "e").unwrap();
+        assert_eq!(unasked.webgpu, None);
+        assert!(!worth_keeping(&unasked, "e"));
+        assert!(parse_answer(r#"{"webgl1":[],"webgl2":[],"webgpu":[]}"#, "e").is_err());
+    }
+
+    use std::sync::atomic::AtomicUsize;
+    use std::sync::atomic::Ordering::SeqCst;
+
+    /// The two commands the UI calls together start one engine, not two.
+    #[tokio::test]
+    async fn two_callers_share_one_probe() {
+        let flight = Flight::default();
+        let asked = &AtomicUsize::new(0);
+        let ask = move || async move {
+            asked.fetch_add(1, SeqCst);
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            Ok(caps())
+        };
+        let (a, b) = tokio::join!(
+            flight.answer(false, "156", || None, ask),
+            flight.answer(false, "156", || None, ask),
+        );
+        assert_eq!(asked.load(SeqCst), 1);
+        assert_eq!(a.unwrap().renderer, b.unwrap().renderer);
+    }
+
+    #[tokio::test]
+    async fn a_failed_probe_is_not_repeated_until_a_recheck_or_a_new_engine() {
+        let flight = Flight::default();
+        let asked = &AtomicUsize::new(0);
+        let fail = move || async move {
+            asked.fetch_add(1, SeqCst);
+            Err::<HostGlCaps, _>(anyhow!("no display"))
+        };
+        assert!(flight.answer(false, "156", || None, fail).await.is_err());
+        let again = flight.answer(false, "156", || None, fail).await.unwrap_err();
+        assert!(again.to_string().contains("no display"), "{again}");
+        assert_eq!(asked.load(SeqCst), 1, "remembered, not asked again");
+        assert!(flight.answer(true, "156", || None, fail).await.is_err());
+        assert_eq!(asked.load(SeqCst), 2, "force asks");
+        assert!(flight.answer(false, "157", || None, fail).await.is_err());
+        assert_eq!(asked.load(SeqCst), 3, "another engine build asks");
+    }
+
+    #[tokio::test]
+    async fn the_cache_answers_and_a_failed_recheck_keeps_the_good_answer() {
+        let flight = Flight::default();
+        let asked = &AtomicUsize::new(0);
+        let fail = move || async move {
+            asked.fetch_add(1, SeqCst);
+            Err::<HostGlCaps, _>(anyhow!("wedged"))
+        };
+        assert!(flight.answer(false, "156", || Some(caps()), fail).await.is_ok());
+        assert_eq!(asked.load(SeqCst), 0);
+        assert!(flight.answer(true, "156", || None, fail).await.is_err());
+        assert!(flight.answer(false, "156", || None, fail).await.is_ok());
+        assert_eq!(asked.load(SeqCst), 1);
+    }
+
+    #[test]
+    fn every_probe_has_its_own_scratch_dir() {
+        assert_ne!(scratch_dir(), scratch_dir());
+    }
+
+    #[cfg(unix)]
+    fn fake_engine(dir: &Path, body: &str) -> PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::remove_dir_all(dir);
+        std::fs::create_dir_all(dir).unwrap();
+        let p = dir.join("engine.sh");
+        std::fs::write(&p, format!("#!/bin/sh\n{body}\n")).unwrap();
+        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
+        p
+    }
+
+    #[cfg(unix)]
+    fn alive(pid: i32) -> bool {
+        // SAFETY: signal 0 only checks the pid.
+        unsafe { libc::kill(pid, 0) == 0 }
+    }
+
+    /// A wedged engine (no port ever) is killed at the deadline with what it
+    /// started, and its scratch dir is gone.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn an_engine_that_never_answers_is_killed_at_the_deadline() {
+        let dir = std::env::temp_dir().join(format!("shardx-glcaps-test-wedged-{}", std::process::id()));
+        let (args, pids) = (dir.join("args"), dir.join("pids"));
+        let engine = fake_engine(
+            &dir,
+            &format!(
+                "for a in \"$@\"; do echo \"$a\"; done > '{}'\nsleep 600 &\necho $! > '{p}'\necho $$ >> '{p}'\nwait",
+                args.display(),
+                p = pids.display()
+            ),
+        );
+        let started = std::time::Instant::now();
+        let err = run_probe(&engine, Duration::from_millis(1500)).await.unwrap_err();
+        assert!(err.to_string().contains("did not answer"), "{err:#}");
+        assert!(started.elapsed() < Duration::from_secs(8), "{:?}", started.elapsed());
+
+        let pids: Vec<i32> = std::fs::read_to_string(&pids)
+            .unwrap()
+            .lines()
+            .map(|l| l.trim().parse().unwrap())
+            .collect();
+        assert_eq!(pids.len(), 2, "the engine and its helper");
+        let until = std::time::Instant::now() + Duration::from_secs(5);
+        while pids.iter().any(|&p| alive(p)) && std::time::Instant::now() < until {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        assert!(pids.iter().all(|&p| !alive(p)), "left running: {pids:?}");
+
+        let args = std::fs::read_to_string(&args).unwrap();
+        let udd = args.lines().find_map(|l| l.strip_prefix("--user-data-dir=")).unwrap();
+        assert!(!Path::new(udd).exists(), "scratch dir left behind: {udd}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// No display, a refused sandbox: the engine exits, and the probe says so
+    /// at once instead of waiting out the deadline.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn an_engine_that_quits_is_not_waited_out() {
+        let dir = std::env::temp_dir().join(format!("shardx-glcaps-test-quits-{}", std::process::id()));
+        let engine = fake_engine(&dir, "exit 3");
+        let started = std::time::Instant::now();
+        let err = run_probe(&engine, Duration::from_secs(20)).await.unwrap_err();
+        assert!(err.to_string().contains("quit before it answered"), "{err:#}");
+        assert!(started.elapsed() < Duration::from_secs(5), "{:?}", started.elapsed());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The installed engine for real, named outright since tests never resolve the
+    /// real runtime: `SHARDX_ENGINE=<binary> cargo test real_engine -- --ignored`.
+    #[tokio::test]
+    #[ignore]
+    async fn real_engine_answers() {
+        let engine = std::env::var_os("SHARDX_ENGINE").expect("SHARDX_ENGINE=<the engine binary>");
+        let started = std::time::Instant::now();
+        let raw = run_probe(Path::new(&engine), PROBE_DEADLINE).await.unwrap();
+        let caps = parse_answer(&raw, "").unwrap();
+        eprintln!(
+            "{:?}: {} | webgl1 {} | webgpu {:?}",
+            started.elapsed(),
+            caps.renderer,
+            caps.webgl1.len(),
+            caps.webgpu.as_ref().map(Vec::len)
+        );
     }
 }

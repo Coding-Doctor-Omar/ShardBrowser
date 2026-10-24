@@ -21,8 +21,10 @@ export const lastKeyNavigated = (): boolean => last === 'keyboard' && NAVIGATION
 // Where the pointer was at its last move (client px), or null before one.
 // Only moves count: a press lands where the last move left the pointer.
 let pointerAt: { x: number; y: number } | null = null
+// The move before it: a move handler reads it, the listener having run first.
+let pointerBefore: { x: number; y: number } | null = null
 if (typeof window !== 'undefined') {
-  window.addEventListener('pointermove', (e) => { pointerAt = { x: e.clientX, y: e.clientY } }, { capture: true, passive: true })
+  window.addEventListener('pointermove', (e) => { pointerBefore = pointerAt; pointerAt = { x: e.clientX, y: e.clientY } }, { capture: true, passive: true })
 }
 
 /** Whether two points lie within a px of each other (layout rounding). */
@@ -35,3 +37,8 @@ export const samePoint = (a: { x: number; y: number }, b: { clientX: number; cli
  *  place the pointer came from. Before any move, every arrival is real. */
 export const pointerStill = (e: { clientX: number; clientY: number }): boolean =>
   pointerAt !== null && Number.isFinite(e.clientX) && Number.isFinite(e.clientY) && samePoint(pointerAt, e)
+
+/** A `pointermove` at the exact place of the move before it: no move. WebKit
+ *  sends one when a list scrolls under a still pointer (the keys scrolled it). */
+export const pointerMoveStill = (e: { clientX: number; clientY: number }): boolean =>
+  pointerBefore !== null && pointerBefore.x === e.clientX && pointerBefore.y === e.clientY

@@ -33,10 +33,11 @@ test("a title drags and an edge sizes on Proxies too", async ({ page }) => {
   await page.mouse.move(type.x + 4, type.y + type.height / 2, { steps: 5 });
   await page.mouse.up();
   expect(await titles(page)).toEqual(["Name", "Country", "Type", "Host and port", "Profiles", "Test result"]);
+  // Narrower: the next column takes the 8 px (at 1280 the columns after it have little to give).
   await header(page).locator("[data-col-edge='address']").focus();
   const v0 = Number(await header(page).locator("[data-col-edge='address']").getAttribute("aria-valuenow"));
-  await page.keyboard.press("ArrowRight");
-  expect((await stored(page)).widths.address).toBe(v0 + 8);
+  await page.keyboard.press("ArrowLeft");
+  expect((await stored(page)).widths.address).toBe(v0 - 8);
 });
 
 test("beside Peek every chosen Proxies column stays: the list scrolls inside its card, Name and the row actions pinned, never the page (Review Focus 5)", async ({ page }) => {
@@ -59,4 +60,16 @@ test("keys pressed on the Proxies header never act on a row (Review Focus 4)", a
   await expect(page.getByRole("alertdialog")).toHaveCount(0);
   await expect(page.locator("[role='row'][data-proxy-id][aria-selected='true']")).toHaveCount(0);
   await expect(page.locator("[role='row'][data-proxy-id='px-us-2'] [data-cell='test']")).not.toContainText("Testing");
+});
+
+test("a column's note in the Proxies Display menu describes its box, as on Profiles", async ({ page }) => {
+  await openApp(page, { section: "proxies" });
+  await page.getByRole("button", { name: "Display", exact: true }).click();
+  const display = page.getByRole("dialog", { name: "Display" });
+  const notes = display.locator("[data-column-note]");
+  await expect(notes.first()).toBeVisible();
+  for (const note of await notes.all()) {
+    const box = note.locator("xpath=..").getByRole("checkbox");
+    await expect(box).toHaveAccessibleDescription((await note.textContent())!);
+  }
 });

@@ -223,7 +223,7 @@ test("every command has an English and a Chinese label, and no key is taken twic
 test("Settings commands come from one typed record: every tab has one", async ({ page }) => {
   await loadCommands(page);
   const ids = await page.evaluate(() => (window as unknown as CW).__cmds.SETTINGS_TAB_IDS);
-  expect(ids.sort()).toEqual(["about", "api", "appearance", "general", "helper", "other", "profiles", "storage", "tags", "views"]);
+  expect(ids.sort()).toEqual(["about", "api", "appearance", "general", "helper", "other", "profiles", "storage", "sync", "tags", "views"]);
 });
 
 test("a command run on the selection keeps the selection exactly as it was (owner rule, ORDER R26 a)", async ({ page }) => {

@@ -284,7 +284,8 @@ function BranchRow({
  *  or a timeout. A number box cannot show it — it would read the text as no
  *  number at all and write its default over the variable the moment anything
  *  else on the step changed — so the field becomes a text box while a
- *  variable is in it. */
+ *  variable is in it. One gets in through the number box itself: `onVar` hands
+ *  a reference typed into it over on leaving (#66). */
 const isVarRef = (v: unknown): v is string =>
   typeof v === "string" && v.includes("{{");
 
@@ -359,7 +360,17 @@ function ParamField({ block, prm, onParam, onSecret }: {
               inputSize="xsmall"
               wrapperClassName="min-w-0 flex-1"
               value={held}
-              onChange={(e) => onParam(block.id, prm.name, e.target.value)}
+              onChange={(e) => {
+                const text = e.target.value;
+                // Leaving the variable behind must put a NUMBER back in the
+                // step. Once "{{" is gone this box unmounts and the number
+                // field takes over, and that field only *shows* a default —
+                // it never writes one. Storing the bare text instead would
+                // leave "" in the step while the editor showed 2, and the run
+                // would fall back to a third value again.
+                if (text.includes("{{")) { onParam(block.id, prm.name, text); return; }
+                onParam(block.id, prm.name, numberOf(text) ?? numberOf(prm.default) ?? 0);
+              }}
             />,
           )}
         </div>
@@ -373,7 +384,9 @@ function ParamField({ block, prm, onParam, onSecret }: {
             {/* Keeps what you type (WIG-02): "-" on its way to a negative
                 scroll, an empty field on its way to a new timeout. A
                 setting with a default needs a number; one without is left
-                out when cleared, and its hint says what empty means. */}
+                out when cleared, and its hint says what empty means.
+                `onVar` lets a `{{variable}}` be typed in: every step
+                number the runner reads goes through its expansion. */}
             {prm.default === undefined ? (
               <NumField
                 id={id}
@@ -385,6 +398,7 @@ function ParamField({ block, prm, onParam, onSecret }: {
                 value={numberOf(block.params[prm.name])}
                 onChange={(v) => onParam(block.id, prm.name, v)}
                 onClear={() => onParam(block.id, prm.name, undefined)}
+                onVar={(ref) => onParam(block.id, prm.name, ref)}
               />
             ) : (
               <NumField
@@ -396,6 +410,7 @@ function ParamField({ block, prm, onParam, onSecret }: {
                 placeholder={prm.hint ? t(prm.hint) : undefined}
                 value={numberOf(block.params[prm.name]) ?? numberOf(prm.default) ?? 0}
                 onChange={(v) => onParam(block.id, prm.name, v)}
+                onVar={(ref) => onParam(block.id, prm.name, ref)}
               />
             )}
           </div>,

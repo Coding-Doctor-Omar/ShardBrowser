@@ -5,6 +5,7 @@ import { FolderAddIconApp } from "../../../shared/icons";
 import { useT } from "../../../shared/i18n";
 import { toast } from "../../../shared/model/toast";
 import { hasOwn } from "../../../shared/lib/utils";
+import { adminRefusal, inFolder, teamRefusal, useRightsChange } from "../../../entities/space";
 
 /// A profile's Folder, picked from a menu under its cell (the cell's edit
 /// button, owner feature 2026-09-26): "No folder", every Folder as its chip
@@ -33,17 +34,27 @@ export function FolderCellMenu({ profile, anchorRef, onClose }: {
       toast.saved(folder ? t("useProfile.movedOne", { name: profile.name, f: folder }) : t("useProfile.movedOutOne", { name: profile.name, f: profile.folder }));
     });
   };
+  // In a team a profile goes only where Create is given; only its admin makes a folder.
+  useRightsChange();
+  const closed = (f: string) => (f === profile.folder ? null : teamRefusal("create", inFolder(f)));
+  const newFolder = adminRefusal();
   const items: MenuItem[] = [
-    { type: "radio", label: t("peek.noFolder"), checked: profile.folder === "", onSelect: () => pick("") },
+    { type: "radio", label: t("peek.noFolder"), checked: profile.folder === "", disabled: !!closed(""), hint: closed("") ?? undefined, onSelect: () => pick("") },
     ...folders.map((f): MenuItem => ({
       type: "radio",
       label: f,
       content: <FolderChip name={f} color={hasOwn(folderMetaByName, f) ? folderMetaByName[f].color : null} />,
       checked: profile.folder === f,
+      disabled: !!closed(f),
+      hint: closed(f) ?? undefined,
       onSelect: () => pick(f),
     })),
     { type: "separator" },
-    { label: t("folderCellMenu.newFolder"), icon: <FolderAddIconApp className="size-3.5" />, onSelect: () => setFolderDialog({ mode: "create", moveIds: [profile.id] }) },
+    {
+      label: t("folderCellMenu.newFolder"), icon: <FolderAddIconApp className="size-3.5" />,
+      disabled: !!newFolder, hint: newFolder ?? undefined,
+      onSelect: () => setFolderDialog({ mode: "create", moveIds: [profile.id] }),
+    },
   ];
   return (
     <Menu

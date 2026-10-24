@@ -2,6 +2,7 @@ import { create } from "zustand";
 import { toast } from "../../../shared/model/toast";
 import { reportLoadError } from "../../../shared/model/loadError";
 import { deferDelete, isPendingDelete } from "../../../shared/lib/deferDelete";
+import { onSpaceMoved } from "../../../shared/api/invoke";
 import { t } from "../../../shared/i18n";
 import {
   automationAvailable,
@@ -13,6 +14,7 @@ import {
 } from "../model/api";
 import type { Block, Project } from "../model/types";
 import { tidyBlocks } from "./layout";
+import { teamRefusal } from "../../space";
 
 // A project deleted behind its Undo toast stays out of every read until the toast goes.
 const living = (projects: Project[]) => projects.filter((p) => !isPendingDelete(`project:${p.id}`));
@@ -47,7 +49,8 @@ async function saveInTurn(project: Project): Promise<Sent> {
     const sent: Project = sending;
     try { result = { done: { sent, stored: (await automationSave(sent)) ?? sent } }; }
     catch (e) { result = { error: e }; }
-    sending = turn.next;
+    // The waiting version was made over the one just stored: it carries that revision.
+    sending = turn.next && "done" in result ? rebased(turn.next, result.done.stored.revision) : turn.next;
     turn.next = null;
   }
   saving.delete(project.id);
@@ -76,7 +79,13 @@ function same(a: unknown, b: unknown): boolean {
   for (const k of keys) if (!same(ao[k], bo[k])) return false;
   return true;
 }
-const sameProject = (a: Project, b: Project) => same({ ...a, updated_at: 0 }, { ...b, updated_at: 0 });
+// `revision` is the team's count of saves, not content either.
+const sameProject = (a: Project, b: Project) => same({ ...a, updated_at: 0, revision: 0 }, { ...b, updated_at: 0, revision: 0 });
+
+/** `p` over a team's revision `revision`; as it is where there is none (the personal space). */
+function rebased(p: Project, revision: number | undefined): Project {
+  return revision === undefined || p.revision === revision ? p : { ...p, revision };
+}
 
 function without(drafts: Record<string, Project>, id: string): Record<string, Project> {
   const rest = { ...drafts };
@@ -87,6 +96,9 @@ function without(drafts: Record<string, Project>, id: string): Record<string, Pr
 /** `next` as the project's draft: none when it matches the saved project,
  *  so a change typed back to what is saved leaves nothing to save, and a
  *  failed save's words go with the changes they were about. */
+/** Without Edit in the team its projects only open to read. */
+const viewOnly = () => !!teamRefusal("edit");
+
 function withDraft(
   s: { projects: Project[]; drafts: Record<string, Project>; saveError: { id: string; message: string } | null },
   id: string, next: Project,
@@ -228,19 +240,24 @@ export const useAutomation = create<AutomationStore>((set, get) => ({
   save: async (id) => {
     const draft = get().drafts[id];
     if (!draft) return true;
+    // A team's projects change with Edit in the team: the draft stays as typed.
+    const refused = teamRefusal("edit");
+    if (refused) { set({ saveError: { id, message: refused } }); return false; }
     set({ saving: id, saveError: null });
     try {
       // The sent objects become the saved ones, with the backend's stamp:
       // what is on screen keeps its identity (an open rule's form stays open).
+      // A team's next save names the revision this one made (verifier finding 4).
       const done = await saveInTurn(draft);
-      const stored = { ...done.sent, updated_at: done.stored.updated_at };
+      const stored = rebased({ ...done.sent, updated_at: done.stored.updated_at }, done.stored.revision);
       set((s) => {
         const projects = s.projects.map((p) => (p.id === id ? stored : p));
-        const now = s.drafts[id];
+        // Changes made while it was out sit over what it stored.
+        const now = s.drafts[id] && s.drafts[id] !== draft ? rebased(s.drafts[id], stored.revision) : null;
         const rest = without(s.drafts, id);
         return {
           projects,
-          drafts: now && now !== draft && !sameProject(stored, now) ? { ...rest, [id]: now } : rest,
+          drafts: now && !sameProject(stored, now) ? { ...rest, [id]: now } : rest,
           saving: null,
         };
       });
@@ -265,6 +282,8 @@ export const useAutomation = create<AutomationStore>((set, get) => ({
   },
 
   create: async (name) => {
+    const refused = teamRefusal("create");
+    if (refused) { toast.fail({ title: t("useAutomation.createFailed", { name }), detail: refused, subject: name }); return; }
     try {
       const p = await automationCreate(name);
       await get().reload();
@@ -281,6 +300,9 @@ export const useAutomation = create<AutomationStore>((set, get) => ({
   // Behind an Undo toast, nothing asked (ruling 18). An open project's
   // editor closes with it, and Undo opens it again.
   remove: async (p) => {
+    // Refused by a team's rules: it never leaves the list, so it never comes back.
+    const refused = teamRefusal("delete");
+    if (refused) { toast.fail({ title: t("useAutomation.deleteFailed", { name: p.name }), detail: refused }); return; }
     let wasOpen = false;
     deferDelete({
       key: `project:${p.id}`,
@@ -296,6 +318,8 @@ export const useAutomation = create<AutomationStore>((set, get) => ({
   },
 
   duplicate: async (p) => {
+    const refused = teamRefusal("create");
+    if (refused) { toast.fail({ title: t("useAutomation.duplicateFailed", { name: p.name }), detail: refused, subject: p.name }); return; }
     set({ busy: p.id });
     try {
       const copy = await automationDuplicate(p.id);
@@ -313,6 +337,8 @@ export const useAutomation = create<AutomationStore>((set, get) => ({
   // back. Bounded at 50: a long editing session should not hold every state
   // the project ever had.
   patch: async (id, next) => {
+    // A team's project without Edit opens to read: no change takes (doors.rs automation_save).
+    if (viewOnly()) { dragBase = null; return; }
     const base = dragBase?.id === id ? dragBase : null;
     dragBase = null;
     const live = get().edited(id);
@@ -361,19 +387,22 @@ export const useAutomation = create<AutomationStore>((set, get) => ({
   // Undo and Redo work on the draft. After a save they still go back: the
   // draft then differs from what is saved again, and Save says so.
   undo: async () => {
+    if (viewOnly()) return;
     const past = get().past;
     const previous = past[past.length - 1];
     if (!previous) return;
     const current = get().edited(previous.id);
     if (!current) { set({ past: past.slice(0, -1) }); return; }
+    // A step back is a change over what is held now: it keeps today's revision.
     set((s) => ({
       past: past.slice(0, -1),
       future: [...s.future, current],
-      ...withDraft(s, previous.id, previous),
+      ...withDraft(s, previous.id, rebased(previous, current.revision)),
     }));
   },
 
   redo: async () => {
+    if (viewOnly()) return;
     const future = get().future;
     const nextOne = future[future.length - 1];
     if (!nextOne) return;
@@ -382,7 +411,7 @@ export const useAutomation = create<AutomationStore>((set, get) => ({
     set((s) => ({
       future: future.slice(0, -1),
       past: [...s.past, current],
-      ...withDraft(s, nextOne.id, nextOne),
+      ...withDraft(s, nextOne.id, rebased(nextOne, current.revision)),
     }));
   },
 
@@ -403,7 +432,7 @@ export const useAutomation = create<AutomationStore>((set, get) => ({
   // becomes one Undo step once the pointer is released.
   placeBlock: (id, blockId, x, y) => {
     const p = get().edited(id);
-    if (!p) return;
+    if (!p || viewOnly()) return;
     if (dragBase?.id !== id) dragBase = p;
     set((s) => withDraft(s, id, { ...p, blocks: p.blocks.map((b) => (b.id === blockId ? { ...b, x, y } : b)) }));
   },
@@ -433,3 +462,13 @@ export const useAutomation = create<AutomationStore>((set, get) => ({
     await get().patch(id, { blocks });
   },
 }));
+
+// Another space: its projects are read afresh; the old one's editor and changes close with it.
+onSpaceMoved(() => {
+  const was = useAutomation.getState().status;
+  useAutomation.setState({
+    status: "idle", error: null, projects: [], openId: null, focusName: false, busy: null,
+    past: [], future: [], drafts: {}, saving: null, saveError: null,
+  });
+  if (was !== "idle") void useAutomation.getState().init();
+});

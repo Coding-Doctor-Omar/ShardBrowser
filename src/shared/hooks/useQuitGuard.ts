@@ -1,4 +1,4 @@
-import { useEffect } from "react";
+import { useEffect, useRef } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { confirmLeave } from "../model/unsaved";
@@ -12,13 +12,15 @@ import { commitFocusedField } from "../lib/commitField";
 // app_quit_asking goes first: a window that never says it is asking is taken
 // for gone, and the app exits after a few seconds (lib.rs `quit`).
 
-async function answerQuit() {
+async function answerQuit(more?: () => Promise<boolean>) {
   try { await invoke("app_quit_asking"); } catch { /* an older backend */ }
   // A field that still has the keyboard hands its text to its form first, as a Save does.
   commitFocusedField();
   let leave = false;
   try {
     leave = await confirmLeave();
+    // Then what else Quit would close (the open team and synced profiles).
+    if (leave && more) leave = await more();
   } catch {
     leave = false;
   }
@@ -29,12 +31,14 @@ async function answerQuit() {
   }
 }
 
-/** Mount once, in the shell. */
-export function useQuitGuard() {
+/** Mount once, in the shell. `more`: a further question after the unsaved changes; false stays. */
+export function useQuitGuard(more?: () => Promise<boolean>) {
+  const latest = useRef(more);
+  latest.current = more;
   useEffect(() => {
     let disposed = false;
     let un: (() => void) | undefined;
-    listen("app://quit-requested", () => { void answerQuit(); })
+    listen("app://quit-requested", () => { void answerQuit(latest.current); })
       .then((fn) => {
         if (disposed) fn();
         else un = fn;

@@ -6,10 +6,22 @@ import { useNav } from "../../shared/model/navigation";
 import { defineCommands, type Command } from "../../shared/commands";
 import { useProxy } from "../../entities/proxy";
 import { useProfileUi } from "../../entities/profile";
+import { onProxy, teamRefusal } from "../../entities/space";
 
 const store = () => useProxy.getState();
 const byId = (id: string) => store().proxies.find((p) => p.id === id);
 const LIST = { area: "proxies", page: "proxies" } as const;
+
+/** Why a team's rules let none of these proxies be acted on, or null when one may be. */
+const noneMay = (ids: string[], action: "delete" | "take_out"): string | null => {
+  let first: string | null = null;
+  for (const id of ids) {
+    const r = teamRefusal(action, onProxy(id));
+    if (r === null) return null;
+    first ??= r;
+  }
+  return first;
+};
 
 /// Assign and Export act on their subject and leave the selection exactly as
 /// it was: a palette run on the active proxy selects nothing, and a selected
@@ -61,6 +73,8 @@ export const PROXY_COMMANDS: readonly Command[] = [
     ...LIST, id: "proxy.export", scope: "selection", group: "copy", icon: CopyIcon,
     label: () => t("commands.export"),
     surfaces: ["bulkBar", "palette"],
+    // Its lines carry its login out of the team: Take out.
+    disabled: (s) => noneMay(s.ids, "take_out"),
     run: (s) => store().bulkExport(s.ids),
   },
   {
@@ -70,6 +84,7 @@ export const PROXY_COMMANDS: readonly Command[] = [
     // Not Test in Peek's menu: its header's Test now is the same act, and
     // saves Peek's edits first (F12a).
     surfaces: ["rowMenu", "hover", "bulkBar", "palette", "sheet", "peekMenu"],
+    disabled: (s) => noneMay(s.ids, "delete"),
     // Behind an Undo toast (ruling 18): deleted proxies leave the selection,
     // and Undo or a failure puts them back in it (A Tasks 9 and 14).
     run: (s) => (s.ids.length === 1 ? store().removeProxy(s.ids[0]) : store().bulkDelete(s.ids)),
@@ -117,12 +132,15 @@ export const PROXY_COMMANDS: readonly Command[] = [
     label: () => t("commands.addProxies"), keys: ["C"], keyWhere: "page", singleKey: true,
     keywords: () => ["new proxy"],
     surfaces: ["palette", "sheet"],
+    // A team's proxies are made with Create in the team.
+    disabled: () => teamRefusal("create"),
     run: async () => { if (await useNav.getState().setSection("proxies")) store().setBulkOpen(true); },
   },
   {
     ...LIST, id: "proxy.import", scope: "page", group: "create", icon: DownloadIcon,
     label: () => t("commands.importProxies"),
     surfaces: ["pageMenu", "palette"],
+    disabled: () => teamRefusal("create"),
     run: () => store().bulkImportClipboard(),
   },
 ];

@@ -41,8 +41,8 @@ const RELATIVE_FORMATS = new Map<string, Intl.RelativeTimeFormat>();
 /// A launcher date as how long ago it was ("Yesterday", "5 hours ago"), in the
 /// UI language; a month or more back, the day itself. `now` is the minute
 /// clock's time, so a list's rows move on together. The full date is for a
-/// tooltip (`fmtTs`).
-export function fmtRelative(stamp: string, now: number): string {
+/// tooltip (`fmtTs`). `capital` false: as it reads inside a sentence.
+export function fmtRelative(stamp: string, now: number, capital = true): string {
   const ms = stampMs(stamp);
   if (ms === null) return "";
   const secs = Math.round((now - ms) / 1000);
@@ -58,7 +58,7 @@ export function fmtRelative(stamp: string, now: number): string {
     : secs < 86_400 ? format.format(-Math.floor(secs / 3600), "hour")
     : format.format(-Math.floor(secs / 86_400), "day");
   // Sentence case: a cell starts with a capital.
-  return text.charAt(0).toLocaleUpperCase(locale) + text.slice(1);
+  return capital ? text.charAt(0).toLocaleUpperCase(locale) + text.slice(1) : text;
 }
 
 const DAY_FORMATS = new Map<string, Intl.DateTimeFormat>();
@@ -138,6 +138,11 @@ export const withUtm = (url: string) => url + (url.includes("?") ? "&" : "?") + 
 export const DASHBOARD_URL = withUtm("https://dashboard.proxyshard.com/");
 
 export const GH_REPO_URL = "https://github.com/ProxyShard/ShardBrowser";
+
+// The product site; utm_content names the place in the launcher the click came from.
+export const SITE_HOST = "shardbrowser.com";
+export const siteUrl = (placement: string) =>
+  `https://${SITE_HOST}/?utm_source=launcher&utm_medium=app&utm_campaign=shardbrowser&utm_content=${placement}`;
 
 /// Build accept-language chain (primary → base → English fallback).
 export function deriveAcceptLanguage(loc: string): string {

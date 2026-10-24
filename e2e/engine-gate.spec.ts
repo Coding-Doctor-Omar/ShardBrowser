@@ -14,7 +14,9 @@ test("a failed engine download says why and can be tried again", async ({ page }
   await openApp(page, { idle: false });
   await expect(page.getByRole("heading", { name: "Couldn’t download the browser engine" })).toBeVisible();
   await expect(page.getByText("Check your internet connection, then try again.")).toBeVisible();
-  await expect(page.getByText("Could not reach the download server.")).toBeVisible();
+  // The backend's words speak of an engine there is: kept for Copy details.
+  await expect(page.getByText(/^Downloading the engine failed/)).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "Copy details" })).toBeVisible();
   await setEngine(page, "missing");
   await page.getByRole("button", { name: "Try again" }).click();
   await expect(page.locator("main[data-section='profiles']")).toBeVisible({ timeout: 10_000 });

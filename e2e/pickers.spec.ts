@@ -1,5 +1,5 @@
 import { expect, test, type Page } from "@playwright/test";
-import { openApp, openEditForm } from "./support/app";
+import { openApp, openEditForm, storedTags } from "./support/app";
 
 // Every picker is the kit Combobox (IFACE-04, EMIL-08, EMIL-09): type to
 // filter, the first match is highlighted, the arrows move, Enter picks,
@@ -17,7 +17,7 @@ const TAGS = {
   ],
   byProfile: {},
 };
-const tagNames = (page: Page) => page.evaluate(() => (JSON.parse(localStorage.getItem("shardx.tags")!) as { tags: { name: string }[] }).tags.map((t) => t.name));
+const tagNames = async (page: Page) => (await storedTags(page)).tags.map((t) => t.name);
 const chips = (page: Page, name: string) => row(page, name).locator("[data-cell='tags'] [data-tag]");
 
 test("T, w, Enter gives the first match and creates nothing (EMIL-08)", async ({ page }) => {
