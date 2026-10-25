@@ -161,6 +161,24 @@ def apply_engine_version(
         cfg_tls.update(tls)
 
 
+# The brand Chrome lists in `userAgentData.brands` and `Sec-CH-UA`, Android included.
+_CHROME_BRAND = "Google Chrome"
+
+
+def apply_chrome_brand(config: dict) -> None:
+    """Name the brand on a profile that names none, so the brand list is
+    Chrome's and not only "Chromium" and GREASE; a brand the profile names
+    stays. Launch calls it for phone profiles, whose library templates lacked
+    the field. Mutates `config` in place. SDK equivalent of the launcher's
+    profile migration."""
+    ch = config.get("client_hints")
+    if not isinstance(ch, dict):
+        return
+    if isinstance(ch.get("brand"), str) and ch["brand"]:
+        return
+    ch["brand"] = _CHROME_BRAND
+
+
 # WebGPU features Chrome 156 reports on Apple M-series that older templates lack.
 _APPLE_WEBGPU_ADDED = ("texture-compression-unaligned",)
 

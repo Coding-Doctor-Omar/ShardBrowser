@@ -308,6 +308,23 @@ pub fn apply_engine_version(
     }
 }
 
+/// The brand Chrome lists in `userAgentData.brands` and `Sec-CH-UA`, Android included.
+const CHROME_BRAND: &str = "Google Chrome";
+
+/// Names the brand on a profile that names none, so the brand list is Chrome's and
+/// not only "Chromium" and GREASE; a brand the profile names stays. Launch calls it
+/// for phone profiles, whose library templates lacked the field. SDK equivalent of
+/// the launcher's profile migration.
+pub(crate) fn apply_chrome_brand(config: &mut Value) {
+    let Some(ch) = config.get_mut("client_hints").and_then(|v| v.as_object_mut()) else {
+        return;
+    };
+    if ch.get("brand").and_then(|v| v.as_str()).is_some_and(|b| !b.is_empty()) {
+        return;
+    }
+    ch.insert("brand".into(), Value::String(CHROME_BRAND.into()));
+}
+
 /// WebGPU features Chrome 156 reports on Apple M-series that older templates lack.
 const APPLE_WEBGPU_ADDED: &[&str] = &["texture-compression-unaligned"];
 
@@ -385,5 +402,24 @@ mod apple_webgpu_tests {
             apply_apple_webgpu_features(&mut cfg);
             assert_eq!(cfg, before);
         }
+    }
+}
+
+#[cfg(test)]
+mod chrome_brand_tests {
+    use super::apply_chrome_brand;
+    use serde_json::json;
+
+    #[test]
+    fn a_profile_without_a_brand_gets_chromes_and_a_named_one_stays() {
+        let mut bare = json!({ "client_hints": { "mobile": true, "brand_version": "156" } });
+        apply_chrome_brand(&mut bare);
+        assert_eq!(bare["client_hints"]["brand"], "Google Chrome");
+        let mut empty = json!({ "client_hints": { "brand": "" } });
+        apply_chrome_brand(&mut empty);
+        assert_eq!(empty["client_hints"]["brand"], "Google Chrome");
+        let mut named = json!({ "client_hints": { "brand": "Microsoft Edge" } });
+        apply_chrome_brand(&mut named);
+        assert_eq!(named["client_hints"]["brand"], "Microsoft Edge");
     }
 }

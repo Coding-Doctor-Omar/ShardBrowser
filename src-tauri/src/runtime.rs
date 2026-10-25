@@ -593,6 +593,9 @@ fn migrate_dir_to(
         if add_apple_webgpu_features(&mut cfg) {
             changed = true;
         }
+        if add_chrome_brand(&mut cfg) {
+            changed = true;
+        }
 
         if changed {
             fs::write(&p, serde_json::to_string_pretty(&cfg)?)?;
@@ -600,6 +603,25 @@ fn migrate_dir_to(
         }
     }
     Ok(n)
+}
+
+/// The brand Chrome lists in `userAgentData.brands` and `Sec-CH-UA`, Android included.
+const CHROME_BRAND: &str = "Google Chrome";
+
+/// Names the brand on a phone profile that names none: Android templates lacked it, and the
+/// brand list then held only "Chromium" and GREASE. A brand the profile names stays.
+fn add_chrome_brand(cfg: &mut serde_json::Value) -> bool {
+    if !cfg.as_object().is_some_and(crate::space::profile::claims_mobile) {
+        return false;
+    }
+    let Some(ch) = cfg.get_mut("client_hints").and_then(|v| v.as_object_mut()) else {
+        return false;
+    };
+    if ch.get("brand").and_then(|v| v.as_str()).is_some_and(|b| !b.is_empty()) {
+        return false;
+    }
+    ch.insert("brand".into(), CHROME_BRAND.into());
+    true
 }
 
 /// WebGPU features Chrome 156 reports on Apple M-series that older templates lack.
@@ -636,6 +658,32 @@ fn add_apple_webgpu_features(cfg: &mut serde_json::Value) -> bool {
         changed = true;
     }
     changed
+}
+
+#[cfg(test)]
+mod chrome_brand_tests {
+    use super::add_chrome_brand;
+    use serde_json::json;
+
+    #[test]
+    fn a_phone_profile_without_a_brand_gets_chromes() {
+        let mut cfg = json!({ "navigator": { "platform": "Android" },
+            "client_hints": { "mobile": true, "brand_version": "156" } });
+        assert!(add_chrome_brand(&mut cfg));
+        assert_eq!(cfg["client_hints"]["brand"], "Google Chrome");
+        assert!(!add_chrome_brand(&mut cfg), "once");
+    }
+
+    #[test]
+    fn a_named_brand_and_a_desktop_profile_are_left_alone() {
+        let mut named = json!({ "client_hints": { "mobile": true, "brand": "Microsoft Edge" } });
+        let mut desktop = json!({ "navigator": { "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)" },
+            "client_hints": { "mobile": false } });
+        let (a, b) = (named.clone(), desktop.clone());
+        assert!(!add_chrome_brand(&mut named));
+        assert!(!add_chrome_brand(&mut desktop));
+        assert_eq!((named, desktop), (a, b));
+    }
 }
 
 #[cfg(test)]
@@ -822,7 +870,7 @@ fn migrate_all_to(
 
 /// Raised when `migrate_dir_to` learns a new fix, so a launcher update reruns it once
 /// even on a manifest it has already applied.
-const MIGRATION_REV: u32 = 2;
+const MIGRATION_REV: u32 = 3;
 
 /// What a migration was applied for; the install path and the start share it.
 fn migration_signature(target: &str, m: &RemoteManifest) -> String {

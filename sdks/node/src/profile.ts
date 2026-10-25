@@ -202,6 +202,22 @@ export function applyEngineVersion(
   }
 }
 
+/** The brand Chrome lists in `userAgentData.brands` and `Sec-CH-UA`, Android included. */
+const CHROME_BRAND = "Google Chrome";
+
+/**
+ * Name the brand on a profile that names none, so the brand list is Chrome's and
+ * not only "Chromium" and GREASE; a brand the profile names stays. Launch calls
+ * it for phone profiles, whose library templates lacked the field. Mutates
+ * `config` in place. SDK equivalent of the launcher's profile migration.
+ */
+export function applyChromeBrand(config: Record<string, unknown>): void {
+  const ch = config["client_hints"] as Record<string, unknown> | undefined;
+  if (!ch || typeof ch !== "object") return;
+  if (typeof ch["brand"] === "string" && ch["brand"] !== "") return;
+  ch["brand"] = CHROME_BRAND;
+}
+
 /** WebGPU features Chrome 156 reports on Apple M-series that older templates lack. */
 const APPLE_WEBGPU_ADDED = ["texture-compression-unaligned"];
 

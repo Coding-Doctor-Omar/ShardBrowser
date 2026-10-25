@@ -14,7 +14,7 @@ import { join } from "node:path";
 
 import { hasAutoFields, resolveAutoFields } from "./autoResolve.js";
 import { geoCheckVia, type GeoInfo } from "./geo.js";
-import { Profile, userDataDir, applyAppleWebGpuFeatures, applyEngineVersion } from "./profile.js";
+import { Profile, userDataDir, applyAppleWebGpuFeatures, applyChromeBrand, applyEngineVersion } from "./profile.js";
 import { parseProxy, probeUdp, proxyToArg, type ParsedProxy } from "./proxy.js";
 import type { Runtime } from "./runtime.js";
 import { applyScreenStrategy, defaultScreenModeFor, type ScreenStrategy } from "./screen.js";
@@ -143,6 +143,7 @@ export class Browser {
     applyEngineVersion(profile.config, this.runtime.chromiumVersion, this.runtime.greaseBrand,
                        this.runtime.greaseVersion, this.runtime.tls);
     applyAppleWebGpuFeatures(profile.config);
+    if (profile.claimsMobile) applyChromeBrand(profile.config);
     applyNoiseSeeds(profile.config, profile.id);
     const fpFile = join(udd, "fingerprint.json");
     writeFileSync(fpFile, JSON.stringify(profile.config));
