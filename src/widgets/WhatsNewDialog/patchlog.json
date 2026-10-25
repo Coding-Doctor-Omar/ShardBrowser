@@ -3,6 +3,98 @@
   "repoUrl": "https://github.com/ProxyShard/ShardBrowser",
   "releases": [
     {
+      "version": "2.1.2",
+      "date": "2026-10-25",
+      "entries": [
+        {
+          "id": "drm-module",
+          "title": "Protected video module",
+          "lead": "The module that plays protected video told sites this computer's real operating system and processor.",
+          "tag": "fix",
+          "scope": "browser",
+          "blocks": [
+            {
+              "type": "p",
+              "text": "A site can ask it for a license request without playing anything, and that request carried this computer's system, processor and device details, whatever the profile claimed. It now works the way it does in Chrome, and the first request carries none of them. Protected video plays as before."
+            }
+          ]
+        },
+        {
+          "id": "webgl1",
+          "title": "WebGL 1",
+          "lead": "WebGL 1 answered some settings that only WebGL 2 has, and listed its extensions in a different order than Chrome.",
+          "tag": "fix",
+          "scope": "browser",
+          "blocks": [
+            {
+              "type": "p",
+              "text": "Asking WebGL 1 for a WebGL 2 setting now returns the same error as in Chrome, and extensions come in Chrome's order. The values the profile sets are unchanged."
+            }
+          ]
+        },
+        {
+          "id": "fonts-other-system",
+          "title": "Fonts of another system",
+          "lead": "A profile of another system showed this computer's fonts, such as Mac fonts in a Windows profile on a Mac.",
+          "tag": "fix",
+          "scope": "browser",
+          "blocks": [
+            {
+              "type": "p",
+              "text": "Such a profile now has the fonts of the system it claims: a Windows profile has Segoe UI, Calibri and Consolas and no Mac fonts, and a Mac profile on Windows the other way round. Text is drawn with the closest fonts this computer has, so letter widths are still this computer's."
+            },
+            {
+              "type": "note",
+              "text": "Profiles of the same system as the computer are unchanged."
+            }
+          ]
+        },
+        {
+          "id": "processor-math",
+          "title": "Processor in calculations",
+          "lead": "Some calculations give different results on Apple chips and on Intel or AMD processors, and profiles gave this computer's.",
+          "tag": "fix",
+          "scope": "browser",
+          "blocks": [
+            {
+              "type": "p",
+              "text": "A Mac profile on a Windows or Linux computer, or a Windows profile on a Mac, now gives the results of the processor it claims. Profiles on a computer with the same kind of processor work exactly as before."
+            }
+          ]
+        },
+        {
+          "id": "headless-screen",
+          "title": "Screen in headless mode",
+          "lead": "In headless mode pages were drawn on a small screen at normal scale, whatever screen the profile claims.",
+          "tag": "fix",
+          "scope": "browser",
+          "blocks": [
+            {
+              "type": "p",
+              "text": "Pages are now drawn on the profile's screen at its scale, so text and emoji measure the same as in a window. This works for starts from the launcher, the API and the SDKs."
+            },
+            {
+              "type": "note",
+              "text": "A screen you pass yourself with --screen-info is used as given."
+            }
+          ]
+        },
+        {
+          "id": "apple-webgpu",
+          "title": "WebGPU on Apple profiles",
+          "lead": "macOS profiles with Apple chips lacked one WebGPU feature that Chrome reports on those Macs.",
+          "tag": "fix",
+          "scope": "launcher",
+          "blocks": [
+            {
+              "type": "p",
+              "text": "New profiles have it, and existing ones get it at their next start. Nothing else in the profile changes."
+            }
+          ]
+        }
+      ]
+    },
+    {
       "version": "2.1.1",
       "date": "2026-10-24",
       "entries": [

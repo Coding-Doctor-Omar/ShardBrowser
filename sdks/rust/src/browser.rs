@@ -191,6 +191,7 @@ impl Browser {
             grease_version.as_deref(),
             self.runtime.tls().as_ref(),
         );
+        crate::profile::apply_apple_webgpu_features(&mut profile.config);
         apply_noise_seeds(&mut profile.config, &profile.id);
         let fp_file = udd.join("fingerprint.json");
         std::fs::write(&fp_file, serde_json::to_string(&profile.config)?)?;

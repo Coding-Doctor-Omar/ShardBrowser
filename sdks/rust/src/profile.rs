@@ -308,6 +308,41 @@ pub fn apply_engine_version(
     }
 }
 
+/// WebGPU features Chrome 156 reports on Apple M-series that older templates lack.
+const APPLE_WEBGPU_ADDED: &[&str] = &["texture-compression-unaligned"];
+
+/// Adds `APPLE_WEBGPU_ADDED` to an Apple M-series profile's `webgpu.features`, in
+/// sorted place; touches nothing else. An absent or empty list means "the host's
+/// own" and stays as it is. SDK equivalent of the launcher's profile migration of
+/// the same name.
+pub(crate) fn apply_apple_webgpu_features(config: &mut Value) {
+    let apple_m = config
+        .pointer("/webgl/renderer")
+        .and_then(|v| v.as_str())
+        .and_then(|r| r.find("Apple M").map(|i| &r[i + 7..]))
+        .is_some_and(|rest| rest.starts_with(|c: char| c.is_ascii_digit()));
+    let apple_adapter = config.pointer("/webgpu/vendor").and_then(|v| v.as_str()) == Some("apple");
+    if !apple_m || !apple_adapter {
+        return;
+    }
+    let Some(list) = config.pointer_mut("/webgpu/features").and_then(|v| v.as_array_mut()) else {
+        return;
+    };
+    if list.is_empty() {
+        return;
+    }
+    for &feat in APPLE_WEBGPU_ADDED {
+        if list.iter().any(|v| v.as_str() == Some(feat)) {
+            continue;
+        }
+        let at = list
+            .iter()
+            .position(|v| v.as_str().is_some_and(|s| s > feat))
+            .unwrap_or(list.len());
+        list.insert(at, Value::String(feat.to_string()));
+    }
+}
+
 /// Per-profile state dir (cookies / IndexedDB / cache), preserved across
 /// launches. Defaults to `<profiles_root>/<id>/`.
 pub fn user_data_dir(runtime: &Runtime, profile_id: &str, base: Option<&Path>) -> Result<PathBuf> {
@@ -315,4 +350,40 @@ pub fn user_data_dir(runtime: &Runtime, profile_id: &str, base: Option<&Path>) -
     let d = root.join(profile_id);
     fs::create_dir_all(&d)?;
     Ok(d)
+}
+
+#[cfg(test)]
+mod apple_webgpu_tests {
+    use super::apply_apple_webgpu_features;
+    use serde_json::{json, Value};
+
+    const M1: &str = "ANGLE (Apple, ANGLE Metal Renderer: Apple M1, Unspecified Version)";
+
+    fn mac(renderer: &str, vendor: &str, features: Value) -> Value {
+        json!({ "webgl": { "renderer": renderer }, "webgpu": { "vendor": vendor, "features": features } })
+    }
+
+    #[test]
+    fn an_apple_m_list_gains_the_feature_in_sorted_place_once() {
+        let mut cfg = mac(M1, "apple", json!(["shader-f16", "texture-compression-etc2", "texture-formats-tier1"]));
+        apply_apple_webgpu_features(&mut cfg);
+        apply_apple_webgpu_features(&mut cfg);
+        assert_eq!(
+            cfg["webgpu"]["features"],
+            json!(["shader-f16", "texture-compression-etc2", "texture-compression-unaligned", "texture-formats-tier1"])
+        );
+    }
+
+    #[test]
+    fn other_gpus_and_an_empty_list_are_left_alone() {
+        for mut cfg in [
+            mac("ANGLE (Intel, Intel(R) Iris(TM) Plus Graphics)", "intel", json!(["shader-f16"])),
+            mac(M1, "intel", json!(["shader-f16"])),
+            mac(M1, "apple", json!([])),
+        ] {
+            let before = cfg.clone();
+            apply_apple_webgpu_features(&mut cfg);
+            assert_eq!(cfg, before);
+        }
+    }
 }

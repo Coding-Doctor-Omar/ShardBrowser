@@ -222,6 +222,9 @@ iframes, web workers, developer tools and headless mode.
   opens a DRM page, and the launcher keeps that copy and hands it to
   every profile after — so the CDM is always the version Google is
   currently serving.
+* **Team spaces and sync:** share profiles with a team, or carry your own
+  profiles between computers, through a server you run yourself. See
+  [Team spaces and sync](#5-team-spaces-and-sync-self-hosted).
 * **Synchronised windows:** you work in one window and every other window
   in the group repeats what you did, in its own profile. Pointer,
   keystrokes, scrolling, tabs opened and closed, extension popups. It is
@@ -829,6 +832,95 @@ server-side worker without installing the GUI.
 * **Python:** [sdks/python/README.md](sdks/python/README.md), `pip install shardx`
 * **Node:** [sdks/node/README.md](sdks/node/README.md), `npm install @proxyshard/shardx`
 * **Rust:** [sdks/rust/README.md](sdks/rust/README.md), `cargo add shardx`
+
+### 5. Team spaces and sync (self-hosted)
+
+**Team spaces** let several people work with the same profiles through a
+server you run yourself. **Personal sync** carries your own profiles to
+your other computers through the same kind of server. Nothing goes through
+our infrastructure: the server, its database and the profiles' sessions
+stay on a machine you control.
+
+#### Run the server
+
+It is one program with its database built in. Run it on any machine all
+your computers can reach: a VPS, a home server, a computer that stays on.
+
+With Docker:
+
+```bash
+docker run -d --name shardbrowser-team --restart unless-stopped \
+  -p 8787:8787 -v shardbrowser-team:/data \
+  -e SHARDBROWSER_TEAM_NAME='My team' \
+  -e SHARDBROWSER_TEAM_BIND=0.0.0.0:8787 -e SHARDBROWSER_TEAM_DATA_DIR=/data \
+  ghcr.io/proxyshard/shardbrowser-team-server:latest
+docker logs shardbrowser-team
+```
+
+Or download `shardbrowser-team-server` for Linux x64 / arm64, macOS arm64
+or Windows x64 from the [latest release](https://github.com/ProxyShard/ShardBrowser/releases/latest)
+and start it:
+
+```bash
+chmod +x ./shardbrowser-team-server
+SHARDBROWSER_TEAM_NAME='My team' SHARDBROWSER_TEAM_BIND=0.0.0.0:8787 \
+  SHARDBROWSER_TEAM_DATA_DIR=./team-data ./shardbrowser-team-server
+```
+
+On its first start the server prints an admin invite such as
+`http://203.0.113.10:8787#…`. In the launcher open the space switcher at
+the bottom of the sidebar, choose **Join a team…** and paste it. The
+**Create a team…** guide in the same menu shows these commands with your
+team's name filled in.
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `SHARDBROWSER_TEAM_BIND` | `127.0.0.1:8787` | Address and port to listen on. Use `0.0.0.0:8787` to accept other computers. |
+| `SHARDBROWSER_TEAM_DATA_DIR` | `./data` | Folder with `team.sqlite` and `server.key`. |
+| `SHARDBROWSER_TEAM_NAME` | `Team` | The team's name, read on the first start only. |
+| `SHARDBROWSER_TEAM_TRASH_DAYS` | `30` | Days a deleted team item stays in the team's Trash. |
+| `SHARDBROWSER_TEAM_PUBLIC_URL` | `http://` + bind address | The address invites start with, when the server is reached under another address (NAT, a domain, a port forward). |
+
+`shardbrowser-team-server --print-invite` prints a fresh admin invite at
+any time, also while the server is running.
+
+**Plain http on an IP address is fine, also over the internet.** The
+launcher and the server encrypt the connection themselves, and the invite
+pins the server's key, so no domain, certificate or reverse proxy is
+needed. The server needs ShardBrowser Launcher 2.1.1 or newer.
+
+**Back up the data folder**: `team.sqlite` and `server.key` together. The
+database is encrypted with that key and cannot be read without it.
+
+#### Team spaces
+
+* The admin invites members from the **Team** page and gives rights per
+  team, folder or profile: see, start, edit, create, delete, cookies and
+  take out. The narrowest rule wins; at equal width a refusal wins.
+* A profile is open on one computer at a time. When it closes, its
+  session (cookies, logins, site storage) goes back to the server, and the
+  next person opens it where it was left.
+* Bookmarks, extensions, tags, folders and automation projects can belong
+  to the team as well.
+* Removing a member ends their access at once. Deleted items wait in the
+  team's Trash, 30 days by default.
+* The server does not need the admin online.
+
+#### Personal sync
+
+Open **Settings › Sync** and connect to your own server (with its admin
+invite) or to the server of a team you are in. Then choose what travels:
+profiles with their sessions, proxies, folders, tags, bookmarks,
+extensions and automation projects. To add another computer, copy the
+invite from the same page and paste it there.
+
+* A profile open on one computer cannot start on another until it is
+  closed there.
+* Changes made without a connection are sent when the server is back. If
+  the same profile changed on two computers, both versions are kept.
+* Launcher settings and the fingerprint library stay on each computer.
+  Secret values in automation steps never leave the computer they were
+  typed on.
 
 ---
 

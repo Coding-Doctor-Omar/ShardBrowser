@@ -590,12 +590,118 @@ fn migrate_dir_to(
             }
         }
 
+        if add_apple_webgpu_features(&mut cfg) {
+            changed = true;
+        }
+
         if changed {
             fs::write(&p, serde_json::to_string_pretty(&cfg)?)?;
             n += 1;
         }
     }
     Ok(n)
+}
+
+/// WebGPU features Chrome 156 reports on Apple M-series that older templates lack.
+const APPLE_WEBGPU_ADDED: &[&str] = &["texture-compression-unaligned"];
+
+/// Adds `APPLE_WEBGPU_ADDED` to an Apple M-series `webgpu.features`; touches nothing else.
+/// An absent or empty list means "the host's own", so it stays as it is.
+fn add_apple_webgpu_features(cfg: &mut serde_json::Value) -> bool {
+    let apple_m = cfg
+        .pointer("/webgl/renderer")
+        .and_then(|v| v.as_str())
+        .and_then(|r| r.find("Apple M").map(|i| &r[i + 7..]))
+        .is_some_and(|rest| rest.starts_with(|c: char| c.is_ascii_digit()));
+    let apple_adapter = cfg.pointer("/webgpu/vendor").and_then(|v| v.as_str()) == Some("apple");
+    if !apple_m || !apple_adapter {
+        return false;
+    }
+    let Some(list) = cfg.pointer_mut("/webgpu/features").and_then(|v| v.as_array_mut()) else {
+        return false;
+    };
+    if list.is_empty() {
+        return false;
+    }
+    let mut changed = false;
+    for &feat in APPLE_WEBGPU_ADDED {
+        if list.iter().any(|v| v.as_str() == Some(feat)) {
+            continue;
+        }
+        let at = list
+            .iter()
+            .position(|v| v.as_str().is_some_and(|s| s > feat))
+            .unwrap_or(list.len());
+        list.insert(at, serde_json::Value::String(feat.to_string()));
+        changed = true;
+    }
+    changed
+}
+
+#[cfg(test)]
+mod apple_webgpu_tests {
+    use super::{add_apple_webgpu_features, migrate_dir_to};
+    use serde_json::json;
+
+    const M1: &str = "ANGLE (Apple, ANGLE Metal Renderer: Apple M1, Unspecified Version)";
+
+    fn mac(renderer: &str, vendor: &str, features: serde_json::Value) -> serde_json::Value {
+        json!({
+            "name": "mac-m1-air13",
+            "navigator": { "platform": "macOS" },
+            "webgl": { "renderer": renderer, "extensions": ["ANGLE_instanced_arrays"] },
+            "webgpu": { "vendor": vendor, "architecture": "metal-3", "limits": { "maxBindGroups": 4 }, "features": features },
+        })
+    }
+
+    #[test]
+    fn an_apple_m_list_gains_the_feature_in_place_and_only_once() {
+        let mut cfg = mac(M1, "apple", json!(["shader-f16", "texture-compression-etc2", "texture-formats-tier1", "timestamp-query"]));
+        let before = cfg.clone();
+        assert!(add_apple_webgpu_features(&mut cfg));
+        assert_eq!(
+            cfg["webgpu"]["features"],
+            json!(["shader-f16", "texture-compression-etc2", "texture-compression-unaligned", "texture-formats-tier1", "timestamp-query"])
+        );
+        let mut rest = cfg.clone();
+        rest["webgpu"]["features"] = before["webgpu"]["features"].clone();
+        assert_eq!(rest, before, "only webgpu.features may change");
+
+        let once = cfg.clone();
+        assert!(!add_apple_webgpu_features(&mut cfg), "a second pass must change nothing");
+        assert_eq!(cfg, once);
+    }
+
+    #[test]
+    fn other_gpus_and_host_lists_are_left_alone() {
+        let feats = json!(["shader-f16", "texture-compression-bc"]);
+        let intel_mac = mac("ANGLE (Intel, ANGLE Metal Renderer: Intel(R) UHD Graphics 630, Unspecified Version)", "intel", feats.clone());
+        let windows = json!({ "webgl": { "renderer": "ANGLE (NVIDIA, NVIDIA GeForce RTX 3070 Direct3D11 vs_5_0 ps_5_0, D3D11)" }, "webgpu": { "vendor": "nvidia", "features": feats.clone() } });
+        let mismatched = mac(M1, "intel", feats.clone());
+        let apple_gpu_not_m = mac("ANGLE (Apple, ANGLE Metal Renderer: Apple GPU, Unspecified Version)", "apple", feats.clone());
+        let no_list = json!({ "webgl": { "renderer": M1 }, "webgpu": { "vendor": "apple" } });
+        let empty_list = mac(M1, "apple", json!([]));
+        for mut cfg in [intel_mac, windows, mismatched, apple_gpu_not_m, no_list, empty_list] {
+            let before = cfg.clone();
+            assert!(!add_apple_webgpu_features(&mut cfg));
+            assert_eq!(cfg, before);
+        }
+    }
+
+    #[test]
+    fn the_migration_writes_it_once() {
+        let dir = std::env::temp_dir().join(format!("shardx-apple-webgpu-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("p.json");
+        std::fs::write(&file, mac(M1, "apple", json!(["texture-compression-etc2", "timestamp-query"])).to_string()).unwrap();
+
+        assert_eq!(migrate_dir_to(&dir, "156.0.8078.48", None, None, None).unwrap(), 1);
+        let got: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&file).unwrap()).unwrap();
+        assert_eq!(got["webgpu"]["features"], json!(["texture-compression-etc2", "texture-compression-unaligned", "timestamp-query"]));
+        assert_eq!(migrate_dir_to(&dir, "156.0.8078.48", None, None, None).unwrap(), 0, "a second run must write nothing");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }
 
 /// Fields a profile was created before the library had. A profile keeps its own
@@ -714,13 +820,27 @@ fn migrate_all_to(
     n
 }
 
+/// Raised when `migrate_dir_to` learns a new fix, so a launcher update reruns it once
+/// even on a manifest it has already applied.
+const MIGRATION_REV: u32 = 2;
+
+/// What a migration was applied for; the install path and the start share it.
+fn migration_signature(target: &str, m: &RemoteManifest) -> String {
+    format!(
+        "{target}|{}|{}|{}|{}|m{MIGRATION_REV}",
+        m.grease_brand.as_deref().unwrap_or(""),
+        m.grease_version.as_deref().unwrap_or(""),
+        m.tls.as_ref().map(|t| t.to_string()).unwrap_or_default(),
+        m.engine_build.as_deref().unwrap_or(""),
+    )
+}
+
 /// Startup hook: migrate saved profiles + the fingerprint library (bundled +
 /// user-added) to the manifest's engine descriptor when not already done. One
-/// GitHub-manifest GET (never S3). Guarded by a signature of
-/// `<version>|<grease_brand>|<grease_version>`, so a change to the grease (or any
-/// future manifest field) re-triggers migration even for users already on the
-/// current version — no version bump or constant needed. Also covers users
-/// whose engine auto-updated via the etag path without an explicit install.
+/// GitHub-manifest GET (never S3). Guarded by `migration_signature`, so a change
+/// to any manifest field it covers, or to `MIGRATION_REV`, re-triggers migration
+/// even for users already on the current version. Also covers users whose
+/// engine auto-updated via the etag path without an explicit install.
 pub async fn ensure_profiles_migrated() {
     let m = fetch_manifest().await;
     let Some(target) = m.chromium_version.clone() else { return };
@@ -729,13 +849,7 @@ pub async fn ensure_profiles_migrated() {
     // version, and their profiles would keep the previous release's JA4.
     // engine_build is in the signature too: a release that keeps the Chromium
     // version but changes what the engine does would otherwise migrate nobody.
-    let sig = format!(
-        "{target}|{}|{}|{}|{}",
-        m.grease_brand.as_deref().unwrap_or(""),
-        m.grease_version.as_deref().unwrap_or(""),
-        m.tls.as_ref().map(|t| t.to_string()).unwrap_or_default(),
-        m.engine_build.as_deref().unwrap_or(""),
-    );
+    let sig = migration_signature(&target, &m);
     let mut local = load_manifest();
     if local.applied_signature.as_deref() == Some(sig.as_str()) {
         return;
@@ -973,12 +1087,7 @@ pub async fn runtime_install(window: Window, force: bool) -> Result<RuntimeStatu
     // Migrate already-created profiles AND the fingerprint library (incl.
     // user-added) to the new engine descriptor (UA + client_hints incl. grease).
     // Runs only when the version-or-grease signature changed since last time.
-    let sig = format!(
-        "{target_ver}|{}|{}|{}",
-        manifest.grease_brand.as_deref().unwrap_or(""),
-        manifest.grease_version.as_deref().unwrap_or(""),
-        manifest.tls.as_ref().map(|t| t.to_string()).unwrap_or_default(),
-    );
+    let sig = migration_signature(&target_ver, &manifest);
     if local.applied_signature.as_deref() != Some(sig.as_str()) {
         let n = migrate_all_to(
             &target_ver,

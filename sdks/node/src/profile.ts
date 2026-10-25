@@ -202,6 +202,30 @@ export function applyEngineVersion(
   }
 }
 
+/** WebGPU features Chrome 156 reports on Apple M-series that older templates lack. */
+const APPLE_WEBGPU_ADDED = ["texture-compression-unaligned"];
+
+/**
+ * Add `APPLE_WEBGPU_ADDED` to an Apple M-series profile's `webgpu.features`, in
+ * sorted place; touches nothing else. An absent or empty list means "the host's
+ * own" and stays as it is. Mutates `config` in place. SDK equivalent of the
+ * launcher's profile migration of the same name.
+ */
+export function applyAppleWebGpuFeatures(config: Record<string, unknown>): void {
+  const renderer = (config["webgl"] as Record<string, unknown> | undefined)?.["renderer"];
+  const webgpu = config["webgpu"] as Record<string, unknown> | undefined;
+  if (typeof renderer !== "string" || webgpu?.["vendor"] !== "apple") return;
+  const at = renderer.indexOf("Apple M");
+  if (at < 0 || !/[0-9]/.test(renderer.charAt(at + 7))) return;
+  const list = webgpu["features"];
+  if (!Array.isArray(list) || list.length === 0) return;
+  for (const feat of APPLE_WEBGPU_ADDED) {
+    if (list.includes(feat)) continue;
+    const i = list.findIndex((v) => typeof v === "string" && v > feat);
+    list.splice(i < 0 ? list.length : i, 0, feat);
+  }
+}
+
 /** Per-profile state (cookies / IndexedDB / cache) — preserved across
  *  launches. Defaults to `./shardx-profiles/<id>/` next to the running
  *  script. Override per launch with `userDataDir` or per SDK with

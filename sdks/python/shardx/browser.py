@@ -26,7 +26,7 @@ from .auto_resolve import has_auto_fields, resolve_auto_fields
 from .geo import GeoInfo, geo_check_via
 from .profile import Profile, user_data_dir as _user_data_dir
 from .proxy import ParsedProxy, parse_proxy, probe_udp
-from .runtime import Runtime, apply_engine_version
+from .runtime import Runtime, apply_apple_webgpu_features, apply_engine_version
 from .screen import apply_screen_strategy, default_mode_for
 
 _NOISE_DEFAULT = {
@@ -156,6 +156,7 @@ class Browser:
             self.runtime.grease_version,
             self.runtime.tls,
         )
+        apply_apple_webgpu_features(profile.config)
         apply_noise_seeds(profile.config, profile.id)
         fp_file = udd / "fingerprint.json"
         fp_file.write_text(json.dumps(profile.config), encoding="utf-8")

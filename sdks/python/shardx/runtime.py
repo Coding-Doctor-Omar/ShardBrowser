@@ -27,7 +27,7 @@ import httpx
 PUB_BASE = "https://pub-e57a7c60f6934eb09a6600bf2fc59cdc.r2.dev"
 CHROMIUM_VERSION = "156.0.8078.48"
 # This SDK's own version, compared against the manifest's `min_sdk_version`.
-SDK_VERSION = "2.1.1"
+SDK_VERSION = "2.1.2"
 # Version manifest (GitHub raw) — one tiny GET tells us every archive's current
 # etag, so we never poll R2/S3 (no per-archive HEAD). Updated archives are then
 # pulled from PUB_BASE only when their etag changed.
@@ -159,6 +159,33 @@ def apply_engine_version(
     cfg_tls = config.get("tls")
     if isinstance(tls, dict) and isinstance(cfg_tls, dict):
         cfg_tls.update(tls)
+
+
+# WebGPU features Chrome 156 reports on Apple M-series that older templates lack.
+_APPLE_WEBGPU_ADDED = ("texture-compression-unaligned",)
+
+
+def apply_apple_webgpu_features(config: dict) -> None:
+    """Add `_APPLE_WEBGPU_ADDED` to an Apple M-series profile's
+    `webgpu.features`, in sorted place; touches nothing else. An absent or
+    empty list means "the host's own" and stays as it is. Mutates `config` in
+    place. SDK equivalent of the launcher's profile migration of the same name."""
+    webgl = config.get("webgl")
+    webgpu = config.get("webgpu")
+    renderer = webgl.get("renderer") if isinstance(webgl, dict) else None
+    if not isinstance(renderer, str) or not isinstance(webgpu, dict) or webgpu.get("vendor") != "apple":
+        return
+    at = renderer.find("Apple M")
+    if at < 0 or not renderer[at + 7:at + 8].isdigit():
+        return
+    features = webgpu.get("features")
+    if not isinstance(features, list) or not features:
+        return
+    for feat in _APPLE_WEBGPU_ADDED:
+        if feat in features:
+            continue
+        i = next((k for k, v in enumerate(features) if isinstance(v, str) and v > feat), len(features))
+        features.insert(i, feat)
 
 
 class Runtime:
