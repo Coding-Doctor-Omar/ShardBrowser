@@ -18,6 +18,14 @@ Driven by [patchright](https://github.com/Kaliiiiiiiiii-Vinyzu/patchright-python
 pip install shardx
 ```
 
+To install the browser, use:
+
+```bash
+shardx install
+```
+
+If you don't run `shardx install` directly from the command line, the browser will automatically be installed on the first run.
+
 Supported hosts: **macOS arm64**, **Windows x64**, **Linux x64**.
 
 ### Linux system dependencies
